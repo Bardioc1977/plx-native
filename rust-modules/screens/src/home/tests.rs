@@ -4377,3 +4377,238 @@ fn a_slid_row_names_its_cards_by_listing_position() {
     assert_eq!(ui_cards::CardSource::<TestHost>::global(&cards, 0), 12);
     assert_eq!(ui_cards::CardSource::<TestHost>::global(&cards, 23), 35);
 }
+
+// ---- the wash holds its colours for the length of a held direction key --------------------------
+//
+// The chrome glass reuses its blur snapshot only while the draw arguments beneath it are unchanged,
+// and the wash is the bottom of every one of them: a wash re-keyed to each card a held key crosses
+// changes them every frame. These tests drive the real screen over a row whose cards each have a
+// colour of their own and read the four corner colours the wash RECORDS (`AmbientWash::drawn_corners`).
+
+/// Twelve cards, card `i` keyed to a colour that is its own: a red ramp up, a blue ramp down.
+fn washed_snapshot() -> (plx_data::pms::PmsState, plx_data::pms::HubsSnapshot) {
+    washed_snapshot_of(12)
+}
+
+fn washed_snapshot_of(cards: usize) -> (plx_data::pms::PmsState, plx_data::pms::HubsSnapshot) {
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_recent_window_for_test(&mut state, &adapter, 0, cards, false);
+    plx_data::pms::blur_first_shelf_for_test(&mut state, |i| card_blur(i));
+    let snap = plx_data::pms::hubs_snapshot(&state);
+    (state, snap)
+}
+
+fn card_blur(i: usize) -> [[f32; 3]; 4] {
+    [[0.1 + 0.07 * i as f32, 0.2, 0.9 - 0.07 * i as f32]; 4]
+}
+
+fn recorded_corners(s: &HomeScreen) -> [[u32; 3]; 4] {
+    s.backdrop.wash.drawn_corners().map(|c| c.map(f32::to_bits))
+}
+
+/// The wash colours card `i`'s envelope keys the page to, as the 8-bit codes the GPU is sent.
+fn card_ground(i: usize) -> [[u32; 3]; 4] {
+    AmbientWash::keyed(card_blur(i), PageGround::CARD_W).map(|c| [0, 1, 2].map(|k| (c[k] * 255.0).round() as u32))
+}
+fn corner_codes(s: &HomeScreen) -> [[u32; 3]; 4] {
+    recorded_corners(s).map(|c| c.map(|b| (f32::from_bits(b) * 255.0).round() as u32))
+}
+
+struct WashRig {
+    s: HomeScreen,
+    key: FocusKey<u32>,
+    ms: u32,
+}
+
+impl WashRig {
+    fn new(view: HubsView<'_>) -> Self {
+        let mut s = screen(view);
+        s.snap.pos = 1.0;
+        s.snap_target = 1.0;
+        let key = FocusKey { entry: s.entry, elem: s.rows[0].elems[0] };
+        pop_card(&mut s, view, key, 1);
+        let mut rig = Self { s, key, ms: 16 };
+        rig.frames(view, 240); // the wash dissolves to card 0's ground and rests
+        rig
+    }
+    fn frames(&mut self, view: HubsView<'_>, n: u32) {
+        for _ in 0..n {
+            self.ms += 16;
+            step(&mut self.s, view, Some(self.key), &ScreenEvent::Tick(Tick { ms: self.ms, dt_us: 16_667 }));
+        }
+    }
+    fn key_edge(&mut self, view: HubsView<'_>, edge: Edge) {
+        let ev = ScreenEvent::Input(InputEvent {
+            at: Tick { ms: self.ms, dt_us: 16_667 },
+            source: Source::Sdl,
+            kind: InputKind::Key { key: Key::Right, sym: 0, wcode: 0, edge, at_edge: false },
+        });
+        step(&mut self.s, view, Some(self.key), &ev);
+    }
+    fn right(&mut self, view: HubsView<'_>) {
+        let from = self.key;
+        let Step::Move(to) = Focusable::<TestHost>::neighbour(&self.s, from, Dir::Right, &cx(view, Some(from))) else {
+            panic!("the row ends before the walk does");
+        };
+        step(&mut self.s, view, Some(to), &ScreenEvent::FocusMoved { from: Some(from), to, by: By::Dir });
+        self.key = to;
+    }
+}
+
+#[test]
+fn a_held_direction_key_leaves_the_wash_alone_across_every_focus_move() {
+    let _guard = plx_base::testlock::serial();
+    let (_state, snap) = washed_snapshot();
+    let view = snap.view();
+    let mut rig = WashRig::new(view);
+    assert_eq!(corner_codes(&rig.s), card_ground(0), "the wash rests on card 0's ground");
+    let before = recorded_corners(&rig.s);
+    rig.key_edge(view, Edge::Repeat); // the run is already repeating
+    for _ in 0..8 {
+        rig.right(view);
+        for _ in 0..6 {
+            rig.frames(view, 1);
+            assert_eq!(recorded_corners(&rig.s), before, "the recorded wash changed under a held key");
+        }
+        rig.key_edge(view, Edge::Repeat);
+    }
+}
+
+#[test]
+fn the_wash_re_keys_to_the_resting_card_once_the_held_key_is_released() {
+    let _guard = plx_base::testlock::serial();
+    let (_state, snap) = washed_snapshot();
+    let view = snap.view();
+    let mut rig = WashRig::new(view);
+    rig.key_edge(view, Edge::Repeat);
+    for _ in 0..8 {
+        rig.right(view);
+        rig.frames(view, 6);
+        rig.key_edge(view, Edge::Repeat);
+    }
+    assert_eq!(corner_codes(&rig.s), card_ground(0), "held: still card 0's ground");
+    rig.key_edge(view, Edge::Up);
+    rig.frames(view, 240);
+    assert_eq!(corner_codes(&rig.s), card_ground(8), "released: the wash rests on the card focus rests on");
+}
+
+#[test]
+fn a_single_press_still_re_keys_the_wash_to_the_card_it_lands_on() {
+    let _guard = plx_base::testlock::serial();
+    let (_state, snap) = washed_snapshot();
+    let view = snap.view();
+    let mut rig = WashRig::new(view);
+    rig.key_edge(view, Edge::Down);
+    rig.right(view);
+    rig.key_edge(view, Edge::Up);
+    rig.frames(view, 240);
+    assert_eq!(corner_codes(&rig.s), card_ground(1), "a press with no repeat re-keys to its card");
+}
+
+#[test]
+fn a_settled_wash_records_the_same_bits_frame_after_frame() {
+    let _guard = plx_base::testlock::serial();
+    let (_state, snap) = washed_snapshot();
+    let view = snap.view();
+    let mut rig = WashRig::new(view);
+    rig.key_edge(view, Edge::Down);
+    rig.right(view);
+    rig.key_edge(view, Edge::Up);
+    rig.frames(view, 60); // a second on, the spring's tail is far under one 8-bit code
+    let settled = recorded_corners(&rig.s);
+    for _ in 0..30 {
+        rig.frames(view, 1);
+        assert_eq!(recorded_corners(&rig.s), settled, "the spring's tail leaked into the recorded bits");
+    }
+}
+
+// ---- the chrome glass keeps its blur source along a held row ------------------------------------
+//
+// Measured on the TV, a held RIGHT along the first row re-rendered the chrome glass's blur source on
+// 993 of its frames, each ~6 ms of GPU. These tests walk the same held key through the real page and
+// the same two chrome glasses (the profile chip and the tab track, one shared source) and count the
+// frames on which that source would be re-rendered, `Sources` deciding exactly as it does on the TV.
+
+/// The chrome's two glass surfaces at the geometry the TV logged (`region=8,0,1314,218` before the
+/// non-rising margin): the profile chip's capsule and the tab track, bottom edge `TOP_BAR_BOTTOM`.
+fn chrome_glasses() -> [Rect; 2] {
+    let pad = plx_ui::widgets::TAB_TRACK_PAD;
+    let top = plx_ui::widgets::TOP_BAR_Y - pad;
+    let h = plx_ui::widgets::TAB_PILL_H + 2.0 * pad;
+    let chip = plx_ui::widgets::CHIP_FRAME;
+    [
+        Rect::new(chip.x - pad, top, chip.w + 2.0 * pad, h),
+        Rect::new(560.0, top, 674.0, h),
+    ]
+}
+
+/// One drawn frame of the page plus the chrome glasses; `true` when the chrome source must be
+/// re-rendered (the frame's compare found a difference, or it has never been captured).
+fn chrome_source_stale(rig: &mut WashRig, view: HubsView<'_>, sources: &std::rc::Rc<std::cell::RefCell<plx_gfx::gfx::backdrop::Sources>>) -> bool {
+    use plx_gfx::gfx::backdrop::{commit, discover, layer, Z};
+    sources.borrow_mut().begin(vec![]);
+    {
+        let _walk = discover(sources.clone());
+        let context = cx(view, Some(rig.key));
+        let mut f = DrawFrame::new(&context, Painter::root());
+        plx_gfx::gfx::without_frame_clear(|| Screen::<TestHost>::draw(&mut rig.s, &mut f));
+        let _band = layer(Z::CHROME, true);
+        plx_ui::widgets::declare_chrome_glass_for_test(Painter::root(), &chrome_glasses());
+    }
+    sources.borrow_mut().resolve();
+    let stale = !sources.borrow().entries[&Z::CHROME].valid;
+    commit(sources);
+    stale
+}
+
+/// The pixel row the first row's heading is drawn at: its text is snapped to whole pixels.
+fn heading_px(s: &HomeScreen) -> f32 {
+    plx_gfx::gfx::snap(heading_y(s.grid.base_y(0), s.grid.lift(0)))
+}
+
+/// A held RIGHT along the first row: the chrome glass's blur source is re-rendered ONLY on frames
+/// where the row heading moves a whole pixel, and the heading is the one thing under the chrome's
+/// region that really changes during a hold. The focused card's pop is let go while the key is held,
+/// so the heading (lifted to clear the popped tile, 17 px) settles back to its rest. That is a real
+/// change under the glass's lens (its top is 14 px below the glass), so it is left to invalidate;
+/// it lasts the 16 px of that settle and is over after the first moves of a run.
+///
+/// Everything else the TV logged as changing under a held key is not in this count: the cards'
+/// tops are below the region (`BLUR_REACH` rather than `BLUR_MARGIN`), the wash neither re-keys nor
+/// records below one 8-bit code, and the heading text records the pixel it lands on.
+#[test]
+fn a_held_right_along_the_first_row_re_renders_the_chrome_glass_source_only_for_the_heading_settle() {
+    let _guard = plx_base::testlock::serial();
+    let (_state, snap) = washed_snapshot_of(20);
+    let view = snap.view();
+    let mut rig = WashRig::new(view);
+    let sources = std::rc::Rc::new(std::cell::RefCell::new(plx_gfx::gfx::backdrop::Sources::default()));
+    // settle: the first capture, then the page at rest
+    for _ in 0..3 {
+        chrome_source_stale(&mut rig, view, &sources);
+        rig.frames(view, 1);
+    }
+    assert!(!chrome_source_stale(&mut rig, view, &sources), "a resting page is already stable");
+    rig.key_edge(view, Edge::Repeat);
+    let mut frames = Vec::new(); // (stale, the heading moved this frame)
+    let mut heading = heading_px(&rig.s);
+    let mut moves = 0;
+    for _ in 0..16 {
+        rig.right(view);
+        moves += 1;
+        for _ in 0..6 {
+            rig.frames(view, 1);
+            let now = heading_px(&rig.s);
+            frames.push((chrome_source_stale(&mut rig, view, &sources), now != heading));
+            heading = now;
+        }
+        rig.key_edge(view, Edge::Repeat);
+    }
+    assert!(moves >= 12);
+    let stale = frames.iter().filter(|f| f.0).count();
+    assert!(frames.iter().all(|&(stale, moved)| !stale || moved),
+        "a stale frame the heading did not cause: {frames:?}");
+    assert!(stale <= 17, "{stale} stale frames of {}", frames.len());
+    assert!(frames[frames.len() / 2..].iter().all(|f| !f.0), "the source is still churning half-way through the run");
+}

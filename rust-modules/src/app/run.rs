@@ -2496,12 +2496,17 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
                             plx_base::diag::spans::span("disc", || page(Z::ALL));
                         }
                         sources.borrow_mut().resolve();
+                        // `plxnative-framedrop` armed: which recorded draw invalidated a source.
+                        // Empty (no allocation, no work) unarmed.
+                        for line in sources.borrow_mut().take_diffs() {
+                            log(&line);
+                        }
                         let jobs = sources.borrow().jobs();
                         // Independent bands replay only the strict prefix below their ceiling.
                         // A band intersecting lower glass captures that composite in visible order.
                         for (ceiling, rect) in jobs {
                             let _source_walk = plx_ui::frame::backdrop::enter(sources.clone(), ceiling);
-                            let reg = plx_gfx::gfx::blur_region(rect.x, rect.y, rect.w, rect.h);
+                            let reg = plx_gfx::gfx::blur_region_for(plx_ui::frame::backdrop::rises(ceiling), rect.x, rect.y, rect.w, rect.h);
                             // `src`: one blur source job, its replay of the page prefix included.
                             plx_base::diag::spans::span("src", || {
                                 if plx_gfx::gfx::blur_snapshot_direct(reg, &mut || page(ceiling)) {

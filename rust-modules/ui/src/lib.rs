@@ -435,7 +435,14 @@ impl Painter {
         use frame::backdrop::Value;
         let mut data=vec![tag];
         [self.a,self.rgb].record(&mut data);
-        let m = self.place(r);
+        let mut m = self.place(r);
+        if matches!(tag, 100..=102) && self.zoom.is_none() {
+            // Unzoomed text is drawn at a whole pixel (`text::Placed::origin` snaps it), so the
+            // pixel it lands on is what it can change under a glass, not the float it came from: a
+            // heading easing the last fraction of a pixel into place changes nothing on screen.
+            m.x = plx_gfx::gfx::snap(m.x);
+            m.y = plx_gfx::gfx::snap(m.y);
+        }
         [m.x,m.y,m.w,m.h].record(&mut data);
         values(&mut data);
         // The primitive AA/rim can paint just outside its nominal rectangle.
@@ -976,10 +983,11 @@ impl Painter {
         rim: plx_gfx::gfx::GlassRim,
         face: plx_gfx::gfx::GlassFace,
         deep: f32,
+        rises: bool,
     ) -> bool {
         if self.records() { return false; }
         if frame::backdrop::discovering() {
-            frame::backdrop::surface(self.place(r));
+            frame::backdrop::surface_with(self.place(r), rises);
             self.declare(r,frame::backdrop::GLASS_COMMAND,|data| {
                 use frame::backdrop::Value;
                 (rim as u32).record(data);
@@ -1003,6 +1011,7 @@ impl Painter {
             rim,
             face,
             deep,
+            rises,
         )
     }
     /// [`tex`](Self::tex) with the focus edge-sheen (the 1px inset perimeter rim) baked into the SAME
