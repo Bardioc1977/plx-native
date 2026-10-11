@@ -667,6 +667,111 @@
     measure();
   }
 
+  /* ---------- Press switcher ---------- */
+  // The press list in the markup is the no-JS (and no-script crawler) form: one
+  // linked row per article. With JS it becomes a switcher: outlet names as tabs
+  // on the left, the selected article on stage on the right. The tabs are built
+  // from the list, so a new outlet is one new <li> and nothing here changes.
+  function initPress() {
+    const section = document.querySelector(".press-section");
+    const list = section && section.querySelector(".press-list");
+    if (!list) return;
+    const items = [...list.querySelectorAll(".press-item")].map((a) => {
+      const headline = a.querySelector(".press-headline");
+      const time = a.querySelector(".press-date");
+      const lang = a.querySelector(".press-lang");
+      return {
+        href: a.getAttribute("href"),
+        outlet: a.querySelector(".press-outlet").textContent,
+        language: lang ? lang.textContent : "English",
+        lang: headline.getAttribute("lang") || "en",
+        headline: headline.innerHTML,
+        date: time.textContent,
+        iso: time.getAttribute("datetime"),
+      };
+    });
+    if (items.length < 2) return;
+    items.sort((a, b) => b.iso.localeCompare(a.iso));
+
+    const el = (tag, cls, attrs) => {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      Object.entries(attrs || {}).forEach(([k, v]) => n.setAttribute(k, v));
+      return n;
+    };
+    const arrow = (d) =>
+      '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' + d + '"></path></svg>';
+
+    const root = el("div", "press-switcher", { "data-reveal": "" });
+    const tabs = el("div", "press-tabs", { role: "tablist", "aria-label": "Press coverage", "aria-orientation": "vertical" });
+    const stage = el("div", "press-stage", { role: "tabpanel", "aria-live": "polite" });
+    const meta = el("span", "press-stage-meta");
+    const head = el("span", "press-stage-headline");
+    const foot = el("div", "press-stage-foot");
+    const read = el("a", "press-read");
+    read.textContent = "Read the article →";
+    const pos = el("span", "press-pos");
+    const prev = el("button", "press-step", { type: "button", "aria-label": "Previous article" });
+    const next = el("button", "press-step", { type: "button", "aria-label": "Next article" });
+    prev.innerHTML = arrow("M15 5l-7 7 7 7");
+    next.innerHTML = arrow("M9 5l7 7-7 7");
+    foot.append(read, pos, prev, next);
+    stage.append(meta, head, foot);
+
+    let sel = 0;
+    const buttons = items.map((it, i) => {
+      const b = el("button", "press-tab", { type: "button", role: "tab", id: "press-tab-" + i, title: it.outlet });
+      const label = el("span");
+      label.textContent = it.outlet;
+      b.append(label);
+      b.addEventListener("click", () => select(i, false));
+      return b;
+    });
+    tabs.append(...buttons);
+    tabs.classList.toggle("is-long", items.length > 5);
+
+    const select = (i, focus) => {
+      sel = (i + items.length) % items.length;
+      const it = items[sel];
+      buttons.forEach((b, j) => {
+        const on = j === sel;
+        b.setAttribute("aria-selected", on ? "true" : "false");
+        b.tabIndex = on ? 0 : -1;
+      });
+      stage.setAttribute("aria-labelledby", "press-tab-" + sel);
+      meta.textContent = it.date + " · " + it.language;
+      head.innerHTML = it.headline;
+      head.setAttribute("lang", it.lang);
+      read.setAttribute("href", it.href);
+      if (it.lang !== "en") read.setAttribute("hreflang", it.lang); else read.removeAttribute("hreflang");
+      pos.textContent = String(sel + 1).padStart(2, "0") + " / " + String(items.length).padStart(2, "0");
+      // Centre the active tab inside the tab strip only; never scroll the page.
+      const b = buttons[sel];
+      const horiz = isNarrow();
+      const t = horiz ? b.offsetLeft - (tabs.clientWidth - b.offsetWidth) / 2 : b.offsetTop - (tabs.clientHeight - b.offsetHeight) / 2;
+      tabs.scrollTo(horiz ? { left: Math.max(0, t), behavior: reducedMotion() ? "auto" : "smooth" } : { top: Math.max(0, t), behavior: reducedMotion() ? "auto" : "smooth" });
+      if (focus) b.focus({ preventScroll: true });
+    };
+    prev.addEventListener("click", () => select(sel - 1, false));
+    next.addEventListener("click", () => select(sel + 1, false));
+    tabs.addEventListener("keydown", (e) => {
+      const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key];
+      if (step) { e.preventDefault(); select(sel + step, true); }
+      else if (e.key === "Home") { e.preventDefault(); select(0, true); }
+      else if (e.key === "End") { e.preventDefault(); select(items.length - 1, true); }
+    });
+
+    const left = el("div", "press-side");
+    left.append(tabs);
+    const badge = section.querySelector(".press-badge");
+    if (badge) left.append(badge);
+    root.append(left, stage);
+    list.after(root);
+    section.classList.add("is-switcher");
+    select(0, false);
+  }
+
+  initPress();
   initReveal();
   initSpotlights();
   initHeader();
