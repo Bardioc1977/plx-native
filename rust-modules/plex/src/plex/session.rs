@@ -5609,9 +5609,17 @@ pub mod persistence;
 #[cfg(test)]
 mod migration_tests;
 
+#[cfg(test)]
+mod prefs_characterisation_tests;
+
 #[allow(dead_code)] // Stage B connects typed owner admission/completions.
 pub mod async_persistence;
 mod install_preferences;
+
+#[cfg(test)]
+mod v0;
+#[cfg(test)]
+mod tier1_characterisation_tests;
 
 #[cfg(test)]
 mod direct_play_mode_tests {
