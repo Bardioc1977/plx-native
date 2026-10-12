@@ -95,6 +95,12 @@ pub struct PlaybackSession {
     /// This playback was refused by the cached device sandbox preflight. No Engine exists.
     /// Cleared with the playback verdict on exit/reset, never a process-global error latch.
     pub jail_load_blocked: bool,
+    /// The last FRESH native start was refused because a timed-out Load is still inside
+    /// `sf_load` (an `AbandonedLoad` owns the one native object). No Engine exists, so nothing
+    /// else would publish the failure and the player sat Idle with no read-out. `player::state`
+    /// derives `Error` (cause `load_timeout`) from it. Cleared by the next start attempt and,
+    /// like [`jail_load_blocked`](Self::jail_load_blocked), with the playback verdict.
+    pub native_start_refused: bool,
     /// Read-only publication of Player.repair for the HUD. Never authorizes a resource effect.
     pub repair_status: plx_platform::tv::sandbox::State,
     /// The request which produced this attempt, retained for terminal Retry / Choose quality.
@@ -432,6 +438,7 @@ impl PlaybackSession {
     pub const IDLE: PlaybackSession = PlaybackSession {
         direct_play_mode: DirectPlayMode::Auto,
         jail_load_blocked: false,
+        native_start_refused: false,
         repair_status: plx_platform::tv::sandbox::State::Idle,
         request: None,
         requested_resume_ns: 0,
@@ -506,6 +513,7 @@ impl PlaybackSession {
         let PlaybackSession {
             direct_play_mode,
             jail_load_blocked,
+            native_start_refused,
             repair_status,
             request,
             requested_resume_ns,
@@ -561,6 +569,7 @@ impl PlaybackSession {
         PlaybackSession {
             direct_play_mode: *direct_play_mode,
             jail_load_blocked: *jail_load_blocked,
+            native_start_refused: *native_start_refused,
             repair_status: *repair_status,
             request: request.clone(),
             requested_resume_ns: *requested_resume_ns,
@@ -732,6 +741,16 @@ pub enum RecoveryCause {
 }
 
 impl RecoveryCause {
+    /// Why the open this recovery makes is made, as a failed open reports it: the viewer asked for
+    /// it (an Original pick, or the enhancement they turned off) or the Auto worker did.
+    pub const fn attempt_origin(self) -> crate::player::report::AttemptOrigin {
+        use crate::player::report::AttemptOrigin as O;
+        match self {
+            Self::Automatic => O::AutoHandoff,
+            Self::ManualOriginal | Self::EnhancementReleased => O::QualityChange,
+        }
+    }
+
     /// The log prefix this cause's recovery lines carry.
     fn log_tag(self) -> &'static str {
         match self {
@@ -4115,6 +4134,13 @@ pub(super) fn install_auto_hls_outcome(
         crate::player::report::DeliveryClass::Hls,
         crate::player::report::rung_quality_class(rung),
         reason,
+        match reason {
+            // The source that never opened is replaced by HLS: the app's own recovery.
+            crate::player::report::DeliveryReason::OriginalOpenRollback => {
+                crate::player::report::AttemptOrigin::Recovery
+            }
+            _ => crate::player::report::AttemptOrigin::AutoHandoff,
+        },
     );
     Some(installed)
 }
@@ -4474,6 +4500,7 @@ pub(super) fn install_original_recovery(
         crate::player::report::DeliveryClass::Remux,
         crate::player::report::QualityClass::Original,
         crate::player::report::DeliveryReason::OriginalRecovery,
+        plan.cause.attempt_origin(),
     );
     Some(AutoOriginalReload::Remux)
 }
@@ -4662,6 +4689,7 @@ fn recover_original_direct(
         crate::player::report::DeliveryClass::Direct,
         crate::player::report::QualityClass::Original,
         crate::player::report::DeliveryReason::OriginalRecovery,
+        cause.attempt_origin(),
     );
     Some(AutoOriginalReload::Direct)
 }
@@ -5086,6 +5114,7 @@ fn clear_play_verdict(ps: &mut PlaybackSession) {
     { let s = &mut *ps; {
         s.play_verdict = None;
         s.jail_load_blocked = false;
+        s.native_start_refused = false;
         s.resolve_failed = false;
         s.requested_resume_ns = 0;
     } }
@@ -5128,6 +5157,13 @@ pub fn refuse_by_server_for_test(
     };
     ps.src_vcodec = src_vcodec.to_owned();
     ps.src_acodec = src_acodec.to_owned();
+}
+/// Test-only: leave `ps` as [`apply_plan`] leaves a session RESOLVED for a hero preview, after the
+/// preview machinery has retired it (`preview` cleared, `resolved_as_preview` kept).
+#[cfg(any(test, feature = "test-support"))]
+pub fn resolve_as_preview_for_test(ps: &mut PlaybackSession) {
+    ps.preview = false;
+    ps.resolved_as_preview = true;
 }
 /// Test-only: install a live transcode route (`encoder` session, optional remux, optional
 /// fixed-HLS delivery) the way a successful [`apply_plan`] leaves it.
@@ -6575,6 +6611,23 @@ fn apply_quality_choice(ps: &mut PlaybackSession, q: Quality) {
             .map(|rung| format!(" at {}kbps HLS", rung.kbps()))
             .unwrap_or_default(),
     ));
+    // The pick is a new open of the route it names, whatever the pump makes of the refresh: say so
+    // now, or a failure of that open reads as one of the route the playback had (S5a left this
+    // path with no `DeliveryRequested`, so `attempted_delivery` fell back to the installed route).
+    crate::player::report::note_delivery_requested_for(
+        playback_trace_generation(),
+        if adaptive {
+            crate::player::report::DeliveryClass::Hls
+        } else {
+            crate::player::report::DeliveryClass::Transcode
+        },
+        starting_rung.map_or_else(
+            || crate::player::report::selected_quality_class(q),
+            crate::player::report::rung_quality_class,
+        ),
+        crate::player::report::DeliveryReason::QualityPick,
+        crate::player::report::AttemptOrigin::QualityChange,
+    );
     crate::player::request_transcode_refresh(ps);
 }
 
@@ -7254,7 +7307,8 @@ pub fn clear_preview(ps: &mut PlaybackSession) {
 
 /// Was the installed session resolved for a hero preview? Unlike [`is_preview`], which the
 /// preview machinery clears as it retires the session, this is fixed at landing and only the next
-/// landing replaces it — so no teardown bookkeeping can turn a trailer into a playback.
+/// landing, or the next FILM request (`request_play_inner`), replaces it — so no teardown
+/// bookkeeping can turn a trailer into a playback, and a film that never lands is never told as one.
 ///
 /// **The one gate on every account write a session makes**: the timeline lease
 /// ([`begin_timeline_reporting`]) and the stop scrobble ([`scrobble_stop`]) both ask it, as do the
@@ -7327,6 +7381,7 @@ pub fn request_play(
         None,
         None,
         false,
+        crate::player::report::AttemptOrigin::Fresh,
     )
 }
 
@@ -7358,6 +7413,9 @@ pub fn request_preview(
         None,
         None,
         false,
+        // A preview mints no attempt (`requested` is not called), so the ledger never reads this;
+        // it names the cause truthfully for whoever reads the request.
+        crate::player::report::AttemptOrigin::Preview,
     )
 }
 
@@ -7371,6 +7429,7 @@ fn request_play_inner(
     retry: Option<RetryContext>,
     trace_generation: Option<u32>,
     drain_previous: bool,
+    origin: crate::player::report::AttemptOrigin,
 ) -> bool {
     let sid = request.sid;
     let rk = &request.rk;
@@ -7393,9 +7452,11 @@ fn request_play_inner(
     // under-counts exactly the failure it exists to measure. It is after the empty-request guard
     // above, so a press that resolves to nothing is not an attempt.
     let trace_generation = if request.preview {
+        // No attempt, but a failure latch of its own, reset here as `requested` resets the film's.
+        crate::player::report::preview_requested();
         0
     } else {
-        trace_generation.unwrap_or_else(|| crate::player::report::requested(ps, sid))
+        trace_generation.unwrap_or_else(|| crate::player::report::requested(ps, sid, origin))
     };
     // The fields a play REQUEST owns, as against the ones only a landing may install: the HUD
     // strings (published now, so the pre-roll has a title through the whole resolve) and the five
@@ -7431,7 +7492,17 @@ fn request_play_inner(
         // a resolve that never lands (a refused spawn) would leave nothing else to clear it.
         s.play_verdict = None;
         s.jail_load_blocked = false;
+        s.native_start_refused = false;
         s.resolve_failed = false;
+        // A film request retires the previous trailer's mark: `resolved_as_preview` is otherwise
+        // replaced only by a LANDING, so a film whose resolve never lands (a refused worker spawn)
+        // would report its failure as that trailer's — its origin, fingerprint and flags. The
+        // trailer's engine is already gone: a Play is held until the preview machine releases it
+        // (`content::hold_feature`), so no preview write gate (`scrobble_stop`,
+        // `begin_timeline_reporting`) is still waiting on the mark. A preview request keeps it.
+        if !request.preview {
+            s.resolved_as_preview = false;
+        }
     } };
     // …and the outgoing item's track/marker/chapter store, for exactly the reason above: it stays
     // the PREVIOUS leaf's until this resolve lands. See `metadata::retire_playing_item`.
@@ -7665,12 +7736,15 @@ fn apply_retry_enhancement(env: &mut ResolveEnv, retry: RetryContext) {
 }
 
 /// `direct_play` replaces the failed attempt's Direct Play mode for this resolve (the failure
-/// read-out's *Switch to Auto and play*); `None` keeps it.
+/// read-out's *Switch to Auto and play*); `None` keeps it. `origin` is why the viewer asked: a
+/// Retry press is `user_retry`, a quality pick on the failure screen is `quality_change`. The new
+/// attempt is the NEXT open of the same session, so its ordinal continues the failed one's.
 pub fn retry_current_play(
     ps: &mut PlaybackSession,
     meta: &mut plx_data::stores::metadata::MetadataStore,
     resume_ns: i64,
     direct_play: Option<DirectPlayMode>,
+    origin: crate::player::report::AttemptOrigin,
 ) -> bool {
     let Some(request) = ps.request.clone() else {
         crate::player::log("playback retry: no Plex request descriptor");
@@ -7681,7 +7755,7 @@ pub fn retry_current_play(
         quality(),
     ));
     let retry = retry_context_with(ps, resume_ns, direct_play);
-    request_play_inner(ps, meta, request, Some(retry), None, true)
+    request_play_inner(ps, meta, request, Some(retry), None, true, origin)
 }
 
 /// [`rescue_retry_context`] with the failed attempt's Direct Play mode optionally replaced — the
@@ -7834,7 +7908,16 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
             crate::player::log(
                 "playback resolve: desired contract changed in flight; discarding and resolving the latest contract",
             );
-            let _ = request_play_inner(ps, meta, request, Some(retry), Some(trace_generation), false);
+            let _ = request_play_inner(
+                ps,
+                meta,
+                request,
+                Some(retry),
+                Some(trace_generation),
+                false,
+                // Unused: the attempt is already minted and this resolve continues it.
+                crate::player::report::AttemptOrigin::Fresh,
+            );
         } else {
             cancel_playback_request(ps, has_url(ps));
         }
@@ -7959,6 +8042,7 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
         *s = PlaybackSession {
             direct_play_mode: plan.direct_play_mode,
             jail_load_blocked: false,
+            native_start_refused: false,
             repair_status: plx_platform::tv::sandbox::State::Idle,
             request,
             requested_resume_ns,
