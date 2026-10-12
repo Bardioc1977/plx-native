@@ -2223,6 +2223,20 @@ video::-webkit-media-controls-start-playback-button {
     margin: 0;
   }
 
+  /* The two hero buttons stay side by side: stacked, each as wide as its own
+     label, they read as two unrelated widths. Type and padding scale down with
+     the window so the pair fits a 320px phone; 48px tall keeps the target. */
+  .hero-actions {
+    flex-wrap: nowrap;
+    gap: clamp(8px, 2.6vw, 12px);
+  }
+  .hero-actions .button {
+    flex: 0 1 auto;
+    min-height: 48px;
+    padding: 0 clamp(14px, 4.6vw, 22px);
+    font-size: clamp(14px, 4.2vw, 16px);
+  }
+
   /* The row does not fit a phone's column, and a break left to the browser
      ends a line with a separator. Phones get two lines, broken on purpose
      before the last item, which drops its separator. */
@@ -2511,41 +2525,33 @@ video::-webkit-media-controls-start-playback-button {
   box-shadow: inset 0 1px 0 var(--hairline);
   scroll-margin-top: var(--header-h);
 }
-/* The section's name is a quiet label; the first-person sentence under it,
-   lit word by word, is what reads as the heading. */
+/* The section's slogan, as large as the hero's headline; the first-person
+   sentence under it lights up word by word. */
 .approach-section > h2 {
-  font-size: clamp(17px, 1.5vw, 21px);
-  line-height: 1.3;
+  font-size: clamp(44px, 7vw, 104px);
+  line-height: 1;
   font-weight: 700;
-  margin: 0 0 clamp(20px, 3vh, 32px);
-  letter-spacing: -0.01em;
-  color: var(--text-tertiary);
+  margin: 0 0 clamp(28px, 4.5vh, 52px);
+  letter-spacing: -0.05em;
+  text-wrap: balance;
 }
 .approach-statement {
-  font-size: clamp(28px, 4.4vw, 60px);
-  line-height: 1.12;
+  font-size: clamp(24px, 3.4vw, 46px);
+  line-height: 1.15;
   font-weight: 700;
   letter-spacing: -0.035em;
   text-wrap: pretty;
   max-width: 1100px;
   margin: 0 0 clamp(28px, 4vh, 44px);
 }
-/* The story and its benefits on the left, the stack beside them, so the
-   picture belongs to the same block (one column on narrow screens). */
+/* The story on the left, its two benefits beside it (stacked on phones). */
 .approach-grid {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: clamp(28px, 4vw, 64px);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
+  gap: clamp(24px, 4vw, 64px);
+  align-items: start;
 }
-.approach-copy {
-  flex: 1 1 340px;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: clamp(24px, 3.5vh, 36px);
-}
-.approach-copy > p {
+.approach-lede {
   font-size: clamp(18px, 1.8vw, 23px);
   line-height: 1.5;
   letter-spacing: -0.01em;
@@ -2557,6 +2563,10 @@ video::-webkit-media-controls-start-playback-button {
 .benefit-list > div {
   padding: clamp(14px, 2vh, 20px) 0;
   box-shadow: inset 0 1px 0 var(--color-white-a22);
+}
+.benefit-list > div:first-child {
+  padding-top: 0;
+  box-shadow: none;
 }
 .benefit-list h3 {
   font-size: clamp(21px, 2.2vw, 28px);
@@ -2573,147 +2583,344 @@ video::-webkit-media-controls-start-playback-button {
   margin: 0;
   text-wrap: pretty;
 }
-.approach-diagram {
-  flex: 1 1 380px;
-  min-width: 0;
-  padding: clamp(20px, 2.6vw, 32px);
-  border-radius: 22px;
-  background: linear-gradient(160deg, var(--color-white-a10), var(--color-white-a07) 60%);
-  box-shadow:
-    inset 0 0 0 1px var(--hairline),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1),
-    0 24px 60px rgba(0, 0, 0, 0.45);
+
+/* ---------- The stack scene ---------- */
+/* One idea, one picture: a typical TV app's seven layers as isometric plates,
+   the picture on the app's plate and on the screen, glass with a fine
+   wireframe between. As the page scrolls, the three browser plates
+   (JavaScript, browser engine, compositor) slide away, the four that stay
+   close up into a tight stack, the label turns to "PlxNative", and a still
+   motion blur of the picture shows it dropping straight from the app to the
+   screen, over "60 fps". site.js drives it: --t (0..1, leaving) on each
+   browser plate, --f (its height, in plate widths) on every layer, --k (0..1,
+   the PlxNative end state) on .stack-sticky. Without it (no JS, reduced
+   motion) every value is the settled end state. Pinned for a stretch of
+   scroll on wide screens; on phones and short landscape windows it plays in
+   the page's flow as the stack passes up the screen.
+
+   Geometry, in --W (one plate's width): a plate is 16:9, laid flat by
+   rotateX(60deg) rotateZ(-45deg), which takes a box 1.1 W wide and 0.55 W
+   tall. The seven sit 0.22 W apart (0 to 1.32); the four that stay close up
+   under the app to 0.24 W apart (0 to 0.72), and "60 fps" takes the room below
+   them. Labels sit to the right of the plates; on a narrow phone --W shrinks
+   so they still fit. */
+.stack-scene {
+  margin: clamp(56px, 9vh, 112px) 0 0;
+  --label-w: clamp(150px, 18vw, 240px);
+  --W: min(clamp(160px, min(34vw, 30svh), 400px), calc((100vw - 2 * var(--gutter) - var(--label-w)) / 1.1));
 }
-/* The stack: four isometric slabs, 80px apart, each labelled beside it. The
-   rail and its light streaks are one SVG laid over the slabs' centre line;
-   its 344px are the kicker (24px) plus the four rows. */
-.stack {
-  position: relative;
+.fx .stack-scene {
+  height: 220vh;
+  height: 220svh;
+}
+.stack-sticky {
+  --k: 1;
   display: flex;
   flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(24px, 4vh, 48px);
+  text-align: center;
+}
+.fx .stack-sticky {
+  position: sticky;
+  top: var(--header-h);
+  height: calc(100vh - var(--header-h));
+  height: calc(100svh - var(--header-h));
+}
+@media (max-width: 759px), (max-height: 559px) and (orientation: landscape) {
+  .fx .stack-scene {
+    height: auto;
+  }
+  .fx .stack-sticky {
+    position: static;
+    height: auto;
+  }
+}
+.stack-title {
+  margin: 0;
+  max-width: 22ch;
+  font-size: clamp(28px, 4.2vw, 56px);
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  color: var(--text-tertiary);
+  text-wrap: balance;
+}
+.stack-title strong {
   color: var(--text-primary);
 }
-.stack .kicker {
-  height: 18px;
-  line-height: 18px;
-  margin: 0 0 6px;
-}
-.stack-row {
-  display: flex;
-  align-items: flex-start;
-  gap: clamp(14px, 2vw, 22px);
-  height: 80px;
-}
-.stack-slab {
-  flex: none;
-  display: block;
-  overflow: visible;
-}
-.stack-slab:not(.stack-slab--screen) path {
-  fill: currentColor;
-  stroke: currentColor;
-  stroke-opacity: 0.5;
-  stroke-width: 1.4;
-  stroke-linejoin: round;
-}
-.stack-shadow {
-  fill: currentColor;
-  fill-opacity: 0.1;
-  filter: blur(8px);
-}
-.stack-slab .stack-mark path {
-  fill-opacity: 0.5;
-  stroke: none;
-}
-.stack-slab .stack-grid {
-  fill: none;
-  stroke-width: 1;
-}
-.stack-slab .stack-grid--fine {
-  stroke-opacity: 0.28;
-  stroke-width: 0.8;
-}
-/* The screen is a dark slab whatever the page's ink, with a warm-to-cool glow. */
-.stack-slab--screen path {
-  stroke: #fff;
-  stroke-opacity: 0.3;
-  stroke-width: 1.4;
-  stroke-linejoin: round;
-}
-.stack-slab--screen .stack-screen-glow {
-  stroke: none;
-}
-.stack-row p {
-  min-width: 0;
-  height: 72px;
-  margin: 0;
+.stack-stage {
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 3px;
+  align-items: flex-start;
+  gap: clamp(8px, 1.4vh, 16px);
+  text-align: left;
 }
-.stack-row strong {
-  font-size: clamp(15px, 1.4vw, 17px);
-  line-height: 1.2;
-  font-weight: 700;
+/* "A typical TV app" gives way to "PlxNative": one out, then the other in. */
+.stack-kicker,
+.layer-sub {
+  display: grid;
+  margin: 0;
 }
-.stack-row span {
-  font-size: 14px;
-  line-height: 1.35;
-  color: var(--text-secondary);
-  text-wrap: pretty;
+.stack-kicker > span,
+.layer-sub > span {
+  grid-area: 1 / 1;
 }
-.stack-flow {
+.stack-kicker {
+  font-size: 15px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--text-tertiary);
+}
+.stack-kicker .is-ours {
+  color: var(--text-primary);
+}
+.stack-kicker .is-typical,
+.layer-sub .is-typical {
+  opacity: max(0, 1 - var(--k) * 2);
+}
+.stack-kicker .is-ours,
+.layer-sub .is-ours {
+  opacity: max(0, var(--k) * 2 - 1);
+}
+.stack-layers {
+  position: relative;
+  width: calc(var(--W) * 1.1 + var(--label-w));
+  height: calc(var(--W) * 1.87);
+}
+.layer,
+.ghost {
   position: absolute;
   left: 0;
   top: 0;
+  width: calc(var(--W) * 1.1);
+  height: calc(var(--W) * 0.55);
+  transform: translateY(calc(var(--W) * var(--f)));
+}
+.layer {
+  z-index: var(--z);
+}
+/* The browser plates leave sideways and fade. */
+.layer[data-cut] {
+  --t: 1;
+  opacity: calc(1 - var(--t));
+  transform: translate(calc(var(--W) * var(--t) * -0.45), calc(var(--W) * var(--f)));
+}
+/* Each plate is a pane of glass with an edge: the stepped shadows, offset
+   in the plate's own plane, read as its thickness once it is laid flat. A
+   soft band of light crosses every pane as the scene scrolls (--s, 0..1),
+   the way light runs over a phone turning in a product film. */
+.plate {
+  --edge: 1px 1px 0 rgba(255, 255, 255, 0.28), 2px 2px 0 rgba(255, 255, 255, 0.2), 3px 3px 0 rgba(255, 255, 255, 0.14), 4px 4px 0 rgba(255, 255, 255, 0.09), 5px 5px 0 rgba(255, 255, 255, 0.05);
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--W);
+  height: calc(var(--W) * 0.5625);
+  margin: calc(var(--W) * -0.28125) 0 0 calc(var(--W) * -0.5);
+  border-radius: calc(var(--W) * 0.035);
+  overflow: hidden;
+  transform: rotateX(60deg) rotateZ(-45deg);
+}
+.plate::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(115deg, transparent 38%, rgba(255, 255, 255, 0.16) 50%, transparent 62%) no-repeat;
+  background-size: 300% 100%;
+  background-position: calc(110% - var(--s, 1) * 120%) 0;
+}
+.ghost .plate::after {
+  display: none;
+}
+.plate--picture {
+  background: var(--color-neutral-950);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4), var(--edge), 14px 14px 40px rgba(0, 0, 0, 0.45);
+}
+.plate--picture picture,
+.plate--picture img {
   display: block;
-  overflow: visible;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.plate--glass {
+  background: rgba(255, 255, 255, 0.07);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.32), var(--edge), 14px 14px 40px rgba(0, 0, 0, 0.32);
+}
+/* The wireframes: fine white outlines only. */
+.plate--glass svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.plate--glass path {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.55);
+  stroke-width: 0.7;
+  stroke-linejoin: round;
+}
+.plate--code {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8%;
+  padding: 0 12%;
+}
+.plate--code i {
+  display: block;
+  height: 4%;
+  border-radius: 99px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+}
+.plate--page {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: 22% 1fr;
+  gap: 9%;
+  padding: 9% 10%;
+}
+.plate--page i,
+.plate--panes i {
+  display: block;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+}
+.plate--page i:first-child {
+  grid-column: 1 / -1;
+}
+.plate--page i:last-child {
+  grid-column: span 2;
+}
+.plate--panes i {
+  position: absolute;
+  width: 46%;
+  height: 48%;
+}
+.plate--panes i:nth-child(1) { left: 10%; top: 14%; }
+.plate--panes i:nth-child(2) { left: 30%; top: 30%; }
+.plate--panes i:nth-child(3) { left: 50%; top: 44%; width: 38%; height: 40%; }
+.plate--grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.22) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.22) 1px, transparent 1px);
+  background-size: 6.25% 11.1%;
+}
+/* Light pooling under the screen plate, below the whole stack so it never
+   shows through the glass; it strengthens as the frames arrive (--k). */
+.stack-bloom {
+  position: absolute;
+  z-index: 0;
+  left: calc(var(--W) * 0.05);
+  width: calc(var(--W) * 1);
+  top: calc(var(--W) * (var(--fs, 0.72) + 0.42));
+  height: calc(var(--W) * 0.42);
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(250, 184, 46, 0.5), rgba(120, 150, 220, 0.22) 60%, transparent);
+  filter: blur(calc(var(--W) * 0.08));
+  opacity: calc(0.15 + 0.6 * var(--k));
   pointer-events: none;
 }
-.stack-rail {
-  fill: none;
-  stroke: currentColor;
-  stroke-opacity: 0.22;
-  stroke-width: 1.2;
-  stroke-dasharray: 2 5;
+/* The picture's motion blur, from the app plate down to the screen: ten
+   copies, fainter near the app, blurred together. It comes in once the stack
+   has mostly closed up. */
+.stack-trail {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+  filter: blur(2px);
+  opacity: max(0, var(--k) * 2 - 1);
 }
-/* Three streaks of light shoot down the stack, each crossing it in 0.7s, a
-   third of that apart. Still (and hidden) under reduced motion. */
-.stack-streak {
-  opacity: 0;
+.ghost {
+  opacity: var(--o);
 }
-@media (prefers-reduced-motion: no-preference) {
-  .stack-streak {
-    animation: stack-streak 0.7s linear infinite;
-  }
-  .stack-streak:nth-of-type(2) {
-    animation-delay: 0.23s;
-  }
-  .stack-streak:nth-of-type(3) {
-    animation-delay: 0.46s;
-  }  /* Running only while the diagram is near the screen (site.js sets .is-near
-     where the scroll scenes run): an endless animation off screen still costs
-     a style pass every frame. */
-  .fx .approach-diagram:not(.is-near) .stack-streak {
-    animation-play-state: paused;
-  }
+.ghost .plate {
+  box-shadow: none;
 }
-@keyframes stack-streak {
-  0% {
-    transform: translateY(20px);
-    opacity: 0;
-  }
-  15% {
-    opacity: 1;
-  }
-  80% {
-    opacity: 1;
-  }
-  100% {
-    transform: translateY(300px);
-    opacity: 0;
-  }
+/* Quiet labels, joined to their plate by a hairline. */
+.layer-label {
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-left: clamp(30px, 3.4vw, 46px);
+  font-size: clamp(15px, 1.6vw, 22px);
+  line-height: 1.15;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.layer-label::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.6em;
+  width: clamp(16px, 2vw, 32px);
+  height: 1px;
+  background: var(--color-white-a22);
+}
+.layer[data-cut] .layer-label {
+  color: var(--text-secondary);
+}
+/* While the typical app is still one closed block (--open below 1), only the
+   app's label shows; the others come in as it opens, never on top of each
+   other. */
+.layer:not([data-y0="0"]) .layer-label {
+  opacity: max(0, var(--open, 1) * 2 - 1);
+}
+.layer-sub {
+  font-size: clamp(13px, 1.1vw, 15px);
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+/* 60 fps: centred under the settled stack, in the room the browser plates
+   leave, and in with it. */
+.stack-stat {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(var(--W) * 1.36);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  opacity: var(--k);
+}
+.stack-fps {
+  margin: 0;
+  font-size: clamp(56px, 7vw, 104px);
+  line-height: 0.95;
+  font-weight: 700;
+  letter-spacing: -0.055em;
+}
+/* The number counts up to 60 as the stack closes (site.js), in a warm
+   white taken from the picture; tabular figures, so it never jitters. */
+.stack-fps-n {
+  font-variant-numeric: tabular-nums;
+  background: linear-gradient(180deg, #ffffff 30%, #ffd9a6);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.stack-fps-u {
+  margin-left: 0.12em;
+  font-size: 0.38em;
+  letter-spacing: -0.01em;
+  color: var(--text-tertiary);
+}
+.stack-caption {
+  margin: 0;
+  font-size: clamp(15px, 1.4vw, 19px);
+  color: var(--text-secondary);
 }
 
 /* ---------- Community: support, press glosses ---------- */

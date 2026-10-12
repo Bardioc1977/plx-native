@@ -281,6 +281,14 @@
     }));
     const bigs = [...document.querySelectorAll("[data-scrub-big]")].map((el) => ({ el, top: 0 }));
     const words = splitWords(document.querySelector("[data-words]"));
+    // The stack scene: a typical TV app's plates, whose browser plates leave
+    // while the rest close up (styles.css reads the progress).
+    const stack = document.querySelector(".stack-scene");
+    const stackSticky = stack && stack.querySelector(".stack-sticky");
+    const stackStage = stack && stack.querySelector(".stack-stage");
+    const stackLayers = stack ? [...stack.querySelectorAll("[data-layer]")] : [];
+    const stackCount = stack && stack.querySelector("[data-count]");
+    let stackShown = null;
 
     const demo = initDemoVideo(true);
 
@@ -391,6 +399,15 @@
         d.h = d.el.offsetHeight;
       });
       bigs.forEach((b) => (b.top = docTop(b.el)));
+      if (stack && stackSticky && stackStage) {
+        L.stackFlow = !!(flowQuery && flowQuery.matches);
+        L.stackTop = docTop(stack);
+        L.stackH = stack.offsetHeight;
+        L.stackStickyTop = parseFloat(getComputedStyle(stackSticky).top) || 0;
+        L.stackStickyH = stackSticky.offsetHeight;
+        L.stackStageTop = docTop(stackStage);
+        L.stackStageH = stackStage.offsetHeight;
+      }
       if (words.length) {
         const line = words[0].parentElement;
         L.wordsTop = docTop(line);
@@ -415,9 +432,7 @@
         (entries) => entries.forEach((e) => e.target.classList.toggle("is-near", e.isIntersecting)),
         { rootMargin: "50% 0px" }
       );
-      [pin, ...bigs.map((b) => b.el), ...frames.map((f) => f.frame.parentElement), document.querySelector(".approach-diagram")].forEach(
-        (el) => el && nearby.observe(el)
-      );
+      [pin, ...bigs.map((b) => b.el), ...frames.map((f) => f.frame.parentElement)].forEach((el) => el && nearby.observe(el));
     }
 
     let zoomed = false;
@@ -525,6 +540,53 @@
         set(b.el, "transform", `scale(${(1 + s0 - s0 * t).toFixed(4)})`);
       });
 
+      // The stack scene, p = 0..1: pinned on wide screens, over the scroll
+      // that the pin lasts; in the flow (phones), from when the stack's middle
+      // is at 85% of the window's height until it reaches 40%, so all of it
+      // plays on screen.
+      //   0.00–0.18  the typical app, one closed block, opens up…
+      //   0.20–0.58  …its three browser plates leave, one after another…
+      //   0.46–0.80  …the four that stay close up into a tight stack…
+      //   0.60–0.86  …the label turns to "PlxNative", the picture's motion
+      //              blur comes in and the number counts up to 60.
+      // A band of light crosses the glass over the whole of it.
+      if (stackStage) {
+        const p = L.stackFlow
+          ? clamp01((vh * 0.85 - (L.stackStageTop + L.stackStageH / 2 - y)) / (vh * 0.45))
+          : clamp01((y + L.stackStickyTop - L.stackTop) / Math.max(1, L.stackH - L.stackStickyH));
+        const ease = (a, len) => {
+          const t = clamp01((p - a) / len);
+          return t * t * (3 - 2 * t);
+        };
+        const opened = ease(0, 0.18);
+        const open = 0.22 + 0.78 * opened;
+        setVar(stackSticky, "--open", opened.toFixed(3));
+        const d = ease(0.46, 0.34);
+        let fs = 0;
+        stackLayers.forEach((el) => {
+          const y0 = parseFloat(el.dataset.y0) * open;
+          let f = y0;
+          if (el.dataset.cut !== undefined) {
+            setVar(el, "--t", ease(0.2 + Number(el.dataset.cut) * 0.08, 0.22).toFixed(3));
+          } else {
+            f = y0 + (parseFloat(el.dataset.y1) - y0) * d;
+          }
+          setVar(el, "--f", f.toFixed(4));
+          fs = f;
+        });
+        const k = clamp01((p - 0.6) / 0.26);
+        setVar(stackSticky, "--k", k.toFixed(3));
+        setVar(stackSticky, "--s", p.toFixed(3));
+        setVar(stackSticky, "--fs", fs.toFixed(4));
+        if (stackCount) {
+          const n = String(Math.round(60 * (k * k * (3 - 2 * k))));
+          if (n !== stackShown) {
+            stackShown = n;
+            stackCount.textContent = n;
+          }
+        }
+      }
+
       // The Why sentence lights up word by word in reading order: from when
       // its top is at 90% of the window's height until its bottom reaches
       // 62%, where it is being read, fully lit.
@@ -562,6 +624,14 @@
     if (last[prop] === value) return;
     last[prop] = value;
     el.style[prop] = value;
+  }
+
+  // The same for a custom property.
+  function setVar(el, name, value) {
+    const last = el.__plxStyle || (el.__plxStyle = {});
+    if (last[name] === value) return;
+    last[name] = value;
+    el.style.setProperty(name, value);
   }
 
   // Calls fn whenever the page's layout may have moved: resizes, the load
