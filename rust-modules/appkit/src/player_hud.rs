@@ -1616,12 +1616,15 @@ pub const LINGER_MS: u32 = 4500;
 // ---- scrub tuning, shared by the player HUD's scrubber and the trailer transport's own --------
 //
 // Both hold-to-scrub gestures want the same feel — a press jumps `scrub_step_ns()`; holding engages
-// a continuous scrub stepping `SCRUB_BASE`→`SCRUB_MAX` via [`scrub_speed`] (playback-seconds per real-second) — but the
-// STATE (`screens::player::input::Scrub`, and `screens::detail::trailer::Transport`'s own fields)
-// cannot live in one shared type: `ci/check-deps.sh`'s `sibling` gate forbids a file under
-// `screens/detail/` from naming `crate::screens::player` at all, the same rule that keeps
-// `LINGER_MS` above defined here rather than in `screens::player::input` for `trailer.rs` to
-// import from a sibling. `screens::player::input::Scrub::clamp_target` is a thin call-through to
+// a continuous scrub stepping `SCRUB_BASE`→`SCRUB_MAX` via [`scrub_speed`] (playback-seconds per real-second).
+// The key-hold half of the state (direction, ramp, key-bounce debounce, lost-keyup net) is ONE type,
+// `crate::held_key::HeldKey`, which `screens::player::input::Scrub` and
+// `screens::detail::trailer::Transport` both embed; it lives in `appkit` because
+// `ci/check-deps.sh`'s `sibling` gate forbids a file under `screens/detail/` from naming
+// `crate::screens::player` at all, the same rule that keeps `LINGER_MS` above defined here rather
+// than in `screens::player::input` for `trailer.rs` to import from a sibling. What stays per screen
+// is the preview position, the tap debounce and the HUD's reveal/drag flags.
+// `screens::player::input::Scrub::clamp_target` is a thin call-through to
 // [`scrub_clamp_target`] below so its own many call sites are untouched.
 /// What one fresh press hops: the Skip interval preference (10 s unless Settings changed it),
 /// read per press so a pick takes effect in a film already playing.
@@ -1629,12 +1632,13 @@ pub fn scrub_step_ns() -> i64 {
     plx_media::route::skip_interval().ns()
 }
 /// Playback-seconds per real-second at the start of a hold, and the speed it doubles from.
-pub const SCRUB_BASE: f32 = 10.0;
+pub const SCRUB_BASE: f32 = 60.0;
 /// How long a hold dwells at each speed before doubling — long enough to land on a spot at the
 /// current speed, short enough that crossing a film does not take a held thumb.
-pub const SCRUB_STEP_MS: u32 = 2000;
-/// The fastest a hold gets (reached after five doublings, ten seconds of holding).
-pub const SCRUB_MAX: f32 = 320.0;
+pub const SCRUB_STEP_MS: u32 = 1000;
+/// The fastest a hold gets (reached after three doublings, three seconds of holding; the remote's key repeat only
+/// starts about half a second after the press, so the first second is already spent).
+pub const SCRUB_MAX: f32 = 480.0;
 
 /// The hold-to-scrub speed after `held_ms` of holding: [`SCRUB_BASE`] doubling every
 /// [`SCRUB_STEP_MS`] up to [`SCRUB_MAX`]. Stepped rather than linear so each speed lasts long
@@ -1648,6 +1652,14 @@ pub fn scrub_speed(held_ms: u32) -> f32 {
 // doc for why this debounce exists (coalescing a rapid tap burst into one Load/reload).
 pub const TAP_COMMIT_MS: u32 = 450;
 pub const SCRUB_LOST_MS: u32 = 400; // holding but no repeat this long → lost keyup → commit
+/// How long a key-up of a HELD scrub waits before it counts as the release. The remote's key
+/// driver was measured delivering `Up` and a fresh `Down` 0-17 ms apart in the middle of a hold; a
+/// thumb cannot release and press again that fast, so a same-direction `Down` inside this window
+/// is the same hold. Short enough that a true release commits imperceptibly later.
+pub const SCRUB_RELEASE_DEBOUNCE_MS: u32 = 50;
+/// How long the lost-keyup net waits after such a bounce: the re-press restarts the remote's
+/// ~500 ms auto-repeat delay (measured 499-519 ms), so no repeat can arrive sooner.
+pub const SCRUB_REPEAT_RESTART_MS: u32 = 700;
 
 /// Sets the Skip interval for one test and puts the prior value back on drop. The caller holds
 /// `testlock::serial()`: the live value is a process global, like every preference.
@@ -2136,8 +2148,8 @@ mod tests {
         assert_eq!(scrub_speed(SCRUB_STEP_MS - 1), SCRUB_BASE, "a step holds until its dwell is up");
         assert_eq!(scrub_speed(SCRUB_STEP_MS), 2.0 * SCRUB_BASE);
         assert_eq!(scrub_speed(2 * SCRUB_STEP_MS), 4.0 * SCRUB_BASE);
-        assert_eq!(scrub_speed(4 * SCRUB_STEP_MS), 16.0 * SCRUB_BASE);
-        assert_eq!(scrub_speed(5 * SCRUB_STEP_MS), SCRUB_MAX);
+        assert_eq!(scrub_speed(3 * SCRUB_STEP_MS), SCRUB_MAX);
+        assert_eq!(SCRUB_MAX, 8.0 * SCRUB_BASE, "the cap is a whole step of the ladder");
         assert_eq!(scrub_speed(u32::MAX), SCRUB_MAX, "a very long hold stays at the cap");
         let mut last = 0.0;
         for ms in (0..20_000).step_by(100) {
