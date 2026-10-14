@@ -1218,9 +1218,13 @@ unsafe fn begin_ass_sources(
         if *kind != SubKind::Ass { continue; }
         let cp = stream_codecpar(*streams.add(*si as usize));
         let len = (*cp).extradata_size.max(0) as usize;
-        if len > 0 && len <= ass_source::MAX_HEADER_BYTES && !(*cp).extradata.is_null() {
-            headers.push((track as i32, std::slice::from_raw_parts((*cp).extradata, len).to_vec()));
-        }
+        if len > ass_source::MAX_HEADER_BYTES { continue; }
+        let header: &[u8] = if len == 0 || (*cp).extradata.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts((*cp).extradata, len)
+        };
+        headers.push((track as i32, header.to_vec()));
     }
     let mut fonts = Vec::new();
     let mut font_budget = crate::player::ass::FontBudget::default();
