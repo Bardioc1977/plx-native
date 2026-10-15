@@ -29,6 +29,15 @@ pub enum HubsCmd {
 impl HubsCmd {
     /// Page requests move a window, not the catalog, so they do not bump the notice generation.
     pub fn is_paging(&self) -> bool { matches!(self, HubsCmd::Page { .. } | HubsCmd::CancelPage { .. }) }
+
+    /// Does this command raise the notice whatever it changed? Paging does not (see above), and a
+    /// report of what the server holds (`Facts`, `Offset`) raises it only through the rows it
+    /// altered: one every row already agrees with relays nothing out.
+    fn always_notifies(&self) -> bool {
+        !self.is_paging() && !matches!(self, HubsCmd::ApplyView {
+            edit: crate::viewstate::ViewEdit::Facts { .. } | crate::viewstate::ViewEdit::Offset { .. }, ..
+        })
+    }
 }
 
 pub use crate::pms::Landing as HubsResult;
@@ -229,7 +238,7 @@ impl HubsStore {
         launch: &mut dyn FnMut(crate::pms::HubRequest) -> bool) -> super::StoreOutcome {
         plx_base::testlock::assert_held("controlled hubs store");
         self.prepare_command(cmd.as_ref());
-        let command = cmd.as_ref().is_some_and(|cmd| !cmd.is_paging());
+        let command = cmd.as_ref().is_some_and(HubsCmd::always_notifies);
         let outcome = crate::pms::controlled_work(&mut self.state, &self.adapter, cmd, dt, launch);
         if command || outcome.changed { self.bump(); }
         outcome
@@ -243,7 +252,7 @@ impl HubsStore {
         #[cfg(any(test, feature = "test-support"))]
         plx_base::testlock::assert_held("controlled hubs store with Browse owner");
         self.prepare_command(cmd.as_ref());
-        let command = cmd.as_ref().is_some_and(|cmd| !cmd.is_paging());
+        let command = cmd.as_ref().is_some_and(HubsCmd::always_notifies);
         let outcome = crate::pms::controlled_work_with_directory(&mut self.state, &self.adapter, cmd, dt, directory, launch);
         if command || outcome.changed { self.bump(); }
         outcome
@@ -254,7 +263,7 @@ impl HubsStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn run(&mut self, cmd: HubsCmd) -> super::StoreOutcome {
         self.prepare_command(Some(&cmd));
-        let notice = !cmd.is_paging();
+        let notice = cmd.always_notifies();
         let answer = crate::pms::run(&mut self.state, &self.adapter, cmd);
         if notice || answer.changed { self.bump(); }
         answer
@@ -269,7 +278,7 @@ impl HubsStore {
         directory: crate::stores::browse::DirectoryView<'_>,
     ) -> super::StoreOutcome {
         self.prepare_command(Some(&cmd));
-        let notice = !cmd.is_paging();
+        let notice = cmd.always_notifies();
         let answer = crate::pms::run_with_directory(&mut self.state, &self.adapter, cmd, directory);
         if notice || answer.changed { self.bump(); }
         answer

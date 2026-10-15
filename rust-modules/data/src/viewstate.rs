@@ -149,9 +149,6 @@ impl Scope {
 pub struct StopRecord {
     pub sid: ServerId,
     pub rk: String,
-    /// The show's key for an episode, empty for a movie (the parent rows are not patched yet).
-    pub show_rk: String,
-    pub season_index: i64,
     pub pos_ms: i64,
     pub dur_ms: i64,
     /// The server took the POST. A refused or abandoned one still patches the tile (the viewer did

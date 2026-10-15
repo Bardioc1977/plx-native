@@ -38,7 +38,7 @@ built after `Stores::default` (`HubsStore::from_parts` at boot) takes the ledger
 `Stores::reconcile` (`stores::viewreconcile`, `StoreId::ViewReconcile`, appended after the earlier
 ordinals) is the read-back of a view-state write. ViewState hands it the `(server, ratingKey)` of every
 item whose write landed, taken or refused, once its burst is idle (a stopped playback the server took enqueues its item directly); it reads them with one
-`metadata_many` per server (one in flight per server, an item asked for again meanwhile is marked dirty
+`metadata_many` per server per round (an episode's answer names its season and show, which ride in a second round; one in flight per server, an item asked for again meanwhile is marked dirty
 and re-queued once), stamps the batch from the ledger, drops any row a newer press covers, and publishes
 the rest as `ViewFact::Facts` edits at leaf scope, which, like the stop's `Offset`, patch Home's hubs, Browse's listing, the rows Search, Person and
 Collection hold, and a Detail page's Related and collection-member tiles. Each store counts a Facts
@@ -53,7 +53,8 @@ fetch. Facts are not recorded in the ledger (they are the server's word). `Bridg
 after `viewstate_pump` every frame, and also pumps Browse while a Browse section is owed a membership
 re-query (below): a Library page with another page pushed over it is not ticked.
 Browse marks a section whose membership depends on viewing (Unwatched filter, `lastViewedAt` sort) stale
-when a Facts edit lands in it. The Library screen asks for the re-query (`LibraryWork::Requery`) only once a
+when a Facts edit covers one of its rows, whether or not the row already agrees (the server's answer marks
+staleness; the optimistic press alone does not). The Library screen asks for the re-query (`LibraryWork::Requery`) only once a
 PAGE has been pushed over it (`WillLeave(Deeper)`, then `Cover`), never while it is visible and never under a
 modal such as a compact menu (Sort, Filter, the item menu), which leaves the page visible and ticking; so tiles
 do not leave under the cursor. The re-query is a refresh of the SAME query: the fetch generation moves (a page
