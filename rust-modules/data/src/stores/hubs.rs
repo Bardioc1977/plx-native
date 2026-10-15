@@ -53,6 +53,11 @@ impl Default for HubsStore {
 }
 
 impl HubsStore {
+    /// Join the owner's view-state publish order (`Stores::view_ledger`).
+    pub(crate) fn share_ledger(&mut self, ledger: &crate::viewledger::ViewLedger) {
+        self.state.share_ledger(ledger);
+    }
+
     /// Retire the mailbox at the store command boundary, including when recording controls how
     /// subsequent work is launched. Every command entry point shares this identity-reset rule.
     fn prepare_command(&mut self, cmd: Option<&HubsCmd>) {
@@ -63,7 +68,12 @@ impl HubsStore {
 
     /// Seed a fresh owner from restored boot initial conditions (`pms::initial::Initial::restore`),
     /// before any `Bridge`/`Stores` exists.
-    pub fn from_parts(state: crate::pms::PmsState, adapter: crate::pms::PmsAdapter) -> Self {
+    ///
+    /// Takes the owner's [`crate::viewledger::ViewLedger`] (`Stores::view_ledger`) so a store built
+    /// this way cannot be left outside the view-state publish order: there is no second step to forget.
+    pub fn from_parts(mut state: crate::pms::PmsState, adapter: crate::pms::PmsAdapter,
+        ledger: &crate::viewledger::ViewLedger) -> Self {
+        state.share_ledger(ledger);
         Self { state, adapter: Arc::new(adapter), notice_gen: AtomicU32::new(0), notice_dirty: AtomicBool::new(false) }
     }
 
