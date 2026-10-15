@@ -141,6 +141,27 @@ impl Scope {
     }
 }
 
+/// What a finished playback tells the view state: the position its `stopped` timeline POST
+/// carried, and whether the item was already watched when the play began. Filled by the media layer
+/// when that POST is attempted or abandoned (`route::take_landed_stops`), consumed by
+/// [`crate::stores::Stores::stops_landed`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StopRecord {
+    pub sid: ServerId,
+    pub rk: String,
+    /// The show's key for an episode, empty for a movie (the parent rows are not patched yet).
+    pub show_rk: String,
+    pub season_index: i64,
+    pub pos_ms: i64,
+    pub dur_ms: i64,
+    /// The server took the POST. A refused or abandoned one still patches the tile (the viewer did
+    /// watch up to there) but asks for no read-back, which would undo it.
+    pub ok: bool,
+    /// Watched when the play began (read off the play queue, fetched at play start). An end of
+    /// stream fans out only when this is false and the read-back finds the item watched.
+    pub was_watched: bool,
+}
+
 /// What became true about the item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewFact {
@@ -151,6 +172,10 @@ pub enum ViewFact {
     /// What the server SAID about the item when the read-back asked ([`crate::stores::viewreconcile`]):
     /// the three fields of its watch state, as `pms::parse_item` reads them.
     Facts { watched: bool, unwatched: bool, resume_ms: i64 },
+    /// A stopped playback reported this position (`ms` of `dur_ms`) for the item: the resume point
+    /// the server was just told. Our own word, not the server's: a read-back corrects it when the server
+    /// took the stop, and a refused or abandoned stop leaves it until the item is next read.
+    Offset { ms: i64, dur_ms: i64 },
 }
 
 /// One change to what the app knows about an item's view state, published to every store that
@@ -163,6 +188,11 @@ pub struct ViewChange {
     pub fact: ViewFact,
 }
 
+/// The share of an item's duration at which PMS marks it watched and clears its `viewOffset`
+/// (`docs/pms-api.md` §6: "~90%"). Not [`crate::metadata::resume_ns`]'s 95%, which is where the
+/// client stops OFFERING a resume.
+const WATCHED_PERCENT: i64 = 90;
+
 /// The edit a store applies to the rows a [`ViewAt`] names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewEdit {
@@ -173,6 +203,11 @@ pub enum ViewEdit {
     /// Set the three watch-state fields to what the server answered. Never recorded in the
     /// [`crate::viewledger::ViewLedger`]: it is the server's word, not a press.
     Facts { watched: bool, unwatched: bool, resume_ms: i64 },
+    /// Set the resume point and nothing else: a stop below the server's watched threshold leaves
+    /// `viewCount` alone (so `watched`/`unwatched` stand), and one past it is corrected by the
+    /// read-back that follows every stop the server TOOK (`StopRecord::ok`; a refused or abandoned
+    /// POST owes no read). Like `Facts`, never recorded in the ledger.
+    Offset { ms: i64 },
 }
 
 /// WHICH rows a store edit reaches: the item and the scope it was published with.
@@ -195,6 +230,15 @@ impl ViewChange {
             ViewFact::Facts { watched, unwatched, resume_ms } => {
                 ViewEdit::Facts { watched, unwatched, resume_ms }
             }
+            // never past the end of what was playing; at the watched threshold PMS clears
+            // `viewOffset` (docs/pms-api.md, "Client behavior expected by PMS"), so there is no point
+            ViewFact::Offset { ms, dur_ms } => ViewEdit::Offset {
+                ms: if dur_ms > 0 && ms.saturating_mul(100) >= dur_ms.saturating_mul(WATCHED_PERCENT) {
+                    0
+                } else {
+                    ms.max(0)
+                },
+            },
         }
     }
 }
@@ -243,6 +287,7 @@ impl ViewEdit {
             ViewEdit::Facts { watched, unwatched, resume_ms } => {
                 m.watched != watched || m.unwatched != unwatched || m.resume_ms != resume_ms
             }
+            ViewEdit::Offset { ms } => m.resume_ms != ms,
             ViewEdit::Watched(_) | ViewEdit::LeftDeck => true,
         }
     }
@@ -256,6 +301,7 @@ impl ViewEdit {
                 m.unwatched = unwatched;
                 m.resume_ms = resume_ms;
             }
+            ViewEdit::Offset { ms } => m.resume_ms = ms,
             ViewEdit::LeftDeck => {}
         }
     }
@@ -351,6 +397,10 @@ struct Req {
     /// is why `app.rs` passes nothing at all rather than something close: a wrong guid does not
     /// fail, it marks a different title watched on every other source.
     guid: String,
+    /// The origin server already holds this write (an end of stream it scrobbled itself): skip
+    /// `perform` there — a second scrobble would add a second viewCount — and run only the fan-out
+    /// to the other copies of the title.
+    origin_done: bool,
 }
 
 /// The worker's ONLY output: whether the item's own server took the write it was given, plus the
@@ -389,6 +439,9 @@ pub struct ViewStateState {
     /// handed over by [`ViewStateState::take_reread`] once the burst is idle.
     want_reread: Vec<(ServerId, String)>,
     next_request_id: u64,
+    /// The player is on top: the terminal hub refetch stays owed (`want_hubs`) instead of running
+    /// under the video. Writes and landings are untouched.
+    pub(crate) hold_refresh: bool,
 }
 
 impl Default for ViewStateState {
@@ -402,6 +455,7 @@ impl Default for ViewStateState {
             want_detail: None,
             want_reread: Vec::new(),
             next_request_id: 1,
+            hold_refresh: false,
         }
     }
 }
@@ -484,6 +538,7 @@ impl ViewStateState {
         scope,
         detail,
         guid: guid.to_string(),
+        origin_done: false,
     });
     self.kick(adapter);
     true
@@ -538,6 +593,28 @@ pub fn publish_view(
 /// recall it, and
 /// the one that supersedes it is queued behind it in the order pressed.
 impl ViewStateState {
+    /// The origin server's own end of stream made `(sid, rk)` watched (a first watch, seen by the
+    /// read-back): run only the fan-out of that watched write to the title's other copies, through
+    /// this same serial queue so it stays ordered with the user's toggles. `false` when the item
+    /// already has a write queued or out — a press newer than the stream's end wins, and its own
+    /// fan-out (or its absence) decides.
+    pub(crate) fn fan_out_origin_watched(&mut self, adapter: &Arc<ViewStateAdapter>, sid: ServerId, rk: &str) -> bool {
+        // One server has no other copy to reach: the request would only cost a second hub refetch.
+        if plx_plex::plex::server_ids().nth(1).is_none()
+            || plx_plex::plex::client_for(sid).is_none()
+            || self.queue.iter().chain(self.sent.iter()).any(|r| plx_plex::plex::same_item((r.sid, &r.rk), (sid, rk)))
+        {
+            return false;
+        }
+        let id = self.mint_request_id();
+        self.queue.push(Req {
+            id, seq: 0, sid, rk: rk.to_string(), w: Write::Watched, scope: Scope::Leaf, detail: None,
+            guid: String::new(), origin_done: true,
+        });
+        self.kick(adapter);
+        true
+    }
+
     fn coalesce(&mut self, sid: ServerId, rk: &str, w: Write) {
     let fam = w.family();
     self.queue.retain(|r| !(plx_plex::plex::same_item((r.sid, &r.rk), (sid, rk)) && r.w.family() == fam));
@@ -575,12 +652,13 @@ impl ViewStateState {
             continue;
         };
         let (id, sid, rk, w, guid) = (req.id, req.sid, req.rk.clone(), req.w, req.guid.clone());
+        let origin_done = req.origin_done;
         let worker_adapter = Arc::clone(adapter);
         let spawned = plx_base::task::spawn_small("viewstate", move || {
             // Filled OUTSIDE the guard, so a panicking write still lands (as a failure) rather than
             // latching the queue behind a worker that will never report.
             let done = catch_unwind(move || {
-                let ok = w.perform(c, &rk);
+                let ok = origin_done || w.perform(c, &rk);
                 // The fan-out runs INSIDE this worker rather than beside it. The queue is drained
                 // one worker at a time precisely so two writes for one item cannot land out of
                 // order, and a second thread doing the other sources would put those copies outside
@@ -605,10 +683,12 @@ impl ViewStateState {
             self.retry_cd = RETRY_FRAMES;
             return;
         }
+        // An end-of-stream request writes nothing on its origin: say what it does.
+        let what = if origin_done { "fanout-only" } else { w.name() };
         plx_base::eventlog::log(&format!(
             "viewstate: rk={} {} → server {} (off-thread)",
             req.rk,
-            w.name(),
+            what,
             req.sid.raw()
         ));
         self.sent = Some(req);
@@ -688,13 +768,18 @@ pub fn pump_with_gate(
         // and on failure it is what puts the optimistic edit back to whatever the server really
         // says. A server that can answer neither question leaves the shelves exactly as they
         // are — `pms.rs`'s per-source rule, unchanged.
-        self.want_hubs = true;
+        // (An end-of-stream fan-out that reached no copy changed nothing here: its origin's
+        // read-back, which asked for it, already owes the refresh.)
+        self.want_hubs |= !(r.origin_done && done.also.is_empty());
         // A watched/unwatched write is re-read whatever the server said, on the item and on every
         // copy the fan-out took: on success the answer confirms the optimistic edit, on refusal
         // it is the only thing that puts the tile back. A deck removal changes no field a read
         // reports, so it asks nothing (the hub refetch above reconciles the deck).
         if r.w.propagates() {
-            for key in std::iter::once((r.sid, r.rk.clone())).chain(done.also.iter().cloned()) {
+            // an end-of-stream fan-out wrote nothing on the origin, whose read-back is what
+            // triggered it: only the copies it reached are owed one
+            let origin = (!r.origin_done).then(|| (r.sid, r.rk.clone()));
+            for key in origin.into_iter().chain(done.also.iter().cloned()) {
                 if !self.want_reread.contains(&key) {
                     self.want_reread.push(key);
                 }
@@ -707,7 +792,7 @@ pub fn pump_with_gate(
     if due {
         self.kick(adapter);
     }
-    if self.is_busy() {
+    if self.is_busy() || self.hold_refresh {
         return endpoints; // a burst still has writes to send — one refresh at the end of it, not per write
     }
     let refresh_hubs = std::mem::take(&mut self.want_hubs);
@@ -753,6 +838,7 @@ pub fn hold_inflight_for_test(&mut self, sid: ServerId, rk: &str) {
             scope: Scope::Leaf,
             detail: None,
             guid: String::new(),
+            origin_done: false,
         });
 }
 
@@ -794,6 +880,7 @@ impl ViewStateState {
             scope: Scope::Leaf,
             detail: None,
             guid: String::new(),
+            origin_done: false,
         }
     }
 
@@ -1228,7 +1315,7 @@ mod tests {
         let adapter = Arc::new(ViewStateAdapter::default());
         let id = state.mint_request_id();
         state.sent = Some(Req { id, seq: 0, sid: origin, rk: "7".into(), w: Write::Watched,
-            scope: Scope::Leaf, detail: None, guid: "plex://movie/7".into() });
+            scope: Scope::Leaf, detail: None, guid: "plex://movie/7".into(), origin_done: false });
         *adapter.mail.lock().unwrap_or_else(|e| e.into_inner()) = Some(Completion {
             id,
             done: Done { ok: true, also: vec![(other, "70".into())] },
@@ -1315,6 +1402,7 @@ mod tests {
             scope: Scope::Leaf,
             detail,
             guid: String::new(),
+            origin_done: false,
         }
     }
 
@@ -1522,6 +1610,65 @@ mod tests {
         join.join().unwrap();
     }
 
+    /// The fan-out request an end of stream queues writes nothing on the origin, and when it reached
+    /// no other copy it changed nothing the origin's own read-back (which asked for it) has not
+    /// already brought: it must not owe the hub refetch a second time.
+    fn land_origin_done(also: Vec<(ServerId, String)>) -> Vec<crate::stores::hubs::HubsCmd> {
+        let mut state = ViewStateState::default();
+        let adapter = Arc::new(ViewStateAdapter::default());
+        let id = state.mint_request_id();
+        state.sent = Some(Req { id, seq: 0, sid: ServerId::from_raw(0), rk: "7".into(), w: Write::Watched,
+            scope: Scope::Leaf, detail: None, guid: String::new(), origin_done: true });
+        *adapter.mail.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(Completion { id, done: Done { ok: true, also } });
+        let mut hubs = Vec::new();
+        let _ = state.pump(&adapter, &mut |_| true,
+            &mut |cmd| { hubs.push(cmd); crate::stores::StoreOutcome::default() },
+            &mut |_| false, &mut |_| false, &mut |_| false, &mut |_| false);
+        hubs
+    }
+
+    #[test]
+    fn an_origin_done_fanout_that_reached_no_copy_owes_no_hub_refetch() {
+        let _g = plx_base::testlock::serial();
+        let hubs = land_origin_done(Vec::new());
+        assert!(!hubs.iter().any(|c| matches!(c, crate::stores::hubs::HubsCmd::RefetchHubs)),
+            "nothing changed past what the origin's own read-back brings");
+    }
+
+    #[test]
+    fn an_origin_done_fanout_that_reached_a_copy_owes_one_hub_refetch() {
+        let _g = plx_base::testlock::serial();
+        let hubs = land_origin_done(vec![(ServerId::from_raw(1), "70".into())]);
+        assert_eq!(hubs.iter().filter(|c| matches!(c, crate::stores::hubs::HubsCmd::RefetchHubs)).count(), 1);
+    }
+
+    #[test]
+    fn a_one_server_install_queues_no_origin_done_fanout() {
+        let _g = plx_base::testlock::serial();
+        plx_plex::plex::reset_servers_for_test();
+        let sid = plx_plex::plex::register_for_test("viewstate-one-server", "127.0.0.1", 9, "synthetic", "fixture");
+        let mut state = ViewStateState::default();
+        let adapter = Arc::new(ViewStateAdapter::default());
+        assert!(!state.fan_out_origin_watched(&adapter, sid, "7"));
+        assert!(!state.is_busy(), "no request for a fan-out that has nowhere to go");
+        plx_plex::plex::reset_servers_for_test();
+    }
+
+    /// A stop at or past the server's watched threshold has no resume point: PMS clears `viewOffset`
+    /// there, so the immediate patch must read 0 and not the duration.
+    #[test]
+    fn a_stop_past_the_watched_threshold_patches_a_zero_resume_point() {
+        let at = |ms, dur_ms| ViewChange { sid: ServerId::from_raw(0), rk: "7".into(), scope: Scope::Leaf,
+            fact: ViewFact::Offset { ms, dur_ms } }.edit();
+        assert_eq!(at(60_000, 100_000), ViewEdit::Offset { ms: 60_000 });
+        assert_eq!(at(89_999, 100_000), ViewEdit::Offset { ms: 89_999 });
+        assert_eq!(at(90_000, 100_000), ViewEdit::Offset { ms: 0 });
+        assert_eq!(at(100_000, 100_000), ViewEdit::Offset { ms: 0 });
+        assert_eq!(at(120_000, 100_000), ViewEdit::Offset { ms: 0 });
+        assert_eq!(at(5_000, 0), ViewEdit::Offset { ms: 5_000 }, "an unknown duration clamps nothing");
+    }
+
     /// `reset` is what an identity change leans on: nothing of the previous account's may be left
     /// queued, in flight, or owed a refresh.
     #[test]
@@ -1704,6 +1851,7 @@ mod tests {
             scope: Scope::Leaf,
             detail: None, // no detail re-read: this press came from a Home card menu
             guid: "plex://movie/6856893830a4aaafd5c4291d".into(),
+            origin_done: false,
         });
         *adapter.mail.lock().unwrap_or_else(|e| e.into_inner()) = Some(Completion {
             id,
@@ -1743,6 +1891,7 @@ mod tests {
         state.sent = Some(Req {
             id, seq, sid: SRV_A, rk: "4".into(), w: Write::Watched, scope: Scope::Leaf, detail: None,
             guid: String::new(),
+            origin_done: false,
         });
         *adapter.mail.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(Completion { id, done: Done { ok, also: Vec::new() } });
@@ -1798,6 +1947,7 @@ mod tests {
         state.sent = Some(Req {
             id, seq: first, sid: SRV_A, rk: "4".into(), w: Write::Watched, scope: Scope::Leaf, detail: None,
             guid: String::new(),
+            origin_done: false,
         });
         *adapter.mail.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(Completion { id, done: Done { ok: true, also: Vec::new() } });
