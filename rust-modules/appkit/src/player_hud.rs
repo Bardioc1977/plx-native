@@ -3000,13 +3000,25 @@ mod tests {
         assert_eq!(lay.face, 54, "full Extra large size");
     }
 
+    /// **Huge, the rung above Extra large, keeps the same two lines too**, at its full 65 px (the
+    /// official client's largest caption reads about that size on the TV).
+    #[test]
+    fn a_two_line_cue_at_huge_stays_two_lines_at_full_size() {
+        let huge = size_scale(plx_plex::plex::session::SubtitleSize::Huge);
+        let cue = "I don't know why you came here tonight,\nbut you had better leave right now.";
+        let lines = caption_wrap(cue, huge, &FM);
+        assert_eq!(lines, ["I don't know why you came here tonight,", "but you had better leave right now."]);
+        let lay = caption_layout(lines.len(), huge, SUB_BASE_Y, CAPTION_FLOOR_Y);
+        assert_eq!(lay.face, 65, "full Huge size");
+    }
+
     /// **No wrapped line is wider than the wrap width, and no size's width passes three quarters
     /// of the screen**; only a single word wider than the width keeps a line of its own.
     #[test]
     fn caption_lines_stay_inside_the_wrap_width() {
         use plx_plex::plex::session::SubtitleSize;
         let widths: Vec<f32> = SubtitleSize::LADDER.iter().map(|&s| wrap_width(size_scale(s))).collect();
-        assert_eq!(widths, [760.0 * 0.78, 760.0, 950.0, 1140.0]);
+        assert_eq!(widths, [760.0 * 0.78, 760.0, 950.0, 1140.0, 1368.0]);
         assert!(widths.iter().all(|&w| w <= 1440.0), "{widths:?}");
         assert_eq!(wrap_width(10.0), 1440.0, "any size is capped at 75% of 1920");
         let measure = |s: &str| s.chars().count() as f32 * 10.0;
@@ -3017,7 +3029,7 @@ mod tests {
 
     /// `text_style::today_baseline`/`today_layout` are a port of `caption_geometry`/`caption_layout`
     /// with hard-coded constants (the synthesized ASS header is built from them); this pins that the
-    /// port and the code it replaces cannot drift: 3 positions x 4 sizes x HUD up/down, 1-3 lines.
+    /// port and the code it replaces cannot drift: 3 positions x 5 sizes x HUD up/down, 1-3 lines.
     #[test]
     fn text_style_baseline_ties_to_caption_geometry_and_layout() {
         use plx_media::player::text_style::{today_baseline, today_layout};
@@ -3040,7 +3052,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(n, 24);
+        assert_eq!(n, 30);
     }
 
     /// **A 1-3 line caption lays out exactly as it did before the fit rule**: 36 px at the

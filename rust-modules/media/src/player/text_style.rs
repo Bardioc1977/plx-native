@@ -95,6 +95,7 @@ pub fn size_scale(size: SubtitleSize) -> f32 {
         SubtitleSize::Medium => 1.0,
         SubtitleSize::Large => 1.25,
         SubtitleSize::ExtraLarge => 1.5,
+        SubtitleSize::Huge => 1.8,
     }
 }
 
@@ -287,7 +288,7 @@ mod tests {
     #[test]
     fn scales_and_lifts_are_todays() {
         let scales: Vec<f32> = SubtitleSize::LADDER.iter().map(|s| size_scale(*s)).collect();
-        assert_eq!(scales, [0.78, 1.0, 1.25, 1.5]);
+        assert_eq!(scales, [0.78, 1.0, 1.25, 1.5, 1.8]);
         let lifts: Vec<f32> = SubtitlePosition::LADDER.iter().map(|p| position_lift(*p)).collect();
         assert_eq!(lifts, [0.0, 160.0, 320.0]);
         assert_eq!((SUB_BASE_Y, SUB_CEIL_Y, HUD_LIFT), (980.0, 780.0, 200.0));
@@ -362,7 +363,7 @@ mod tests {
                 assert!(seen.insert(TextStyle { size, position }.generation()), "{size:?} {position:?}");
             }
         }
-        assert_eq!(seen.len(), 12);
+        assert_eq!(seen.len(), 15);
         assert_eq!(TextStyle::default().generation(), TextStyle { size: SubtitleSize::Medium, position: SubtitlePosition::Low }.generation());
     }
 }
