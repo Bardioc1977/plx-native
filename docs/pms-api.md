@@ -1256,10 +1256,10 @@ it is a 400).
 
 ---
 
-## 9. Notifications (SSE) — `/:/eventsource/notifications` (measured on PMS 1.43.4, Guest token; ships OFF)
+## 9. Notifications (SSE) — `/:/eventsource/notifications` (measured on PMS 1.43.4, Guest token; ON for owned servers)
 
 The server pushes what other clients are doing. The app reads it with `plex::notify` (the protocol)
-and `stores::notify` (the policy); both ship dark (`NOTIFY_ENABLED = false`) and the feed opens
+and `stores::notify` (the policy); both ship on (`NOTIFY_ENABLED = true`) and the feed opens
 only to a server the account OWNS. Notifications are hints about a stranger's playback: they never
 reach a timeline, a stop, an end-of-stream candidate or a resume point.
 
@@ -1274,8 +1274,16 @@ Measured against a local server with a Guest token:
   twin is `/:/websockets/notifications` on the server and `/:/websocket/notifications` in the spec.
   The measurements win.
 - **A Guest token receives only `playing` events** (session key, the playing client's
-  `clientIdentifier`, `ratingKey`, `viewOffset`, `state`). `filters=playing` is requested anyway; whether
-  a non-Guest token honours it, and which other types arrive, is owed to the TV checks (watch only).
+  `clientIdentifier`, `ratingKey`, `viewOffset`, `state`). `filters=playing` is requested anyway.
+- **An owner token, watched read-only from the host over loopback HTTP** (one stream at a time, the
+  app's identity headers' client identifier, token in a header, no other request): with
+  `filters=playing`, 601 s: HTTP 200 `text/event-stream`, 60 frames, every one an SSE `ping`
+  (6.0 per minute, about 10 s apart), largest frame 20 bytes, 1320 bytes in all; no `playing` and no
+  other type arrived. Without `filters`, 180 s: 18 frames, again only `ping` (6.0 per minute, largest
+  frame 20 bytes). The server was idle for both windows, so this shows the owner token is accepted,
+  the stream is quiet at rest and no unfiltered type (activity, timeline, status, update) arrived
+  unprompted. It does NOT show whether `filters` suppresses anything, or whether the parser sees a
+  non-`playing` type, because nothing but pings was ever sent; that needs library activity.
 - **A ping about every 10 seconds**, and **no replay**: events missed while disconnected are gone,
   so a reconnect after a live stream must re-read what the screens show (`resync_epoch`).
 - **Scrobble and unscrobble emit nothing.** The feed does not tell a client that an item became
@@ -1316,12 +1324,17 @@ other servers.
 
 Connection policy: idle 25 s ends a stream as `Silent`; `Silent`, `Closed`, a transport failure and a
 5xx retry after 2, 4, 8 ... 60 s counted in frames; a 401 parks the server until its token changes; any
-other 4xx, a build that cannot stream, and a request the credential gate refused park it for the
-session; a background cancels every stream and a foreground reopens them.
+other 4xx and a build that cannot stream (libcurl unbound or only serialised HTTPS) park it for the
+session, while a request the credential gate refused (status 0, a state of the moment) backs off; a background cancels every stream and a foreground reopens them.
 
-TV checks owed before the owner flips the constant: connects on an owned server; ten idle minutes with
-no churn; background and foreground; the network pulled, backoff, reconnect; a profile switch
-reconnects with the new token and never with a blank one.
+TV checks (debug install signed in through `tests/mock_pms.py`'s own plex.tv, so the mock's server
+arrives OWNED and the owned-only rule runs unmodified; `tools/tv-session.sh up --mock-plextv`):
+connects and goes live on an owned server (passed); ten idle minutes with no churn (0 reconnects, 0
+ends in 600 s; passed); the mock stopped and restarted: `Transport` end, escalating Backoff, reconnect,
+exactly one resync (passed); another client's `playing` then `stopped` refetches Continue Watching
+once, and an open Detail re-reads in place with its layout and focus unchanged (passed). NOT
+determined: background and foreground on the set, a profile switch (no sanctioned driver), and
+whether Home focus stays put under a tile update (only the Detail page was captured).
 
 ---
 

@@ -62,8 +62,8 @@ fn detail(rk: &str) -> ContentArg {
 }
 
 #[test]
-fn notifications_ship_off() {
-    assert!(!NOTIFY_ENABLED, "S6: flipping the constant is the owner's decision after the TV checks");
+fn notifications_ship_on() {
+    assert!(NOTIFY_ENABLED, "notifications ship ON; the owned-only rule (S6) is what keeps others dark");
 }
 
 #[test]
@@ -312,6 +312,28 @@ fn two_sessionless_clients_on_one_item_do_not_collide() {
         map(&mut stores, &round(), &[]);
     }
     assert!(pending(&stores).is_empty(), "each client's steady state is no news, not a flip-flop between them");
+}
+
+fn session_lines() -> usize {
+    std::fs::read_to_string(plx_base::eventlog::events_log())
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("notify: sessions"))
+        .count()
+}
+
+#[test]
+fn a_steady_playing_stream_logs_its_first_frame_only() {
+    let _g = plx_base::testlock::serial();
+    plx_base::eventlog::with_private_log(|| {
+        let mut stores = holding(&["s1"]);
+        for _ in 0..50 {
+            map(&mut stores, &one("1", "s1", PlayState::Playing), &[]);
+        }
+        assert_eq!(session_lines(), 1, "the steady frames after the first are no transition and log nothing");
+        map(&mut stores, &one("1", "s1", PlayState::Stopped), &[]);
+        assert_eq!(session_lines(), 2, "a transition logs once");
+    });
 }
 
 #[test]

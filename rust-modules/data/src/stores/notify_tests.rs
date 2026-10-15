@@ -448,9 +448,10 @@ fn data_io_disabled_mid_stream_cancels_it() {
 }
 
 #[test]
-fn disabled_const_never_connects() {
-    // S6: the shipped constant is false, and the store built the way production builds it obeys it.
-    assert!(!NOTIFY_ENABLED, "notifications ship OFF until the owner's TV checks pass (docs/pms-api.md §9)");
+fn enabled_const_connects_to_an_owned_server() {
+    // The shipped constant is true, and the store built the way production builds it (its flag from
+    // the constant) opens exactly one connection to an owned server.
+    assert!(NOTIFY_ENABLED, "notifications ship ON for owned servers (docs/pms-api.md §9)");
     let lock = plx_base::testlock::serial();
     plex::reset_servers_for_test();
     let sid = plex::register_for_test("machine-a", "127.0.0.1", 9, "tok", "cid-own");
@@ -460,12 +461,7 @@ fn disabled_const_never_connects() {
     for _ in 0..10 {
         let _ = store.pump(false);
     }
-    assert_eq!(fake.connects(), 0);
-    // …and a default-built store has no connector that could open one.
-    let mut default = NotifyStore::default();
-    for _ in 0..10 {
-        let _ = default.pump(false);
-    }
+    assert_eq!(fake.connects(), 1);
     plex::reset_servers_for_test();
     drop(lock);
 }

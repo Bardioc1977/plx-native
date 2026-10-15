@@ -1,6 +1,6 @@
 //! **What a PMS notification asks of the screens** (layer-2 view state, L2-4): the mapping from
 //! [`NotifyOut`] (what other clients are playing, already stripped of our own sessions) to reads of
-//! OUR state. It ships dark with the feed (`notify::NOTIFY_ENABLED`).
+//! OUR state. It runs with the feed (`notify::NOTIFY_ENABLED`, owned servers only).
 //!
 //! **A notification is a hint, never a playback event** (S5). Nothing here calls
 //! `enqueue_stop`, adds an end-of-stream candidate or publishes an Offset: a stranger's `stopped`
@@ -42,6 +42,37 @@ use plx_plex::plex::ServerId;
 pub const MAX_SESSIONS: usize = 64;
 
 type Key = (ServerId, String);
+
+/// Sessions whose state CHANGED this pump (what `observe` accepted), by state. A steady `playing`
+/// frame repeats every few seconds for the length of a film and is no news, so it is not counted
+/// and not logged. Counts only: a session names another household member's playback, so no key,
+/// title or client id is ever logged.
+#[derive(Default)]
+struct Transitions([usize; 5]);
+
+impl Transitions {
+    fn note(&mut self, state: PlayState) {
+        self.0[match state {
+            PlayState::Playing => 0,
+            PlayState::Paused => 1,
+            PlayState::Buffering => 2,
+            PlayState::Stopped => 3,
+            PlayState::Other => 4,
+        }] += 1;
+    }
+
+    /// One line per pump that saw a transition; nothing otherwise.
+    fn emit(&self) {
+        if self.0.iter().all(|n| *n == 0) {
+            return;
+        }
+        let by = self.0;
+        plx_base::eventlog::log(&format!(
+            "notify: sessions playing={} paused={} buffering={} stopped={} other={}",
+            by[0], by[1], by[2], by[3], by[4]
+        ));
+    }
+}
 
 /// What one [`Stores::notify_map`] call actually spent.
 #[derive(Default, Debug, PartialEq)]
@@ -223,6 +254,7 @@ impl Stores {
             self.notify_map.forget_server(*sid);
         }
         if !out.plays.is_empty() {
+            let mut changed = Transitions::default();
             let held = self.held(pages, shown);
             for plays in &out.plays {
                 for s in &plays.sessions {
@@ -236,6 +268,7 @@ impl Stores {
                     if !self.notify_map.observe(plays.sid, &session, rk, s.state) {
                         continue;
                     }
+                    changed.note(s.state);
                     let detail = held.detail(plays.sid, rk);
                     let is_held = detail || held.card(plays.sid, rk);
                     let owed = &mut self.notify_map.owed;
@@ -250,6 +283,7 @@ impl Stores {
                     }
                 }
             }
+            changed.emit();
         }
         self.spend_notify_owed(directory)
     }
@@ -260,6 +294,13 @@ impl Stores {
             return spent;
         }
         let owed = std::mem::take(&mut self.notify_map.owed);
+        plx_base::eventlog::log(&format!(
+            "notify: owes reads={} (detail={}) refetch={} invalidate={}",
+            owed.reads.len(),
+            owed.reads.iter().filter(|(_, d)| *d).count(),
+            owed.refetch.len(),
+            owed.invalidate.len()
+        ));
         for (key, owing) in owed.reads {
             if owing {
                 self.reconcile.enqueue([key]);

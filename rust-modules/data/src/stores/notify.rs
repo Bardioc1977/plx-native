@@ -2,10 +2,12 @@
 //! notification connection, when a dropped one is retried, and what a reconnect owes the screens.
 //! The protocol is `plx_plex::plex::notify`; this is the policy around it.
 //!
-//! **It ships OFF.** [`NOTIFY_ENABLED`] is `false` and a connection opens only to a server this
-//! account OWNS: a friend's share, a household member's server and a server nothing has described
-//! yet all stay dark. The feed names other people's playback, and the owner turns it on only after
-//! the TV checks in `docs/pms-api.md` §9 have passed.
+//! **It ships ON, for owned servers only.** [`NOTIFY_ENABLED`] is `true` and a connection opens
+//! only to a server this account OWNS: a friend's share, a household member's server and a server
+//! nothing has described yet all stay dark. The feed names other people's playback, so that rule is
+//! the one that must not loosen. `docs/pms-api.md` §9 records what the mock-TV run verified (connect,
+//! idle, backoff, a tile, a detail page) and what is still owed to the set (background/foreground,
+//! a profile switch, a real network loss).
 //!
 //! **A notification here is a hint, never a playback event.** Nothing in this module calls
 //! `enqueue_stop`, adds an end-of-stream candidate or publishes an Offset: a stranger's `stopped`
@@ -30,9 +32,10 @@ use plx_plex::plex::ServerId;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Ships `false`. Flipping it is the owner's decision after the L2-2 TV checks (`docs/pms-api.md`
-/// §9); `notify_tests::disabled_const_never_connects` is the tripwire that makes it a deliberate edit.
-pub const NOTIFY_ENABLED: bool = false;
+/// Ships `true`. `docs/pms-api.md` §9 lists what was checked on the mock TV and what is still owed. The owned-only rule is separate and
+/// unconditional; `notify_tests::enabled_const_connects_to_an_owned_server` and
+/// `non_owned_never_connects` pin both halves.
+pub const NOTIFY_ENABLED: bool = true;
 
 /// Pumps per second the backoff is written against (the frame loop's rate).
 pub const FRAMES_PER_S: u64 = 60;
@@ -178,6 +181,7 @@ fn bump_epoch(resync: &mut Vec<(ServerId, u32)>, sid: ServerId, out: &mut Notify
         }
     };
     out.resynced.push((sid, epoch));
+    plx_base::eventlog::log(&format!("notify: resync sid={} epoch={epoch}", sid.raw()));
 }
 
 impl Conn {
@@ -412,6 +416,12 @@ impl NotifyStore {
             return;
         }
         self.seen = marker;
+        {
+            let all: Vec<_> = plx_plex::plex::server_ids().collect();
+            let described = all.iter().filter(|&&s| plx_plex::plex::server_facts(s).is_some()).count();
+            let owned_n = all.iter().filter(|&&s| plx_plex::plex::server_facts(s).is_some_and(|f| f.owned)).count();
+            plx_base::eventlog::log(&format!("notify: roster servers={} described={described} owned={owned_n}", all.len()));
+        }
         let owned = |sid: ServerId| plx_plex::plex::server_facts(sid).is_some_and(|f| f.owned);
         self.conns.retain_mut(|c| {
             let keep = owned(c.sid) && plx_plex::plex::client_for(c.sid).is_some();
@@ -440,6 +450,7 @@ impl NotifyStore {
 
     /// WILL background: every connection is cancelled now and none opens until [`Self::resume`].
     pub fn suspend(&mut self) {
+        plx_base::eventlog::log(&format!("notify: suspend conns={}", self.conns.len()));
         self.suspended = true;
         for conn in &mut self.conns {
             conn.drop_link();
@@ -454,6 +465,7 @@ impl NotifyStore {
     /// DID foreground: connections may open again, and a pending backoff is forgiven. A parked
     /// server stays parked.
     pub fn resume(&mut self) {
+        plx_base::eventlog::log(&format!("notify: resume conns={}", self.conns.len()));
         self.suspended = false;
         for conn in &mut self.conns {
             if matches!(conn.state, State::Backoff { .. }) {
@@ -466,6 +478,7 @@ impl NotifyStore {
     /// The network may have changed under every open connection: cancel them all and reconnect.
     /// Backoff is forgiven; a parked server stays parked (a refusal is not about the network).
     pub fn network_changed(&mut self) {
+        plx_base::eventlog::log(&format!("notify: network changed conns={}", self.conns.len()));
         for conn in &mut self.conns {
             conn.drop_link();
             conn.gap_owed = false;
