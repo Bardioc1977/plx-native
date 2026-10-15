@@ -272,7 +272,6 @@ pub(crate) unsafe fn run(app: &mut App) {
         // dithers on every frame.)
         fr.underlay_moving |= tree_report.underlay_moving;
         if was_player && super::bridge::player(&app.pages).is_none() { restore_played_entry(app); }
-        refresh_after_playback(app);
         content_requests(app, fr);
         crate::dev::scenarios::advance_content_boot(app, fr);
         loop_requests(app);
@@ -2335,8 +2334,11 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
         super::bridge::execute_endpoint_outcomes(&mut app.pages, upgrades);
         app.bridge.person_pump();
         app.bridge.collection_pump();
-        if let Some(target) = app.bridge.take_detail_refresh() {
-            refresh_content(&mut app.pages, &mut app.bridge, target);
+        // …and the Detail pages whose item, season or show it just spoke about: re-read from the
+        // server's word, wherever on the stack they are (`content::reconcile_details`).
+        let landed = app.bridge.take_landed_views();
+        if !landed.is_empty() {
+            reconcile_details(&mut app.pages, &mut app.bridge, &landed);
         }
         // …and the cross-source resolve it kicked off. Route-unconditional for the same reason,
         // and separate because it lands one round trip per source LATER than the page does —
@@ -3157,7 +3159,6 @@ mod lifecycle_regression_tests {
             menu_play_await: Default::default(),
             prev: Default::default(),
             refresh_hubs: Default::default(),
-            refresh_detail: None,
             plaintext_upgrade: Default::default(),
             ev: [0; 128],
             remote: Default::default(),
@@ -3817,7 +3818,12 @@ mod lifecycle_regression_tests {
                         let _ = wait.recv_timeout(Duration::from_secs(5));
                     }
                     let body = respond(&request);
-                    let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    // a handler answers `!503` for a refusal: a 5xx with an empty body
+                    let (status, body) = match body.as_str() {
+                        "!503" => ("503 Service Unavailable", String::new()),
+                        _ => ("200 OK", body),
+                    };
+                    let _ = write!(socket, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 }
             }) {
                 Some(h) => h,
@@ -4596,7 +4602,6 @@ mod lifecycle_regression_tests {
         if was_player && super::super::bridge::player(&app.pages).is_none() {
             restore_played_entry(app);
         }
-        refresh_after_playback(app);
         content_requests(app, &fr);
         loop_requests(app);
         unsafe { update(app, &mut fr); }
@@ -4898,18 +4903,17 @@ mod lifecycle_regression_tests {
         step(&mut rig.app, &mut t, vec![back]);
         settle(&mut rig.app, &mut t);
         assert!(super::super::bridge::player(&rig.app.pages).is_none(), "premise: BACK left the player");
-        // The re-read waits for the stop report, which a worker thread posts. These frames take no
-        // wall time, so counting them races that thread (a loaded host lost the race and the page
-        // had re-read nothing "yet"). Wait for the report itself, then give the loop the one frame
-        // in which `refresh_after_playback` finds it settled.
+        // The re-read waits for the stop report AND the read-back it owes (`Stores::stops_landed`),
+        // both of which a worker thread answers, and these frames take no wall time: wait for the
+        // generation itself rather than counting frames.
+        // The rig's engine decodes no frame, so its own teardown has no final position to report:
+        // post the stop it would have (the production path past that point, mail and read-back).
+        plx_media::route::scrobble_stop(&mut rig.app.player.session, Some(("1".into(), 30_000, 60_000)), None);
         plx_media::route::drain_scrobble();
-        step(&mut rig.app, &mut t, vec![]);
-        let reads_after = plx_data::metadata::detail_generation_for_test(rig.app.bridge.metadata_mut().adapter_ref());
-        assert!(
-            reads_after > reads_before,
-            "returning to the page re-read nothing: its resume point is still the one it opened with",
-        );
-        assert!(rig.app.refresh_detail.is_none(), "the re-read is asked for once, not left owed");
+        poll_until("returning to the page re-read nothing: its resume point is still the one it opened with", || {
+            step(&mut rig.app, &mut t, vec![]);
+            plx_data::metadata::detail_generation_for_test(rig.app.bridge.metadata_mut().adapter_ref()) > reads_before
+        });
     }
 
     /// **Issue #680**: a show's Detail page, an episode played to its end, and the episode strip
@@ -4981,13 +4985,152 @@ mod lifecycle_regression_tests {
         plx_media::player::SHARED.ended.store(true, std::sync::atomic::Ordering::Relaxed);
         settle(&mut rig.app, &mut t);
         assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(origin), "EOS returned to the page");
+        // The rig's engine decodes no frame, so its own teardown has no final position to report:
+        // post the stop it would have (the production path past that point, mail and read-back).
+        plx_media::route::scrobble_stop(&mut rig.app.player.session, Some(("1".into(), 60_000, 60_000)), None);
         plx_media::route::drain_scrobble();
-        step(&mut rig.app, &mut t, vec![]);
+        // The page learns of the stop from the read-back of the episode (and of its show, which the
+        // episode's answer names), each a worker round trip: wait for the re-read, not for frames.
+        poll_until("the episode strip still shows the read the page opened with", || {
+            step(&mut rig.app, &mut t, vec![]);
+            rig.app.bridge.metadata_mut().adapter_ref().run_held_detail_fetches_for_test();
+            rig.app.bridge.metadata_mut().pump_detail();
+            watched(&mut rig) == Some(("1".into(), true))
+        });
+        settle(&mut rig.app, &mut t);
+        assert_eq!(watched(&mut rig), Some(("1".into(), true)));
+    }
+
+    /// A show (100) of one season (200) of two episodes, served as the server holds it: nothing is
+    /// watched until a `/:/scrobble` arrives, then everything is (the show's and the season's
+    /// `viewedLeafCount` included). `marked` is that flag; `reads` counts the metadata reads the
+    /// server answered after it, so a test can see a re-read go out.
+    /// `partial`: the server takes the write but only gets as far as the first episode, so what it
+    /// then holds (one of two watched) differs from what the optimistic patch drew (both).
+    fn marked_show_server(marked: Arc<AtomicBool>, partial: bool) -> impl Fn(&str) -> String + Send + 'static {
+        move |request: &str| {
+            let done = marked.load(Ordering::SeqCst);
+            let (count, viewed) = if done { (r#","viewCount":1"#, if partial { 1 } else { 2 }) } else { ("", 0) };
+            let second = if done && !partial { count } else { "" };
+            if request.contains("/:/scrobble") {
+                marked.store(true, Ordering::SeqCst);
+                return "{}".into();
+            }
+            if request.contains("/library/metadata/200/children") {
+                return format!(r#"{{"MediaContainer":{{"size":2,"totalSize":2,"Metadata":[
+                  {{"ratingKey":"1","type":"episode","index":1,"parentIndex":1,"title":"First","duration":60000{count}}},
+                  {{"ratingKey":"2","type":"episode","index":2,"parentIndex":1,"title":"Next","duration":60000{second}}}]}}}}"#);
+            }
+            if request.contains("/library/metadata/100/children") {
+                return format!(r#"{{"MediaContainer":{{"Metadata":[{{"ratingKey":"200","type":"season","index":1,"title":"Season 1","leafCount":2,"viewedLeafCount":{viewed}}}]}}}}"#);
+            }
+            if request.contains("/related") || request.contains("/extras") || request.contains("/:/timeline") {
+                return r#"{"MediaContainer":{}}"#.into();
+            }
+            if request.contains("/library/metadata/100") {
+                return format!(r#"{{"MediaContainer":{{"Metadata":[{{"ratingKey":"100","type":"show","title":"Show","childCount":1,"leafCount":2,"viewedLeafCount":{viewed}}}]}}}}"#);
+            }
+            r#"{"MediaContainer":{}}"#.into()
+        }
+    }
+
+    /// The show page open and landed (the fixture parks its first request until released).
+    fn open_marked_show(rig: &mut Rig, t: &mut u32) {
+        rig.release.send(()).unwrap();
+        settle(&mut rig.app, t);
+        super::super::bridge::open_detail(&mut rig.app.pages, &mut rig.app.bridge, rig.sid, "100", None, None);
+        settle(&mut rig.app, t);
+        land_detail_reads(rig, t);
+    }
+
+    /// Run the held detail fetches (tests do not race a worker) and install what they brought.
+    fn land_detail_reads(rig: &mut Rig, t: &mut u32) {
         rig.app.bridge.metadata_mut().adapter_ref().run_held_detail_fetches_for_test();
         rig.app.bridge.metadata_mut().pump_detail();
+        settle(&mut rig.app, t);
+    }
+
+    /// A Person page pushed over the page on top (a cast member opened from it).
+    fn cover_with_person(rig: &mut Rig, t: &mut u32) {
+        let below = rig.app.pages.nav.top_page().unwrap().id;
+        super::super::bridge::nav_push(&mut rig.app.pages, AppArg::Content(plx_screens::registry::ContentArg::Person {
+            sid: rig.sid, key: "9".into(), guid: "tag://9".into(), name: String::new(), thumb: String::new(),
+        }));
+        settle(&mut rig.app, t);
+        assert_ne!(rig.app.pages.nav.top_page().map(|e| e.id), Some(below), "premise: the Person page covers it");
+    }
+
+    /// The filmography menu's Mark watched on the show (a Show-scope press from a catalog row), run
+    /// until the server has taken it and been asked what it now holds.
+    fn mark_show_and_read_back(rig: &mut Rig, t: &mut u32) {
+        assert!(rig.app.bridge.viewstate_run(plx_data::stores::viewstate::ViewStateCmd::Request {
+            sid: rig.sid, rk: "100".into(), write: plx_data::viewstate::Write::Watched,
+            scope: plx_data::viewstate::Scope::Show, guid: String::new(),
+        }));
+        poll_until("the write and its read-back never finished", || {
+            step(&mut rig.app, t, vec![]);
+            let seen = rig.requests.lock().unwrap();
+            seen.iter().position(|r| r.contains("/:/scrobble"))
+                .is_some_and(|at| seen.iter().skip(at).any(|r| r.contains("GET /library/metadata/100") && !r.contains("children")))
+        });
+        for _ in 0..12 { step(&mut rig.app, t, vec![]); }
+    }
+
+    /// The loaded show's episodes as `(rk, watched)`, and its season's `viewedLeafCount`.
+    fn strip(rig: &Rig) -> (Vec<(String, bool)>, Option<i64>) {
+        let view = rig.app.bridge.metadata_view();
+        let Some(d) = view.current().filter(|d| d.rk == "100") else { return (Vec::new(), None) };
+        let eps = (0..2).filter_map(|i| d.episodes.get(i).map(|e| (e.rk.clone(), e.watched))).collect();
+        (eps, d.seasons.first().map(|s| s.viewed_leaf_count))
+    }
+
+    /// **Plan item 9**: Detail(show S) -> Person -> mark S watched from the filmography menu ->
+    /// Back. The Detail page was COVERED when the server's answer came back, and the only thing
+    /// that reached it was the optimistic patch; the page it returns to must show what the server
+    /// now holds for every episode, season tab included.
+    #[test]
+    fn a_show_marked_watched_under_a_covered_detail_page_is_all_watched_on_return() {
+        let _serial = plx_base::testlock::serial();
+        let marked = Arc::new(AtomicBool::new(false));
+        let Some(mut rig) = Rig::serving_with(marked_show_server(marked.clone(), false)) else { return };
+        let mut t = product_transition(&mut rig.app);
+        open_marked_show(&mut rig, &mut t);
+        assert_eq!(strip(&rig), (vec![("1".into(), false), ("2".into(), false)], Some(0)),
+            "premise: the page opened on an unwatched show");
+        let detail = rig.app.pages.nav.top_page().unwrap().id;
+        cover_with_person(&mut rig, &mut t);
+        mark_show_and_read_back(&mut rig, &mut t);
+        let back = back_key(t + 16);
+        step(&mut rig.app, &mut t, vec![back]);
         settle(&mut rig.app, &mut t);
-        assert_eq!(watched(&mut rig), Some(("1".into(), true)),
-            "the episode strip still shows the read the page opened with");
+        assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(detail), "premise: Back returned to the show");
+        land_detail_reads(&mut rig, &mut t);
+        assert_eq!(strip(&rig), (vec![("1".into(), true), ("2".into(), true)], Some(2)),
+            "the strip is not all watched on return");
+    }
+
+    /// The same covered page when what the server holds is NOT what the optimistic patch drew:
+    /// the write is taken but only the first episode got marked. The patch is all a covered page
+    /// ever received, so without a re-read of its own it comes back showing a lie.
+    #[test]
+    fn a_covered_detail_page_shows_what_the_server_holds_after_a_partial_write() {
+        let _serial = plx_base::testlock::serial();
+        let marked = Arc::new(AtomicBool::new(false));
+        let Some(mut rig) = Rig::serving_with(marked_show_server(marked.clone(), true)) else { return };
+        let mut t = product_transition(&mut rig.app);
+        open_marked_show(&mut rig, &mut t);
+        let detail = rig.app.pages.nav.top_page().unwrap().id;
+        cover_with_person(&mut rig, &mut t);
+        mark_show_and_read_back(&mut rig, &mut t);
+        assert_eq!(strip(&rig), (vec![("1".into(), true), ("2".into(), true)], Some(2)),
+            "premise: the covered page holds the optimistic patch");
+        let back = back_key(t + 16);
+        step(&mut rig.app, &mut t, vec![back]);
+        settle(&mut rig.app, &mut t);
+        assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(detail), "premise: Back returned to the show");
+        land_detail_reads(&mut rig, &mut t);
+        assert_eq!(strip(&rig), (vec![("1".into(), true), ("2".into(), false)], Some(1)),
+            "the page came back showing the optimistic patch, not the server's word");
     }
 
     /// **Layer-1 view state, G1**: Home's hubs (Continue Watching) are re-read after a playback
@@ -5103,6 +5246,8 @@ mod lifecycle_regression_tests {
         hold_reads: Arc<AtomicBool>,
         /// While set, the `stopped` timeline POST parks before it is answered.
         hold_stop: Arc<AtomicBool>,
+        /// While set, the `stopped` timeline POST is answered 503 and the server keeps nothing.
+        refuse_stop: Arc<AtomicBool>,
     }
 
     impl StopServer {
@@ -5111,11 +5256,13 @@ mod lifecycle_regression_tests {
                 stopped: Arc::new(AtomicBool::new(false)),
                 hold_reads: Arc::new(AtomicBool::new(false)),
                 hold_stop: Arc::new(AtomicBool::new(false)),
+                refuse_stop: Arc::new(AtomicBool::new(false)),
             }
         }
 
         fn rig(&self, ends: bool) -> Option<Rig> {
             let (stopped, hold, hold_stop) = (self.stopped.clone(), self.hold_reads.clone(), self.hold_stop.clone());
+            let refuse = self.refuse_stop.clone();
             Rig::serving_with(move |request: &str| {
                 if request.contains("/decision?") {
                     return r#"{"MediaContainer":{"Metadata":[{"Media":[{"Part":[{"decision":"directplay"}]}]}]}}"#.into();
@@ -5125,6 +5272,9 @@ mod lifecycle_regression_tests {
                         for _ in 0..5_000 {
                             if !hold_stop.load(Ordering::SeqCst) { break; }
                             std::thread::sleep(Duration::from_millis(2));
+                        }
+                        if refuse.load(Ordering::SeqCst) {
+                            return "!503".into();
                         }
                         stopped.store(true, Ordering::SeqCst);
                     }
@@ -5272,6 +5422,47 @@ mod lifecycle_regression_tests {
         assert_eq!(requests_matching(&rig, "GET /library/metadata/", from), 0, "the old identity's stop was read back");
     }
 
+    /// **A stop the server refused still reaches the page it returns to** (a #575 regression the
+    /// read-back alone cannot fix: a refused stop asks for none). The Detail page shows the
+    /// position the viewer reached the frame the stop lands, with its own re-read still out, and
+    /// that re-read, asked for by the stop itself, then puts the server's word back (nothing was
+    /// stored, so the resume point is the one the server holds).
+    #[test]
+    fn a_refused_stop_patches_the_detail_page_and_the_page_then_re_reads_itself() {
+        let _serial = plx_base::testlock::serial();
+        let server = StopServer::new();
+        let Some(mut rig) = server.rig(false) else { return };
+        let mut t = product_transition(&mut rig.app);
+        settle(&mut rig.app, &mut t);
+        rig.release.send(()).unwrap(); // nothing parks: the first request answers at once
+        super::super::bridge::open_detail(&mut rig.app.pages, &mut rig.app.bridge, rig.sid, "1", None, None);
+        settle(&mut rig.app, &mut t);
+        land_detail_reads(&mut rig, &mut t);
+        let resume = |rig: &Rig| rig.app.bridge.metadata_view().current().map(|d| (d.rk.clone(), d.resume_ms));
+        assert_eq!(resume(&rig), Some(("1".into(), 0)), "premise: the Detail page is loaded, unplayed");
+        play_from_here(&mut rig, &mut t);
+        server.refuse_stop.store(true, Ordering::SeqCst);
+        let back = back_key(t + 16);
+        step(&mut rig.app, &mut t, vec![back]);
+        settle(&mut rig.app, &mut t);
+        assert!(rig.app.route().same_instance(&detail_arg(rig.sid)), "premise: Back returned to the Detail page");
+        // Back re-requests the page it uncovers; that read is out (held) when the stop lands
+        let asked = plx_data::metadata::detail_generation_for_test(rig.app.bridge.metadata_mut().adapter_ref());
+        plx_media::route::scrobble_stop(&mut rig.app.player.session, Some(("1".into(), 150_000, 600_000)), None);
+        plx_media::route::drain_scrobble();
+        poll_until("the Detail page never showed the position the viewer reached", || {
+            step(&mut rig.app, &mut t, vec![]);
+            resume(&rig) == Some(("1".into(), 150_000))
+        });
+        assert!(!server.stopped.load(Ordering::SeqCst), "premise: the server kept nothing");
+        assert!(plx_data::metadata::detail_generation_for_test(rig.app.bridge.metadata_mut().adapter_ref()) > asked,
+            "the refused stop asked the page for a re-read of its own");
+        let from = rig.requests.lock().unwrap().len();
+        land_detail_reads(&mut rig, &mut t);
+        assert!(requests_matching(&rig, "GET /library/metadata/1", from) >= 1, "the page read the server");
+        assert_eq!(resume(&rig), Some(("1".into(), 0)), "and settled on the server's word");
+    }
+
     /// Network reconcile work is held while the player is on top: a mark-watched that lands under
     /// the player owes a read-back and a hubs refetch, and neither goes out until the player leaves.
     #[test]
@@ -5286,7 +5477,7 @@ mod lifecycle_regression_tests {
         let (reads_from, refetches) = (rig.requests.lock().unwrap().len(), rig.app.bridge.hub_refetches_for_test());
         assert!(rig.app.bridge.viewstate_run(plx_data::stores::viewstate::ViewStateCmd::Request {
             sid: rig.sid, rk: "1".into(), write: plx_data::viewstate::Write::Watched,
-            scope: plx_data::viewstate::Scope::Leaf, detail: None, guid: String::new(),
+            scope: plx_data::viewstate::Scope::Leaf, guid: String::new(),
         }));
         poll_until("the write never reached the server", || {
             step(&mut rig.app, &mut t, vec![]);

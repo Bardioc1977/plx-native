@@ -538,29 +538,40 @@ fn a_detail_read_in_flight_across_a_watched_edit_installs_with_it_made_again() {
     assert_eq!(tile_state(&state), Some((false, 4)), "the server's answer stands");
 }
 
-/// The season count steps only when the episode row's own watched state flips, so making the same
-/// edit again (a ledger replay of a press the row already shows) leaves the count alone.
+/// One episode's flip steps the browsed season's count by one, only on a real flip and clamped to
+/// the season's leaf count (the optimistic layer: the tab and the hero read it before any answer).
+/// The Detail re-read the read-back asks for then OVERWRITES it with the server's number, which may
+/// differ from a +-1 step (a leaf watched elsewhere).
 #[test]
-fn replaying_a_single_episode_edit_does_not_step_the_season_count_twice() {
+fn a_single_episode_flip_steps_the_season_count_and_the_re_read_overwrites_it_with_the_servers() {
     use crate::viewstate::ViewAt;
     let _serial = plx_base::testlock::serial();
-    set_current_for_test(test_state(), Some(Detail {
+    let show = |viewed| Detail {
         sid: SRV_A,
         rk: "show".into(),
         is_show: true,
         kind: "show".into(),
-        seasons: vec![Season { rk: "sk1".into(), index: 1, title: "S1".into(), leaf_count: 3, viewed_leaf_count: 0 }],
+        seasons: vec![Season { rk: "sk1".into(), index: 1, title: "S1".into(), leaf_count: 3, viewed_leaf_count: viewed }],
         episodes: vec![Episode { rk: "e1".into(), season: 1, ..Default::default() }].into(),
         ..Default::default()
-    }));
+    };
+    set_current_for_test(test_state(), Some(show(0)));
     let count = || current(test_state()).unwrap().seasons[0].viewed_leaf_count;
     let ep = ViewAt::leaf(SRV_A, "e1");
     set_watched_local(test_state(), &ep, true);
+    assert_eq!(count(), 1, "the flip steps the browsed season");
     set_watched_local(test_state(), &ep, true);
-    assert_eq!(count(), 1, "the second, identical edit changes nothing");
-    set_watched_local(test_state(), &ep, false);
+    assert_eq!(count(), 1, "a press that flips nothing steps nothing");
     set_watched_local(test_state(), &ep, false);
     assert_eq!(count(), 0);
+    set_watched_local(test_state(), &ep, false);
+    assert_eq!(count(), 0, "clamped at zero");
+
+    // the server says two of three are watched (one of them elsewhere), after the optimistic step
+    set_watched_local(test_state(), &ep, true);
+    assert_eq!(count(), 1);
+    assert!(install_landed_detail(test_state(), test_adapter(), Some(show(2))));
+    assert_eq!(count(), 2, "the re-read overwrites the optimistic count with the server's number");
     clear(test_state(), test_adapter());
 }
 
@@ -600,4 +611,38 @@ fn the_servers_facts_and_offset_patch_related_and_collection_tiles_only_where_th
     let m = &d.collection.as_ref().unwrap().members[0];
     assert_eq!((m.watched, m.unwatched, m.resume_ms), (false, true, 42), "an offset leaves the watched state alone");
     assert_eq!(d.resume_ms, 11, "the loaded item is the fold's, not this patch's");
+}
+
+/// A stop's `Offset` reaches the LOADED item and the loaded show's episode it names, matched on the
+/// exact (server, key): a resume point must not wait for a read the server may never answer
+/// differently (a refused stop). A repeat of the same position changes nothing, so it raises no
+/// notice, and another server's same key names nothing here.
+#[test]
+fn an_offset_moves_the_loaded_item_and_the_episode_it_names_and_only_when_it_differs() {
+    use crate::stores::metadata::MetadataCmd;
+    use crate::viewstate::{ViewAt, ViewEdit};
+    let _serial = plx_base::testlock::serial();
+    set_current_for_test(test_state(), Some(Detail {
+        sid: SRV_A,
+        rk: "show".into(),
+        kind: "show".into(),
+        is_show: true,
+        resume_ms: 11,
+        episodes: vec![
+            Episode { rk: "e1".into(), season: 1, resume_ms: 5, ..Default::default() },
+            Episode { rk: "e2".into(), season: 1, resume_ms: 6, ..Default::default() },
+        ].into(),
+        ..Default::default()
+    }));
+    let apply = |sid, rk: &str, ms| super::run(test_state(), test_adapter(),
+        MetadataCmd::ApplyView { at: ViewAt::leaf(sid, rk), edit: ViewEdit::Offset { ms } });
+    assert!(apply(SRV_A, "e1", 42_000), "an episode of the loaded show");
+    assert!(!apply(SRV_A, "e1", 42_000), "the same position again changes nothing");
+    assert!(apply(SRV_A, "show", 7_000), "the loaded item itself");
+    assert!(!apply(SRV_A, "show", 7_000));
+    assert!(!apply(SRV_B, "e2", 1), "another server's e2 names nothing here");
+    let d = current(test_state()).unwrap();
+    assert_eq!(d.resume_ms, 7_000);
+    assert_eq!((d.episodes.get(0).unwrap().resume_ms, d.episodes.get(1).unwrap().resume_ms), (42_000, 6), "no other episode moved");
+    clear(test_state(), test_adapter());
 }
