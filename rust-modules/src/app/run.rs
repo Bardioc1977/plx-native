@@ -1673,6 +1673,9 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
         // generation is not the signal). A refused launch settles at once. Nothing here can extend
         // the hold: the bound is the dip's own, on the frame clock.
         super::playback::return_hold_settle(app, fr.now);
+        // What quiet reads staged for Home lands here when the store says nothing in view moves
+        // (`HubsCmd::Publish`); with nothing staged this is a no-op that raises no notice.
+        super::content::publish_staged_hubs(app);
         // (The lost-keyup safety net and the CLIENT-SIDE LONG-PRESS REPEAT stood here — the one
         // hold-to-move path for every discrete focus list, driven by `App::held_key` at 110 ms so
         // the feel was identical everywhere and independent of the remote's hardware repeat delay.
@@ -5491,6 +5494,63 @@ mod lifecycle_regression_tests {
         assert_eq!(probe.cw_elems.first().copied(), Some(tile), "the same tile now shows episode 2");
         assert_eq!(home_focus(&rig.app), Some(tile), "and holds the focus");
         assert!(animated, "the other cells animate in (a card left and a card arrived)");
+    }
+
+    /// **A quiet read out when the player exits is not the return hold's wait, and the prompted
+    /// refetch supersedes it.** A quiet read of the played source is out (parked at the server) when
+    /// the person backs out. The prompted refetch the exit owes supersedes it, so the dip waits at
+    /// its floor on the prompted read alone, and when that lands Home shows its content: the quiet
+    /// read's landing neither stands in for it nor takes its place.
+    #[test]
+    fn a_quiet_read_out_at_the_exit_is_superseded_by_the_prompted_refetch_the_hold_waits_on() {
+        let _serial = plx_base::testlock::serial();
+        let server = ReturnServer::new();
+        let Some(mut rig) = server.rig() else { return };
+        let mut t = product_transition(&mut rig.app);
+        settle(&mut rig.app, &mut t);
+        home_with_continue_watching(&mut rig, &mut t);
+        let tile = home_focus(&rig.app).expect("focus on the tile");
+        // Back out as `back_out_to_the_floor` does, but with the quiet read going out between the
+        // server taking the stop and the app issuing the refetch it owes (the fixture serves one
+        // request at a time, so the parked read must come after the stop).
+        play_with_a_landing_inside_the_dip(&mut rig, &mut t);
+        let back = back_key(t + 16);
+        step(&mut rig.app, &mut t, vec![back]);
+        plx_media::route::scrobble_stop(&mut rig.app.player.session, Some(("1".into(), 30_000, 60_000)), None);
+        poll_until("the server never took the stop", || server.stopped.load(Ordering::SeqCst));
+        server.hold_hubs.store(true, Ordering::SeqCst);
+        let gen = rig.app.bridge.hub_refetches_for_test();
+        let _ = rig.app.bridge.hubs_run(plx_data::stores::hubs::HubsCmd::RefetchSourceQuiet { sid: rig.sid });
+        assert_eq!(rig.app.bridge.hub_refetches_for_test(), gen, "a quiet ask never moves the generation");
+        assert!(rig.app.bridge.hub_source_settled(rig.sid), "premise: a quiet read is nobody's wait");
+        assert!(rig.app.bridge.hubs_owed(), "premise: and it is out");
+        for _ in 0..40 {
+            if rig.app.pages.nav.tabs.stack.transition.page_alpha() == 0.0 { break; }
+            step(&mut rig.app, &mut t, vec![]);
+        }
+        assert!(rig.app.pages.nav.tabs.stack.transition.page_alpha() == 0.0, "the dip reached its floor");
+        let at_floor = t;
+        poll_until("the prompted refetch never went out", || {
+            step_clock(&mut rig.app, &mut t, 0);
+            !rig.app.bridge.hub_source_settled(rig.sid)
+        });
+        assert!(rig.app.bridge.hub_refetches_for_test() > gen, "the exit's refetch is authoritative");
+        for _ in 0..8 { step_clock(&mut rig.app, &mut t, 0); }
+        assert!(rig.app.pages.nav.tabs.stack.transition.floor_held(), "the dip waits dark at its floor");
+        assert!(!rig.app.bridge.hub_source_settled(rig.sid), "on the prompted read, which is still out");
+        assert_eq!(t, at_floor);
+        server.hold_hubs.store(false, Ordering::SeqCst);
+        poll_until("the prompted read never landed", || {
+            step_clock(&mut rig.app, &mut t, 0);
+            !rig.app.refresh_hubs && rig.app.bridge.hub_source_settled(rig.sid)
+        });
+        for _ in 0..40 {
+            if super::super::bridge::player(&rig.app.pages).is_none() { break; }
+            step(&mut rig.app, &mut t, vec![]);
+        }
+        assert!(matches!(rig.app.route(), AppArg::Home), "premise: Home is on top");
+        assert_eq!(first_cw_rk(&rig.app), "2", "the prompted read's content is what Home shows");
+        assert_eq!(home_probe(&rig.app).cw_elems.first().copied(), Some(tile), "episode 2 sits in the same tile");
     }
 
     /// **10c, a key during the hold**: the dip is dark and waiting on a refetch that has not
