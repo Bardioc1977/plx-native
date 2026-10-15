@@ -708,6 +708,26 @@ mod tests {
         assert!(unmatched().is_empty());
     }
 
+    /// `is_armed` is the one question an optional network feature asks of the gate: is a
+    /// recording, a replay or a dump holding the run to a schedule it must not disturb.
+    #[test]
+    fn is_armed_reflects_every_arming_and_disarm() {
+        let gate = Gate::default();
+        assert!(!gate.is_armed(), "an ordinary build is never armed");
+        gate.arm_recording();
+        assert!(gate.is_armed());
+        gate.disarm();
+        assert!(!gate.is_armed());
+        gate.arm_replay(vec![vec![(1, 1)]]);
+        assert!(gate.is_armed());
+        gate.disarm();
+        assert!(!gate.is_armed());
+        gate.arm_dump(std::time::Duration::from_millis(5));
+        assert!(gate.is_armed());
+        gate.disarm();
+        assert!(!gate.is_armed());
+    }
+
     #[test]
     fn a_late_landing_is_delivered_and_counted_as_a_divergence() {
         let _g = plx_base::testlock::serial();

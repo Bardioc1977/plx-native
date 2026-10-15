@@ -60,7 +60,6 @@ pub(crate) struct Reread {
 impl Reread {
     /// The resync epoch moved (a lost stream, a long gap): every page covered now is owed a re-read.
     /// Layer 2's server-updates stream calls this when it loses its place.
-    #[allow(dead_code)]
     pub(crate) fn resync(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);
     }
