@@ -4748,3 +4748,237 @@ fn a_row_that_is_not_continue_watching_cuts() {
     tick_n(&mut s, after.view(), None, 10, 3);
     assert!(s.grid.shelves.iter().all(|sh| !sh.landing_pending() && !sh.has_ghosts()));
 }
+
+// ---- focus follows the show (layer-1 view state, 10b) ----
+
+/// A Home on the shelves showing `items` Continue Watching EPISODES, each of its own show
+/// (`show<rk>`), settled. A movie is the same card with `kind = 0` and no show.
+fn show_home(items: usize) -> (plx_data::pms::PmsState, HomeScreen) {
+    let mut state = plx_data::pms::PmsState::default();
+    let adapter = std::sync::Arc::new(plx_data::pms::PmsAdapter::default());
+    plx_data::pms::seed_for_test(&mut state, &adapter, items, plx_data::pms::HubState::Ready);
+    for i in 1..=items {
+        plx_data::pms::edit_test_item(&mut state, &i.to_string(), &|m| {
+            m.kind = 3;
+            m.show_rk = format!("show{}", m.rk);
+        });
+    }
+    let snapshot = plx_data::pms::hubs_snapshot(&state);
+    let mut s = screen(snapshot.view());
+    s.snap.jump(1.0);
+    s.snap_target = 1.0;
+    s.layout_grid();
+    tick_n(&mut s, snapshot.view(), None, 0, 6);
+    (state, s)
+}
+
+/// Land `state` on `s` with `focus` held, the way a publication reaches a mounted Home, and play
+/// the row's frames. Returns the key the engine would leave focus on (`Focusable::reconcile`).
+fn land_following(s: &mut HomeScreen, state: &plx_data::pms::PmsState, focus: FocusKey<u32>) -> FocusKey<u32> {
+    let after = plx_data::pms::hubs_snapshot(state);
+    let context = cx(after.view(), Some(focus));
+    s.sync_catalog(&context);
+    let seated = Focusable::<TestHost>::reconcile(s, focus, &context);
+    tick_n(s, after.view(), Some(seated), 10, 3);
+    seated
+}
+
+fn card_rk(state: &plx_data::pms::PmsState, col: usize) -> String {
+    let snapshot = plx_data::pms::hubs_snapshot(state);
+    snapshot.view().hub(0).unwrap().items[col].rk.to_string()
+}
+
+#[test]
+fn a_next_episode_replacing_the_focused_tile_keeps_its_element_and_the_focus() {
+    let _guard = plx_base::testlock::serial();
+    let (mut state, mut s) = show_home(6);
+    let before = s.rows[0].elems.clone();
+    let focus = FocusKey { entry: s.entry, elem: before[2] };
+    // the server answers the finished episode "3" of show3 with its next one
+    plx_data::pms::edit_test_item(&mut state, "3", &|m| m.rk = "31".into());
+    let seated = land_following(&mut s, &state, focus);
+    assert_eq!(s.rows[0].elems, before, "the row keeps every element");
+    assert_eq!(seated, focus, "focus stays on the tile: no FocusMoved");
+    assert_eq!(card_rk(&state, 2), "31", "premise: the tile now holds the next episode");
+    assert!(!s.grid.shelves[0].landing_pending() && !s.grid.shelves[0].has_ghosts(),
+        "the same card changing its art is not a remove plus an insert");
+    assert!(s.ghost_cards.is_empty(), "no card was kept as a ghost");
+    // the old key is retired, the new one names the element
+    assert!(s.find_item(&HomeItemIdentity::Item { hub: HomeHubIdentity::ContinueWatching,
+        sid: plx_plex::plex::ServerId::UNSET, rk: "3".into() }).is_none());
+    assert!(s.find_item(&HomeItemIdentity::Item { hub: HomeHubIdentity::ContinueWatching,
+        sid: plx_plex::plex::ServerId::UNSET, rk: "31".into() }).is_some());
+}
+
+#[test]
+fn the_show_leaving_the_row_seats_focus_at_the_same_index() {
+    let _guard = plx_base::testlock::serial();
+    let (mut state, mut s) = show_home(6);
+    let before = s.rows[0].elems.clone();
+    let focus = FocusKey { entry: s.entry, elem: before[2] };
+    plx_data::pms::remove_test_item(&mut state, "3");
+    let seated = land_following(&mut s, &state, focus);
+    assert_eq!(s.rows[0].elems.len(), 5);
+    assert_eq!(s.rows[0].elems.iter().position(|&e| e == seated.elem), Some(2),
+        "the tile now at the same position takes the focus");
+    assert_eq!(seated.elem, before[3]);
+}
+
+#[test]
+fn the_last_show_leaving_the_row_seats_focus_on_the_new_last_tile() {
+    let _guard = plx_base::testlock::serial();
+    let (mut state, mut s) = show_home(4);
+    let before = s.rows[0].elems.clone();
+    let focus = FocusKey { entry: s.entry, elem: before[3] };
+    plx_data::pms::remove_test_item(&mut state, "4");
+    let seated = land_following(&mut s, &state, focus);
+    assert_eq!(seated.elem, before[2], "the index clamps to the row's end");
+}
+
+#[test]
+fn another_show_does_not_inherit_the_tile() {
+    let _guard = plx_base::testlock::serial();
+    let (mut state, mut s) = show_home(6);
+    let before = s.rows[0].elems.clone();
+    let focus = FocusKey { entry: s.entry, elem: before[2] };
+    plx_data::pms::edit_test_item(&mut state, "3", &|m| { m.rk = "99".into(); m.show_rk = "showX".into(); });
+    land_following(&mut s, &state, focus);
+    assert_ne!(s.rows[0].elems[2], before[2], "a card of another show gets its own element");
+    assert!(!s.rows[0].elems.contains(&before[2]));
+    assert!(s.grid.shelves[0].landing_pending(), "it is an ordinary remove plus insert");
+}
+
+#[test]
+fn the_same_rating_key_and_show_on_another_server_does_not_inherit() {
+    let _guard = plx_base::testlock::serial();
+    let (mut state, mut s) = show_home(6);
+    let before = s.rows[0].elems.clone();
+    let focus = FocusKey { entry: s.entry, elem: before[2] };
+    plx_data::pms::edit_test_item(&mut state, "3", &|m| { m.rk = "31".into(); m.sid = plx_plex::plex::ServerId::from_raw(1); });
+    land_following(&mut s, &state, focus);
+    assert_ne!(s.rows[0].elems[2], before[2], "the next episode on a friend's server is not this server's tile");
+}
+
+#[test]
+fn a_movie_has_no_show_and_keeps_the_clamp() {
+    let _guard = plx_base::testlock::serial();
+    let (mut state, mut s) = show_home(6);
+    let before = s.rows[0].elems.clone();
+    let focus = FocusKey { entry: s.entry, elem: before[2] };
+    plx_data::pms::edit_test_item(&mut state, "3", &|m| { m.rk = "31".into(); m.kind = 0; m.show_rk.clear(); });
+    land_following(&mut s, &state, focus);
+    assert_ne!(s.rows[0].elems[2], before[2], "a card with no show never inherits");
+}
+
+#[test]
+fn two_tiles_of_one_show_each_keep_their_own_element() {
+    let _guard = plx_base::testlock::serial();
+    let (mut state, mut s) = show_home(6);
+    for rk in ["2", "5"] {
+        plx_data::pms::edit_test_item(&mut state, rk, &|m| m.show_rk = "shared".into());
+    }
+    let first = plx_data::pms::hubs_snapshot(&state);
+    s.sync_catalog(&cx(first.view(), None));
+    let before = s.rows[0].elems.clone();
+    plx_data::pms::edit_test_item(&mut state, "2", &|m| m.rk = "21".into());
+    plx_data::pms::edit_test_item(&mut state, "5", &|m| m.rk = "51".into());
+    let focus = FocusKey { entry: s.entry, elem: before[4] };
+    let seated = land_following(&mut s, &state, focus);
+    assert_eq!(s.rows[0].elems, before, "both replaced tiles keep their elements, in column order");
+    assert_eq!(seated, focus);
+}
+
+#[test]
+fn a_window_that_slid_is_paging_not_a_replacement() {
+    let _guard = plx_base::testlock::serial();
+    let (mut state, mut s) = show_home(6);
+    let before = s.rows[0].elems.clone();
+    let focus = FocusKey { entry: s.entry, elem: before[2] };
+    plx_data::pms::slide_test_window(&mut state, 3);
+    plx_data::pms::edit_test_item(&mut state, "3", &|m| m.rk = "31".into());
+    land_following(&mut s, &state, focus);
+    assert_ne!(s.rows[0].elems[2], before[2], "a card of the same show in a slid window does not inherit");
+}
+
+// ---- review round: the return half, order, and the existing tile ----
+
+fn memory_of(s: &HomeScreen) -> HomeMemory {
+    let PageMemory::Home(memory) = <HomeScreen as Screen<TestHost>>::memory(s) else { unreachable!() };
+    memory
+}
+
+/// A Home evicted while the player ran and mounted again on the CURRENT catalog, then handed its
+/// memory (`ScreenEvent::RestoreMemory`): the path every return to an evicted page takes.
+fn remount(state: &plx_data::pms::PmsState, memory: HomeMemory) -> HomeScreen {
+    let snapshot = plx_data::pms::hubs_snapshot(state);
+    let mut s = screen(snapshot.view());
+    step(&mut s, snapshot.view(), None, &ScreenEvent::RestoreMemory(PageMemory::Home(memory)));
+    s
+}
+
+#[test]
+fn an_evicted_home_remounted_on_the_next_episode_keeps_the_remembered_tile() {
+    let _guard = plx_base::testlock::serial();
+    let (mut state, s) = show_home(6);
+    let before = s.rows[0].elems.clone();
+    let memory = memory_of(&s);
+    plx_data::pms::edit_test_item(&mut state, "3", &|m| m.rk = "31".into());
+    let back = remount(&state, memory);
+    assert_eq!(back.rows[0].elems, before, "the tile that held episode 3 holds episode 31 on the same element");
+    assert!(back.find_item(&HomeItemIdentity::Item { hub: HomeHubIdentity::ContinueWatching,
+        sid: plx_plex::plex::ServerId::UNSET, rk: "3".into() }).is_none(), "the old episode's key is retired, not re-added");
+}
+
+#[test]
+fn an_evicted_home_remounted_after_a_card_left_recovers_its_cursor_without_a_collision() {
+    let _guard = plx_base::testlock::serial();
+    let (mut state, s) = show_home(6);
+    let memory = memory_of(&s);
+    // the movie-less, show-less case: card 3 left the row and nothing replaced it, so the fresh
+    // page numbers its cards from 1 again and the remembered numbers name different cards
+    plx_data::pms::remove_test_item(&mut state, "3");
+    let back = remount(&state, memory);
+    assert_eq!(back.rows[0].elems.len(), 5);
+    let mut seen = std::collections::HashSet::new();
+    assert!(back.items.iter().all(|k| seen.insert(k.elem)), "no element names two cards");
+}
+
+#[test]
+fn the_remembered_shows_are_in_column_order() {
+    let _guard = plx_base::testlock::serial();
+    let (_state, s) = show_home(6);
+    let memory = memory_of(&s);
+    let elems: Vec<u32> = memory.cw_shows.iter().map(|(elem, ..)| *elem).collect();
+    assert_eq!(elems, s.rows[0].elems, "row order, never a hash map's");
+}
+
+#[test]
+fn a_next_episode_that_is_already_in_the_row_takes_the_focus_of_the_finished_one() {
+    let _guard = plx_base::testlock::serial();
+    let (mut state, mut s) = show_home(6);
+    // card 5 is another episode of card 3's show
+    plx_data::pms::edit_test_item(&mut state, "5", &|m| m.show_rk = "show3".into());
+    let first = plx_data::pms::hubs_snapshot(&state);
+    s.sync_catalog(&cx(first.view(), None));
+    tick_n(&mut s, first.view(), None, 0, 6);
+    let before = s.rows[0].elems.clone();
+    let focus = FocusKey { entry: s.entry, elem: before[2] };
+    plx_data::pms::remove_test_item(&mut state, "3");
+    let seated = land_following(&mut s, &state, focus);
+    assert_eq!(seated.elem, before[4], "focus follows the show to its next episode, not to the same index");
+}
+
+#[test]
+fn a_next_episode_that_jumps_to_column_zero_keeps_the_element_and_the_focus() {
+    let _guard = plx_base::testlock::serial();
+    let (mut state, mut s) = show_home(6);
+    let before = s.rows[0].elems.clone();
+    let focus = FocusKey { entry: s.entry, elem: before[2] };
+    // Continue Watching is ordered by last viewed: the next episode comes first
+    plx_data::pms::edit_test_item(&mut state, "3", &|m| m.rk = "31".into());
+    plx_data::pms::promote_test_item(&mut state, "31");
+    let seated = land_following(&mut s, &state, focus);
+    assert_eq!(card_rk(&state, 0), "31", "premise: the next episode is first");
+    assert_eq!(s.rows[0].elems[0], before[2], "the element moved to column 0 with its card");
+    assert_eq!(seated, focus, "and the focus is still on it");
+}
