@@ -1962,33 +1962,6 @@ pub fn push_subtitle_text(track: i32, start_ns: i64, end_ns: i64, text: String) 
         text,
     });
 }
-/// demux (D-thread) pushes a subtitle cue (content-time ns) for track `track`. Called for
-/// EVERY plain-text track so a mid-play switch is instant; only the selected track's cues are logged.
-pub fn push_subtitle_cue(
-    track: i32,
-    start_ns: i64,
-    end_ns: i64,
-    payload: &[u8],
-) {
-    let text = sub_text(payload);
-    if text.is_empty() {
-        return;
-    }
-    if track == SHARED.desired_sub_idx.load(Relaxed) {
-        // LENGTH, never the dialogue. This line used to carry 34 characters of what the viewer
-        // was watching — the most sensitive thing the event log has ever held, in a file that gets
-        // photographed into public issue threads. `len=` answers every question the text answered
-        // for triage (did a cue arrive, at what time, was it empty, is the track the right one)
-        // without being viewing content.
-        log(&format!(
-            "sub cue [{}..{}ms] len={}",
-            start_ns / 1_000_000,
-            end_ns / 1_000_000,
-            text.chars().count()
-        ));
-    }
-    push_subtitle_text(track, start_ns, end_ns, text);
-}
 /// the selected track's subtitle text active at `now_ns`, or None (also None when off).
 pub fn active_subtitle(now_ns: i64) -> Option<String> {
     active_subtitle_span(now_ns).map(|(text, _, _)| text)
