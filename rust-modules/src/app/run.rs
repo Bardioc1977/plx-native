@@ -2440,10 +2440,23 @@ pub(crate) unsafe fn update(app: &mut App, fr: &mut Frame) {
         // every route for the same reason (a refused write is put right here, not by a refetch).
         let endpoints = app.bridge.reconcile_pump();
         super::bridge::execute_endpoint_outcomes(&mut app.pages, endpoints);
-        // The PMS notification feed (ships off: opens nothing while `NOTIFY_ENABLED` is false).
-        // Route-unconditional like its neighbours; its output is only logged until the event
-        // mapping lands, and it never touches the stop queue or the playback Offset.
-        if app.bridge.notify_pump() {
+        // The PMS notification feed (ships off: opens nothing while `NOTIFY_ENABLED` is false) and
+        // the reads its hints owe the pages on the stack, visible and covered. Route-unconditional
+        // like its neighbours; it never touches the stop queue or the playback Offset.
+        let content: Vec<plx_screens::registry::ContentArg> = app.pages.nav.tabs.stack.entries.iter()
+            .filter_map(|e| match &e.arg { AppArg::Content(c) => Some(c.clone()), _ => None })
+            .collect();
+        let shown = app.pages.nav.tabs.stack.entries.iter().fold(
+            plx_data::stores::notify_map::Shown::default(), |mut shown, e| {
+                match e.arg {
+                    AppArg::Home => shown.home = true,
+                    AppArg::Library => shown.library = true,
+                    AppArg::Search => shown.search = true,
+                    _ => {}
+                }
+                shown
+            });
+        if app.bridge.notify_pump(&content, shown) {
             app.reread.resync(); // a lost stream: events were missed, every covered page is owed a re-read
         }
         // …and the covered pages' own re-read, once each cover episode (`app/reread.rs`).
