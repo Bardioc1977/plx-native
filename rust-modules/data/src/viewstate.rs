@@ -577,9 +577,10 @@ pub fn publish_view(
     let _ = hubs(crate::stores::hubs::HubsCmd::ApplyView { at: at.clone(), edit });
     browse(crate::stores::browse::BrowseCmd::ApplyView { at: at.clone(), edit });
     // The Library's own deck is a different shelf on a different screen, and the one place a
-    // deck removal is reachable from besides Home; no other store has a deck. Facts reach only
-    // Home's hubs and Browse's listing and shelves so far (`docs/stores-as-machines.md`).
-    if let ViewEdit::Watched(_) = edit {
+    // deck removal is reachable from besides Home; no other store has a deck. Watched, Facts and
+    // Offset reach every store that can be drawing the item; Detail's own item, episodes and
+    // seasons take Facts with its fold (they re-read themselves until then).
+    if !matches!(edit, ViewEdit::LeftDeck) {
         metadata(crate::stores::metadata::MetadataCmd::ApplyView { at: at.clone(), edit });
         search(crate::stores::search::SearchCmd::ApplyView { at: at.clone(), edit });
         person(crate::stores::person::PersonCmd::ApplyView { at: at.clone(), edit });
@@ -1126,6 +1127,11 @@ mod tests {
         let mut collection = Vec::new();
         let mut search = Vec::new();
         let mut metadata_store = crate::stores::metadata::MetadataStore::default();
+        // the page is mounted on the pressed item: an edit that matches nothing raises no notice
+        crate::metadata::install_for_test(metadata_store.state_mut(), Some(crate::metadata::Detail {
+            sid, rk: "7".into(), ..Default::default()
+        }));
+        let _ = metadata_store.take_notice();
 
         assert!(store.run(
             crate::stores::viewstate::ViewStateCmd::Request {
@@ -1165,6 +1171,7 @@ mod tests {
         assert!(metadata_store.take_notice().is_some(),
             "the optimistic edit reaches {} before run returns", crate::stores::StoreId::Metadata.name());
         assert!(store.take_notice().is_some(), "the owning ViewState store notices its command");
+        crate::metadata::install_for_test(metadata_store.state_mut(), None);
         plx_plex::plex::reset_servers_for_test();
     }
 
@@ -1235,6 +1242,33 @@ mod tests {
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].0, ViewAt { sid, rk: "S".into(), scope: Scope::Show });
         assert_eq!(seen[0].1, ViewEdit::Watched(true));
+        drop(stores);
+        plx_plex::plex::reset_servers_for_test();
+    }
+
+    /// The server's word (`Facts`, `Offset`) patches Search's rows in place, only where it differs
+    /// from what is drawn, and returns "nothing changed" otherwise so no notice is raised.
+    #[test]
+    fn the_servers_facts_and_offset_patch_the_search_rows_only_where_they_differ() {
+        let _g = plx_base::testlock::serial();
+        let (mut stores, sid) = search_with_show_and_episodes();
+        let directory = crate::stores::browse::DirectorySnapshot::default();
+        let run = |stores: &mut crate::stores::Stores, rk: &str, edit| {
+            stores.search_run(crate::stores::search::SearchCmd::ApplyView { at: ViewAt::leaf(sid, rk), edit }, directory.view())
+        };
+        let facts = ViewEdit::Facts { watched: true, unwatched: false, resume_ms: 0 };
+        assert!(run(&mut stores, "other", facts), "the server says watched: the row changes");
+        assert!(!run(&mut stores, "other", facts), "the same facts again change nothing, so raise nothing");
+        let marks = search_marks(&stores);
+        let mark = |rk: &str| marks.iter().find(|m| m.0 == rk).unwrap().clone();
+        assert_eq!(mark("other"), ("other".into(), true, false, 0));
+        assert_eq!(mark("e11"), ("e11".into(), false, true, 5_000), "no other row moved");
+
+        assert!(run(&mut stores, "e11", ViewEdit::Offset { ms: 9_000 }));
+        assert!(!run(&mut stores, "e11", ViewEdit::Offset { ms: 9_000 }), "a stop at the offset already held");
+        let marks = search_marks(&stores);
+        assert_eq!(marks.iter().find(|m| m.0 == "e11").unwrap().3, 9_000);
+        assert!(!marks.iter().find(|m| m.0 == "e11").unwrap().1, "an offset leaves the watched state alone");
         drop(stores);
         plx_plex::plex::reset_servers_for_test();
     }
@@ -1820,6 +1854,37 @@ mod tests {
         );
 
         crate::metadata::install_for_test(metadata_store.state_mut(), None);
+    }
+
+    /// **Which stores a change reaches.** The server's word (`Facts`) and a stop's position
+    /// (`Offset`) reach the person, collection, search and metadata owners, each with the edit the
+    /// change names; leaving Continue Watching reaches none of the four (a result tile, a filmography
+    /// row and a Detail tile have no deck).
+    #[test]
+    fn publish_view_hands_facts_and_offset_to_the_four_tile_stores_and_a_deck_removal_to_none() {
+        use crate::stores::{collection::CollectionCmd, metadata::MetadataCmd, person::PersonCmd, search::SearchCmd};
+        let reached = |fact| {
+            let (mut p, mut c, mut s, mut m) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            publish_view(ViewChange { sid: SRV_A, rk: "4".into(), scope: Scope::Leaf, fact },
+                &mut |_| false,
+                &mut |_cmd| crate::stores::StoreOutcome::default(),
+                &mut |cmd| { if let PersonCmd::ApplyView { edit, .. } = cmd { p.push(edit) } false },
+                &mut |cmd| { if let CollectionCmd::ApplyView { edit, .. } = cmd { c.push(edit) } false },
+                &mut |cmd| { if let SearchCmd::ApplyView { edit, .. } = cmd { s.push(edit) } false },
+                &mut |cmd| { if let MetadataCmd::ApplyView { edit, .. } = cmd { m.push(edit) } false });
+            (p, c, s, m)
+        };
+        let facts = ViewFact::Facts { watched: true, unwatched: false, resume_ms: 0 };
+        let edit = ViewEdit::Facts { watched: true, unwatched: false, resume_ms: 0 };
+        assert_eq!(reached(facts), (vec![edit], vec![edit], vec![edit], vec![edit]), "Facts reach all four");
+        let offset = ViewFact::Offset { ms: 42, dur_ms: 1_000_000 };
+        let edit = ViewEdit::Offset { ms: 42 };
+        assert_eq!(reached(offset), (vec![edit], vec![edit], vec![edit], vec![edit]), "Offset reaches all four");
+        assert_eq!(
+            reached(ViewFact::LeftDeck),
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            "a deck removal reaches none of them"
+        );
     }
 
     /// **The landing itself, driven through [`ViewStateState::pump`].** The test above grades what
