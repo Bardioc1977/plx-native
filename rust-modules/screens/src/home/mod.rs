@@ -468,6 +468,14 @@ pub struct HomeScreen {
     item_index: HashMap<HomeHubIdentity, HubKeys>,
     group_index: HashMap<HomeHubIdentity, usize>,
     projected_generation: Option<u32>,
+    /// The Continue Watching row's cards by element as the latest projection showed them (an
+    /// `Arc` clone each, not the catalog), so the NEXT publication can fade out the ones it
+    /// removes. Not canon.
+    cw_cards: HashMap<u32, Arc<PmsMovie>>,
+    /// The cards the Continue Watching row removed, by [`ui_cards::elem_key`], kept while its
+    /// landing is pending (a later publication adds to them and cannot change one) and let go
+    /// once nothing fades. Not canon.
+    ghost_cards: HashMap<u64, (u32, Arc<PmsMovie>)>,
     restored_scroll: Vec<(u32, f32)>,
     restore_reveal: bool,
     /// The rows last sent to the store as held (`HubsCmd::Hold`), so the command goes out only when
@@ -533,6 +541,8 @@ impl HomeScreen {
             item_index: HashMap::new(),
             group_index: HashMap::new(),
             projected_generation: None,
+            cw_cards: HashMap::new(),
+            ghost_cards: HashMap::new(),
             restored_scroll: Vec::new(),
             restore_reveal: false,
             hold_sent: None,
@@ -787,7 +797,8 @@ impl HomeScreen {
         self.grid.shelves = Vec::with_capacity(rows.len());
         for row in &rows {
             let kept = old_at.get(&row.identity).and_then(|&old| old_shelves.get_mut(old)?.take());
-            let mut shelf = kept.unwrap_or_else(|| Shelf::new(self.entry, &RowStyle::HOME).cull_margin(GLOW_PAD));
+            let mut shelf = kept.unwrap_or_else(|| Shelf::new(self.entry, &RowStyle::HOME).cull_margin(GLOW_PAD)
+                .animate_landings(row.identity == HomeHubIdentity::ContinueWatching));
             if let Some(&(_, scroll)) = self.restored_scroll.iter().find(|(group, _)| *group == row.group.0) {
                 shelf.restore_scroll(scroll, row.elems.len());
             }
@@ -811,8 +822,24 @@ impl HomeScreen {
                 && !self.rows.iter().any(|row| row.group.0 == *group)
         });
         self.projected_generation = Some(view.generation);
+        self.stash_removed_continue_watching(view);
         self.prune_keys(&was, view.generation, cx.focus.current.map(|key| key.elem), &cx.focus.remembered);
         self.reconcile_carousel(view);
+    }
+
+    /// Keep the Continue Watching cards the projection just removed (by element, so a later
+    /// publication cannot make a ghost show another card) and remember the row's cards for the next.
+    fn stash_removed_continue_watching(&mut self, view: HubsView<'_>) {
+        let now: HashMap<u32, Arc<PmsMovie>> = self.rows.iter().position(|r| r.identity == HomeHubIdentity::ContinueWatching)
+            .and_then(|row| Some((self.hub(view, row)?, &self.rows[row])))
+            .map(|(hub, row)| row.elems.iter().copied().zip(hub.items.iter().cloned()).collect())
+            .unwrap_or_default();
+        for (elem, movie) in std::mem::take(&mut self.cw_cards) {
+            if !now.contains_key(&elem) {
+                self.ghost_cards.insert(ui_cards::elem_key(&elem), (elem, movie));
+            }
+        }
+        self.cw_cards = now;
     }
 
     /// Bound the key tables. A key is only needed while its card is shown, was just shown (so a
@@ -1111,6 +1138,9 @@ impl HomeScreen {
             }
         }
         self.grid.shelves = shelves;
+        if !self.ghost_cards.is_empty() && !self.grid.shelves.iter().any(Shelf::landing_pending) {
+            self.ghost_cards.clear();
+        }
         // The store holds cards for the rows in view and two either side; the rest keep a descriptor.
         if !self.rows.is_empty() {
             let (lo, hi) = on_screen.unwrap_or((0, 0));
@@ -1762,6 +1792,9 @@ impl HomeScreen {
                 );
             }
             if let Some(shelf) = self.grid.shelves.get(row) {
+                if shelf.has_ghosts() {
+                    shelf.paint_ghosts(f, p, &self.cards(view, row), &self.ghost_source(shelf), self.section(row));
+                }
                 shelf.paint_resting(f, p, &self.cards(view, row), self.section(row));
             }
         }
@@ -1779,6 +1812,11 @@ impl HomeScreen {
             y: self.grid.base_y(row) + CARD_DY,
             clip: Rect::new(0.0, plx_ui::widgets::TOP_BAR_BOTTOM, SCR_W, SCR_H - plx_ui::widgets::TOP_BAR_BOTTOM),
         }
+    }
+
+    /// The cards `shelf`'s landing is fading out, in the order it names them.
+    fn ghost_source(&self, shelf: &Shelf) -> GhostCards<'_> {
+        GhostCards { cards: shelf.ghost_keys().map(|key| self.ghost_cards.get(&key)).collect() }
     }
 
     /// Row `row`'s cards as `cards::Shelf` reads them.
@@ -1973,7 +2011,7 @@ impl LogicalState for HomeScreen {
         let Self { entry: _, instance: _, groups: _, items: _, next_group: _, next_elem: _,
             // `elem_at` is derived from `rows`, which the census already covers via its elems.
             // `item_index` / `group_index` are caches of `items` / `groups`, which are covered.
-            rows: _, elem_at: _, item_index: _, group_index: _, projected_generation: _, restored_scroll: _, restore_reveal: _, hold_sent: _, carousel: _,
+            rows: _, elem_at: _, item_index: _, group_index: _, projected_generation: _, cw_cards: _, ghost_cards: _, restored_scroll: _, restore_reveal: _, hold_sent: _, carousel: _,
             outgoing: _, hero_flip_cd: _, hero_slide: _, hero_dir: _, hero_auto: _, hero_pinned: _, covered: _,
             snap_target: _,
             visible_activation: _, cta_available: _, strip_chosen: _, snap: _, status_ms: _,
@@ -3070,6 +3108,43 @@ fn deck_label(is_deck: bool, title: &str) -> ui_cards::TileLabel {
     }
 }
 
+/// The cards a landing removed, each under the element it had, in the order the shelf names them
+/// (`Shelf::ghost_keys`); a card the screen did not keep is `None` and is not drawn.
+struct GhostCards<'a> {
+    cards: Vec<Option<&'a (u32, Arc<PmsMovie>)>>,
+}
+
+impl GhostCards<'_> {
+    fn item(&self, i: usize) -> Option<&PmsMovie> {
+        self.cards.get(i).copied().flatten().map(|(_, movie)| &**movie)
+    }
+}
+
+impl<H: HomeLike> CardSource<H> for GhostCards<'_> {
+    fn len(&self) -> usize {
+        self.cards.len()
+    }
+    /// The card's own element; a ghost is never focused, pressed or registered, so nothing asks.
+    fn elem(&self, i: usize) -> u32 {
+        self.cards.get(i).copied().flatten().map_or(0, |(elem, _)| *elem)
+    }
+    fn index_of(&self, e: &u32) -> Option<usize> {
+        self.cards.iter().position(|c| c.is_some_and(|(elem, _)| elem == e))
+    }
+    fn art(&self, i: usize) -> Art<'_> {
+        Art::Poster(self.item(i).map(tile_facts::of))
+    }
+    fn label(&self, _i: usize) -> ui_cards::TileLabel {
+        ui_cards::TileLabel::default()
+    }
+    fn progress(&self, i: usize) -> Option<f32> {
+        self.item(i).and_then(PmsMovie::resume_frac)
+    }
+    fn loaded(&self, i: usize) -> bool {
+        self.item(i).is_some_and(|item| !item.rk.is_empty())
+    }
+}
+
 /// One row's cards, as `cards::Shelf` reads them: the published hub's items under the elements
 /// the page interned for them. The screen keeps the heading, the vertical flow, the focus groups,
 /// the dive and every press action.
@@ -3094,6 +3169,10 @@ impl<H: HomeLike> CardSource<H> for HomeCards<'_> {
     }
     fn page_epoch(&self) -> u32 {
         self.home.hub(self.view, self.row).map_or(0, |hub| hub.epoch)
+    }
+    /// The rows change only when a publication is projected.
+    fn revision(&self) -> Option<u64> {
+        self.home.projected_generation.map(u64::from)
     }
     /// The placeholder rule is not the paging rule: a row that continues shows it whether or not
     /// focus is near the edge that asks.

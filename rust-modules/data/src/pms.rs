@@ -530,10 +530,10 @@ impl HubsSnapshot {
 }
 
 /// Frame-borrowed Home data. Every reference is tied to the retained publication, not a static
-/// catalog that an effect could replace. The bridge owns the snapshot; screens only get this.
+/// catalog that an effect could replace. The bridge owns the snapshot; a screen reads this and keeps nothing of the publication past the frame (Home keeps the `Arc` of each card a landing removes, not the catalog).
 #[derive(Clone, Copy)]
 pub struct HubsView<'a> {
-    data: &'a HomeCatalog,
+    data: &'a Arc<HomeCatalog>,
     pub generation: u32,
     pub state: HubState,
 }
