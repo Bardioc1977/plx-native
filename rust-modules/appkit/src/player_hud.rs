@@ -13,6 +13,7 @@ use plx_media::player::text_style::{
     position_lift, size_scale, wrap_width, CAPTION_ANCHOR_LINES, CAPTION_FACE, CAPTION_FLOOR_Y,
     CAPTION_LINE_PITCH, CAPTION_TEXT_INSET, HUD_CONTROLS_TOP_Y, SUB_BASE_Y, SUB_CEIL_Y,
 };
+use crate::scrub_undo::{self, KnobSpring, LineExtents, Undo};
 use plx_ui::consts::{SCR_H, SCR_W};
 use plx_ui::theme;
 use plx_ui::widgets::{
@@ -78,8 +79,8 @@ fn display_pos_ns(loading: bool, seekdisp: i64, scrub: i64, livepos: i64) -> i64
 pub struct ClockWarm {
     /// The (elapsed, remaining) seconds `strings` were formatted for.
     key: Option<(i64, i64)>,
-    /// `(text, bold)` exactly as [`draw_playbar`] hands them to `Painter::text`.
-    strings: Vec<(CString, c_int)>,
+    /// `(text, bold, size)` exactly as [`draw_playbar`] hands them to `Painter::text`.
+    strings: Vec<(CString, c_int, c_int)>,
 }
 
 impl ClockWarm {
@@ -103,16 +104,24 @@ impl ClockWarm {
             self.key = Some(key);
             self.strings.clear();
             let (el, rem) = key;
+            let (cap, grown) = (theme::size::CAPTION, crate::scrub_preview::CLOCK_GROWN_SZ);
             let clocks = [
-                (fmt_time(el * SEC_NS, false), 1),
-                (fmt_time(rem * SEC_NS, true), 0),
-                (fmt_time((el + 1) * SEC_NS, false), 1),
-                (fmt_time((rem - 1).max(0) * SEC_NS, true), 0),
+                (fmt_time(el * SEC_NS, false), 1, cap),
+                (fmt_time(rem * SEC_NS, true), 0, cap),
+                (fmt_time((el + 1) * SEC_NS, false), 1, cap),
+                (fmt_time((rem - 1).max(0) * SEC_NS, true), 0, cap),
+                // the elapsed clock also draws at the size it grows to during a scrub with no card
+                // (`scrub_preview::clock_faces`); cold, that is a font open and a rasterisation in
+                // the middle of a hold. Last, so the resting sizes are never starved of the frame's
+                // budget.
+                (fmt_time(el * SEC_NS, false), 1, grown),
+                (fmt_time((el + 1) * SEC_NS, false), 1, grown),
             ];
-            self.strings.extend(clocks.into_iter().filter_map(|(s, bold)| Some((CString::new(s).ok()?, bold))));
+            self.strings
+                .extend(clocks.into_iter().filter_map(|(s, bold, sz)| Some((CString::new(s).ok()?, bold, sz))));
         }
-        for (s, bold) in &self.strings {
-            plx_gfx::text::queue_prewarm(s.as_ptr(), theme::size::CAPTION, *bold);
+        for (s, bold, sz) in &self.strings {
+            plx_gfx::text::queue_prewarm(s.as_ptr(), *sz, *bold);
         }
     }
 }
@@ -522,6 +531,16 @@ pub struct TransportRow {
     /// without this a session that ended paused would hand the next one a spurious resume edge on
     /// its first frame and flash `Play` over a start nobody pressed play for.
     pause_seen: Option<bool>,
+    /// **The scrub preview's memo** — a RENDER memo like `widths`: which BIF still the draw can
+    /// show and which one is in flight. Stepped where that art is probed, in [`draw_hud`]; see
+    /// [`crate::scrub_preview`].
+    preview: crate::scrub_preview::ScrubPreview,
+    /// **The undo window** a committed scrub opened, if one is open: the ghost tick at the origin
+    /// and the `BACK · m:ss` chip are drawn from it, and the player screen's BACK reads it
+    /// ([`Self::undo_origin`]). Its deadline is the wall clock's, so it is stepped by nothing.
+    undo: Option<Undo>,
+    /// The knob's return to the playhead when a scrub is cancelled ([`crate::scrub_undo`]).
+    spring: KnobSpring,
 }
 
 impl Default for TransportRow {
@@ -537,6 +556,9 @@ impl TransportRow {
             widths: Vec::new(),
             play_at: None,
             pause_seen: None,
+            preview: crate::scrub_preview::ScrubPreview::new(),
+            undo: None,
+            spring: KnobSpring::new(),
         }
     }
 
@@ -555,11 +577,62 @@ impl TransportRow {
     /// control the narrower one does not have.
     pub fn step(&mut self, slot: ControlSlot, focus: i32, btn: i32, dt: f32, now: u32) {
         self.note_transport(now);
+        // Here and not in the draw: a scrub can end with the transport hidden (UP-hide), when
+        // nothing draws, and the next one must not open on this one's last still.
+        let scrub_ns = plx_media::player::TX.scrub_ns.load(Relaxed);
+        let live = scrub_ns >= 0;
+        if !live {
+            self.preview.release();
+        }
+        self.preview.motion.step_live(live, now);
+        self.spring.step(scrub_ns, now);
+        // a closed window that has finished fading is forgotten
+        if self.undo.as_ref().is_some_and(|u| !u.visible(now)) {
+            self.undo = None;
+        }
         let f = (focus == 1)
             .then(|| usize::try_from(btn).ok())
             .flatten()
             .filter(|&i| i < slot.items().max(0) as usize);
         self.pop.step(f, dt);
+    }
+
+    /// Do the title block, control row and bottom tabs take the pointer? Not while a scrub has
+    /// them faded away, nor until they are back ([`crate::scrub_preview::Motion`]).
+    pub fn chrome_interactive(&self) -> bool {
+        self.preview.motion.chrome_interactive()
+    }
+
+    /// Does the scrub's choreography (chrome fade, card, knob clock) still move at `now`? Owed a
+    /// frame for as long as it does.
+    pub fn scrub_motion_animating(&self, now: u32) -> bool {
+        self.preview.motion.animating(now)
+            || self.spring.busy(now)
+            || self.undo.as_ref().is_some_and(|u| u.phase(now) == 2)
+    }
+
+    /// **Open the undo window**: a scrub that started from `origin_ns` while the film was playing
+    /// has just committed at `now`. Replaces any window already open.
+    pub fn open_undo(&mut self, origin_ns: i64, now: u32) {
+        // the chip's text is formatted here, once, and drawn from for the window's whole life
+        self.undo = Some(Undo::open(origin_ns, now).with_chip(plx_platform::i18n::msg::settings_back()));
+    }
+
+    /// Close the window at once, with no fade: it was used, or what it would undo is no longer on
+    /// screen.
+    pub fn close_undo(&mut self) {
+        self.undo = None;
+    }
+
+    /// Where BACK returns to, while the window is armed at `now`.
+    pub fn undo_origin(&self, now: u32) -> Option<i64> {
+        self.undo.as_ref().filter(|u| u.armed(now)).map(|u| u.origin_ns())
+    }
+
+    /// The window's state as a frame depends on it (0 gone, 1 open, 2 fading): folded into the
+    /// player's `clock_fingerprint`, so the deadline and the fade each owe a frame.
+    pub fn undo_phase(&self, now: u32) -> u8 {
+        self.undo.as_ref().map_or(0, |u| u.phase(now))
     }
 
     /// Control `i`'s focus pop this frame — the read half of the row's springs, for the two
@@ -1580,7 +1653,7 @@ pub enum Knob {
 /// differently: the player route from its own scrub gesture, seek target and focus ring
 /// ([`Playbar::live`]), and the detail page's full-trailer transport from a preview session that
 /// has none of the three.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Playbar {
     /// the DISPLAYED playhead (a seek target, a scrub preview or the published position)
     pub pos_ns: i64,
@@ -1590,6 +1663,11 @@ pub struct Playbar {
     pub mark: TransportMark,
     /// drives the inline spinner's rotation
     pub now: u32,
+    /// how far the knob clock has grown, 0 (resting, [`theme::size::CAPTION`]) to 1
+    /// ([`crate::scrub_preview::CLOCK_GROWN_SZ`]), while a scrub shows no card
+    /// ([`crate::scrub_preview::Motion::clock_grow`]). The two sizes are CROSSFADED on it
+    /// ([`crate::scrub_preview::clock_faces`]); a size is never tweened.
+    pub clock_grow: f32,
 }
 
 impl Playbar {
@@ -1630,13 +1708,14 @@ impl Playbar {
             knob,
             mark: transport_mark(paused, busy, scrub >= 0, dispos, livepos, since_play_ms),
             now,
+            clock_grow: 0.0,
         }
     }
 }
 
 /// The playbar: scrubber, playhead knob, elapsed/remaining clocks and the state read-out. The
 /// player HUD and the detail page's full-trailer transport both draw it, so the two cannot drift.
-pub fn draw_playbar(p: Painter, bar: Playbar, measure: &dyn plx_machine::machine::Measure) {
+pub fn draw_playbar(p: Painter, bar: Playbar, measure: &dyn plx_machine::machine::Measure) -> LineExtents {
     let e = hud_env();
     let white = theme::TEXT_PRIMARY;
     let dim = theme::TEXT_SECONDARY;
@@ -1701,17 +1780,18 @@ pub fn draw_playbar(p: Painter, bar: Playbar, measure: &dyn plx_machine::machine
     // elapsed under the playhead (':' centered on the knob, clamped to the bar); remaining at the
     // right — hidden once the moving elapsed label would overlap it (near the end of the movie).
     let ty = sy + 30.0;
-    let (el_l, el_r) = draw_clock(
-        p,
-        &fmt_time(dispos, false),
-        hx,
-        ty,
-        theme::size::CAPTION,
-        white,
-        sx,
-        sx + sw,
-        measure,
-    );
+    // A grown knob clock keeps its BASELINE, so it grows upward and never into the remaining clock's
+    // line. It is a CROSSFADE of two ladder rungs (the resting CAPTION and the one above it), each
+    // laid out at its own size, never a tweened size or a scaled texture; the extents the rest of
+    // the line clears are the union of the faces drawn.
+    let elapsed = fmt_time(dispos, false);
+    let (mut el_l, mut el_r) = (f32::INFINITY, f32::NEG_INFINITY);
+    for (sz, face_a) in crate::scrub_preview::clock_faces(theme::size::CAPTION, bar.clock_grow).into_iter().flatten() {
+        let ety = plx_gfx::text::baseline_y(sz, 1, theme::size::CAPTION, 1, ty);
+        let (l, r) = draw_clock(p.alpha(face_a), &elapsed, hx, ety, sz, white, sx, sx + sw, measure);
+        el_l = el_l.min(l);
+        el_r = el_r.max(r);
+    }
     let rem = fmt_time(dur - dispos, true);
     // MEASURE the label, never estimate it. `chars * CAPTION * 0.52` was an Arial-calibrated
     // constant guarding a real behaviour — the remaining clock hides before the moving elapsed
@@ -1743,6 +1823,7 @@ pub fn draw_playbar(p: Painter, bar: Playbar, measure: &dyn plx_machine::machine
     // the clock's line box; drops to the clock's LEFT when the right side is against the remaining
     // label / screen edge.
     let mark = bar.mark;
+    let mut mark_x = None;
     if mark != TransportMark::None {
         // pause bars under-fill their viewBox (14/24 tall) — a 30px box renders ~17px of ink,
         // matching the CAPTION clock's cap height so the glyph reads as the label's size. The two
@@ -1790,6 +1871,11 @@ pub fn draw_playbar(p: Painter, bar: Playbar, measure: &dyn plx_machine::machine
         } else {
             el_r + GAP - ink.0 * bs
         };
+        // …and where its INK landed, for whatever else the clock line carries ([`LineExtents`])
+        mark_x = Some(match glyph {
+            Some(_) => (bx + ink.0 * bs, bx + ink.1 * bs),
+            None => (bx, bx + isz),
+        });
         match glyph {
             Some(id) => {
                 plx_ui::icons::draw(p, id, Rect::new(bx, icy - bs * 0.5, bs, bs), white)
@@ -1801,6 +1887,7 @@ pub fn draw_playbar(p: Painter, bar: Playbar, measure: &dyn plx_machine::machine
                 .draw(&e, p),
         }
     }
+    LineExtents { clock: (el_l, el_r), mark: mark_x, rem_l: rem_shown.then_some(rem_l), lo: sx, hi: sx + sw }
 }
 
 /// The transport HUD, composed from retui widgets through a root `Painter`.
@@ -1849,6 +1936,13 @@ pub fn draw_hud(
 
     draw_scrim(p);
 
+    // While a scrub is live the title block, the control row and the tabs fade away so the card has
+    // the room (and nothing hovers under it); the bar, the knob and both clocks stay. The same
+    // alpha restores them after the scrub — see `scrub_preview::Motion`.
+    let chrome_a = row.preview.motion.chrome_alpha(now);
+    let chrome = chrome_a > 0.004;
+    let pc = p.alpha(chrome_a);
+
     if transport {
         // title block under the playbar: for an episode, "S1, E1 · Episode Name" (white) sits above the
         // SHOW title; for a movie (or any extra, trailers included), the route ctxline over the movie
@@ -1856,57 +1950,66 @@ pub fn draw_hud(
         // has `is_episode == true` (it still labels "Go to Show" elsewhere) but no real S#/E# address,
         // so it takes this same "Trailer" ctxline + title treatment a movie trailer already gets,
         // instead of a fabricated `S0 · E0` kicker.
-        if let Some(n) = meta.now_playing().filter(|n| n.is_real_episode) {
-            // `fmt::episode_kicker` outright — this line was a byte-identical hand-spelling of it, which
-            // is the drift that formatter exists to prevent (the pre-roll ctx line and the Up Next
-            // caption already read it, and the whole point is that all three say the same thing).
-            let kicker = CString::new(plx_ui::fmt::episode_kicker(
-                n.season,
-                n.index,
-                &n.ep_title,
-            ))
-            .unwrap_or_default();
-            // `if let Ok`, not `.unwrap_or_default()`: before this function was factored out, an
-            // interior-NUL title (the one CString::new can fail on) simply drew nothing — the
-            // refactor was supposed to be visual-no-op, and an `unwrap_or_default()` here draws an
-            // EMPTY title line instead of skipping it, which is a real (if rare) behavior change.
-            if let Ok(title) = CString::new(n.title.clone()) {
-                draw_title(p, Kicker::Episode(kicker.as_ptr()), title.as_ptr());
+        if chrome {
+            if let Some(n) = meta.now_playing().filter(|n| n.is_real_episode) {
+                // `fmt::episode_kicker` outright — this line was a byte-identical hand-spelling of it, which
+                // is the drift that formatter exists to prevent (the pre-roll ctx line and the Up Next
+                // caption already read it, and the whole point is that all three say the same thing).
+                let kicker = CString::new(plx_ui::fmt::episode_kicker(
+                    n.season,
+                    n.index,
+                    &n.ep_title,
+                ))
+                .unwrap_or_default();
+                // `if let Ok`, not `.unwrap_or_default()`: before this function was factored out, an
+                // interior-NUL title (the one CString::new can fail on) simply drew nothing — the
+                // refactor was supposed to be visual-no-op, and an `unwrap_or_default()` here draws an
+                // EMPTY title line instead of skipping it, which is a real (if rare) behavior change.
+                if let Ok(title) = CString::new(n.title.clone()) {
+                    draw_title(pc, Kicker::Episode(kicker.as_ptr()), title.as_ptr());
+                }
+            } else {
+                draw_title(
+                    pc,
+                    Kicker::Context(plx_media::route::ctxline_cptr(ps)),
+                    plx_media::route::title_cptr(ps),
+                );
             }
-        } else {
-            draw_title(
-                p,
-                Kicker::Context(plx_media::route::ctxline_cptr(ps)),
-                plx_media::route::title_cptr(ps),
-            );
-        }
 
-        // The right control row, from the slot the CALLER resolved — so what is drawn and what a
-        // keypress activates are the same value, not two derivations of it.
-        match slot {
-            ControlSlot::UpNext(_) => {
-                crate::up_next::draw(ps, row, up, p, focus == 1, btn, now, measure);
-            }
-            ControlSlot::Skip(pr) => {
-                crate::skip_pill::draw(row, p, pr, focus == 1, measure);
-            }
-            ControlSlot::Discs => {
-                for i in 0..BTN_N {
-                    let pop = row.scale(i);
-                    TransportButton::new(i, Rect::new(btn_x(i), BTN_Y, BTN_S, BTN_S))
-                        .focused(focus == 1 && btn == i)
-                        // The whole control row stands on the VIDEO PLANE — see `ControlGround`. It is
-                        // the HUD's own bottom ramp (drawn at the top of this function) that makes the
-                        // unkeyed face legal: the picture is unreadable, but the ground under these
-                        // discs is known to be dark.
-                        .ground(ControlGround::Unkeyed)
-                        .scale(pop)
-                        .draw(&e, p);
+            // The right control row, from the slot the CALLER resolved — so what is drawn and what a
+            // keypress activates are the same value, not two derivations of it.
+            match slot {
+                ControlSlot::UpNext(_) => {
+                    crate::up_next::draw(ps, row, up, pc, focus == 1, btn, now, measure);
+                }
+                ControlSlot::Skip(pr) => {
+                    crate::skip_pill::draw(row, pc, pr, focus == 1, measure);
+                }
+                ControlSlot::Discs => {
+                    for i in 0..BTN_N {
+                        let pop = row.scale(i);
+                        TransportButton::new(i, Rect::new(btn_x(i), BTN_Y, BTN_S, BTN_S))
+                            .focused(focus == 1 && btn == i)
+                            // The whole control row stands on the VIDEO PLANE — see `ControlGround`. It is
+                            // the HUD's own bottom ramp (drawn at the top of this function) that makes the
+                            // unkeyed face legal: the picture is unreadable, but the ground under these
+                            // discs is known to be dark.
+                            .ground(ControlGround::Unkeyed)
+                            .scale(pop)
+                            .draw(&e, pc);
+                    }
                 }
             }
         }
 
-        draw_playbar(p, Playbar::live(ps, busy, focus, row.since_play_ms(now), now), measure);
+        let mut bar = Playbar::live(ps, busy, focus, row.since_play_ms(now), now);
+        bar.clock_grow = row.preview.motion.clock_grow(now);
+        // a cancelled scrub's knob returns to the playhead rather than jumping to it
+        bar.pos_ns = row.spring.apply(bar.pos_ns, now);
+        let line = draw_playbar(p, bar, measure);
+        draw_undo(p, row.undo.as_mut().filter(|u| u.visible(now)), bar, line, now, measure);
+        // last, so the still floats over the title block and the control row as well
+        draw_scrub_preview(p, ps, row, bar);
     } // end `if transport`
 
     // bottom tabs as pills — Chapters only appears when the item actually has chapters
@@ -1920,7 +2023,7 @@ pub fn draw_hud(
     let ph = BTN_S; // = 64, same as the Subtitles/Audio buttons
     let py = (SB_Y + SCR_H) * 0.5 - ph * 0.5;
     let mut px = SB_X;
-    for (i, label) in tabs.iter().enumerate() {
+    for (i, label) in tabs.iter().enumerate().filter(|_| chrome) {
         let (focused, selected) = hud_tab_state(transport, focus, tab, i as i32);
         let pw = TabPill::width_measured(label, theme::size::BODY, measure);
         if let Ok(cs) = CString::new(*label) {
@@ -1930,10 +2033,89 @@ pub fn draw_hud(
                 // Same row band, same ramp, same ground as the transport discs — everything the
                 // HUD draws stands on the video plane (`ControlGround`).
                 .ground(ControlGround::Unkeyed)
-                .draw(&e, p);
+                .draw(&e, pc);
         }
         px += pw + 16.0;
     }
+}
+
+/// The bar's x for a position `pos_ns` of `dur_ns`, clamped to the bar's ends.
+fn bar_x(pos_ns: i64, dur_ns: i64) -> f32 {
+    SB_X + (sb_w() as f64 * (pos_ns as f64 / dur_ns.max(1) as f64).clamp(0.0, 1.0)) as f32
+}
+
+/// **The undo window's marks** ([`crate::scrub_undo`]): a ghost tick on the bar at the position the
+/// last committed scrub started from, and the chip `BACK · m:ss` on the knob clock's line, on the
+/// side of the tick. Both at the window's opacity, so they leave together.
+fn draw_undo(
+    p: Painter,
+    undo: Option<&mut Undo>,
+    bar: Playbar,
+    line: LineExtents,
+    now: u32,
+    measure: &dyn plx_machine::machine::Measure,
+) {
+    let Some(u) = undo else { return };
+    if bar.dur_ns <= 0 {
+        return;
+    }
+    let a = u.alpha(now);
+    let ox = bar_x(u.origin_ns(), bar.dur_ns);
+    let white = theme::TINT_WHITE;
+    p.alpha(a * scrub_undo::TICK_A)
+        .rect(scrub_undo::tick_rect(ox, SB_Y + SB_H * 0.5), 0.0, white, white, 0.0);
+    let sz = theme::size::MICRO;
+    let Some(chip) = u.chip_mut() else { return };
+    let w = chip.width(sz, measure);
+    let Some(x) = scrub_undo::chip_x(&line, ox, w) else { return };
+    // the clock's line, aligned on its baseline (the clock is CAPTION, bold)
+    let y = plx_gfx::text::baseline_y(sz, 0, theme::size::CAPTION, 1, SB_Y + 30.0);
+    p.alpha(a * scrub_undo::CHIP_A).text(chip.c_str().as_ptr(), x, y, sz, white, 0, 0);
+}
+
+/// **The scrub preview** ([`crate::scrub_preview`]): while a live scrub preview is up, the still
+/// at the knob's position, floated above the knob; after it, the same still fading out. Draws
+/// nothing for a part with no BIF index, and nothing until the first still lands.
+fn draw_scrub_preview(p: Painter, ps: &plx_media::route::PlaybackSession, row: &mut TransportRow, bar: Playbar) {
+    use crate::scrub_preview::{card_rect, card_size, draw, scaled_about, still_ms, still_path, Look, REQ_H, REQ_W};
+    let part = plx_media::route::cur_part_id(ps);
+    let sid = plx_media::route::item_sid(plx_media::route::cur_sid(ps)).raw();
+    let show = if plx_media::player::TX.scrub_ns.load(Relaxed) < 0 {
+        row.preview.motion.exit(bar.now)
+    } else if bar.dur_ns <= 0 {
+        None
+    } else {
+        let generation = plx_media::route::sess(ps);
+        let target = still_ms(bar.pos_ns);
+        let look = |ms: i64| {
+            let path = still_path(part, ms);
+            if plx_ui::tex::resolve_on(sid, &path, REQ_W, REQ_H, false) != 0 {
+                Look::Ready
+            } else if plx_ui::tex::failed_on(sid, &path, REQ_W, REQ_H, false) {
+                Look::Failed
+            } else {
+                Look::Waiting
+            }
+        };
+        let shown = row.preview.step((part, &generation), target, bar.now, look);
+        let absent = row.preview.absent();
+        row.preview.motion.observe(shown, target, absent, bar_x(bar.pos_ns, bar.dur_ns), bar.now)
+    };
+    let Some(sh) = show else { return };
+    let (tex, tw, th) = plx_ui::tex::resolve_wh_on(sid, &still_path(part, sh.ms), REQ_W, REQ_H, false);
+    if tex == 0 || tw <= 0.0 || th <= 0.0 {
+        return;
+    }
+    // In-place crossfade only between two resident stills of the same aspect; otherwise the swap is
+    // immediate (the card's width would have to jump mid-fade).
+    let prev = sh.prev.and_then(|(old, t)| {
+        let (otex, ow, oh) = plx_ui::tex::resolve_wh_on(sid, &still_path(part, old), REQ_W, REQ_H, false);
+        (otex != 0 && oh > 0.0 && ((ow / oh) - (tw / th)).abs() < 0.01).then_some((otex, t))
+    });
+    let (w, _) = card_size(tw, th);
+    let rest = card_rect(sh.knob_x, SB_X, sb_w(), SB_Y, w);
+    let r = scaled_about(rest, sh.knob_x, SB_Y + SB_H * 0.5, sh.scale);
+    draw(p.alpha(sh.alpha), r, tex, tw, th, prev);
 }
 
 /// **The transport's outermost drawn chrome, for the overscan audit**
@@ -2024,7 +2206,7 @@ mod tests {
         // `prepare` may run on a frame the loop then does not present: it records, uploads nothing.
         assert!(plx_gfx::text::prewarm_pending(), "prepare queued the clocks");
         assert!(!plx_gfx::text::prewarm_resident_for_test(b"1:23", sz, 1), "prepare itself uploaded");
-        // Four strings against a three-string frame budget: the second presented frame finishes them.
+        // Six strings against a three-string frame budget: the second presented frame finishes them.
         while plx_gfx::text::prewarm_pending() {
             plx_ui::panel_motion::PanelMotion::drain_queued_text_for_test();
         }
@@ -2032,6 +2214,16 @@ mod tests {
             assert!(
                 plx_gfx::text::prewarm_resident_for_test(text.as_bytes(), sz, bold),
                 "{text:?} (bold={bold}) was left for the draw to rasterise after the back-buffer wait"
+            );
+        }
+        // …and the elapsed clock at the size it GROWS to during a scrub with no card
+        // (`scrub_preview::clock_faces`): a cold rung there is a font open plus a rasterisation in
+        // the middle of a hold.
+        let grown = crate::scrub_preview::CLOCK_GROWN_SZ;
+        for text in ["1:23", "1:24"] {
+            assert!(
+                plx_gfx::text::prewarm_resident_for_test(text.as_bytes(), grown, 1),
+                "{text:?} at the grown size ({grown}) was left cold"
             );
         }
 
