@@ -110,7 +110,7 @@ The `Grid` asks for its FOCUSED card's art first even though that card paints la
 neighbours): the source serves the newest frame's requests in the order they were made, so a seated
 first poster used to arrive after every sibling (`card_row::lead_focused` resolves it once, before
 the others, and `draw_focused_led` draws with that answer; one `card_motion` occurrence per card per
-frame, never a second `resolve_card_art`). A `Shelf` still asks in paint order.
+walk, never a second `resolve_card_art`). A `Shelf` still asks in paint order.
 
 A `Shelf` built with `animate_landings(true)` (Home's Continue Watching row) PLAYS a landing that no
 move announced instead of cutting it (`cards/landing.rs`): a removed card fades out as a ghost, named by its
@@ -173,8 +173,10 @@ into the margin. Only a trailing block may be wider than `under_budget` (it is g
 wants, up to that room); a block that still does not fit glides inside its window, in lockstep
 through the one `marquee::Block`. A label that names a tile whose face cut the name (the
 Collections page) is held to its tile instead: `TileLabel::within_tile` gives the block a
-tile-wide window (never the neighbours' room) and the run dissolves into the window's edge over
-`card_row::LABEL_EDGE_FADE` px (`Painter::text_fade`) as the shared marquee glides it. All of it is judged where the tile will REST
+tile-wide window (never the neighbours' room) and the run dissolves at BOTH of the window's edges
+over `card_row::LABEL_EDGE_FADE` px (`Painter::text_fade_edges`: out into the right edge, in from the
+left edge once the run has glided past it, a band that grows with the travel and is none at rest)
+as the shared marquee glides it. All of it is judged where the tile will REST
 (`CardRow::settle_lag`, passed through `TileLabel::settling`), so a scroll glide never flips the
 block's alignment or width mid-flight. A headshot's credit label is not placed this way: it is a
 box inside its own slot (`draw_credit_label`), which cannot cross the margin, and it never moves.
@@ -738,6 +740,12 @@ texture arrives after it drew a skeleton (`card_motion::Scope::arrival`, the car
 (exempt: the picture is here) on the page fade's own duration and curve (`xfade::arrived`); art that
 was resident at the card's first draw shows whole. The count must not include that sheet, or a frame
 dump (which holds on any counted placeholder at a frozen clock) would never write the dissolve's frame.
+**The history advances once per card per frame, whatever the number of walks**: the frame's first walk
+that draws a card (discovery) works its verdict and art phase out, and every later walk (a glass source
+replay, the visible walk) reuses that answer, so the picture a glass filters is the picture the panel
+shows (`card_motion` module docs; `backdrop::walk_serial` names the walk). Keyed by the draw's place in
+the whole frame, a replay that started with the landing moved the visible draw to an occurrence with no
+history, and the art showed whole in one frame (DEBUG-5).
 
 **The count is zero or non-zero, never "how many"**: the page closure runs once per walk (discovery,
 each blur source job, the visible pass) and each walk ticks. **A page shown as a held image** (a
