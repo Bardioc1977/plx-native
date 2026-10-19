@@ -195,6 +195,11 @@ impl BrowseStore {
         self.state.held_keys(target)
     }
 
+    /// Is any shelf of the addressed section committed (see [`BrowseState::hubs_committed`])?
+    pub fn hubs_committed(&self, target: SectionAddress) -> bool {
+        self.state.hubs_committed(target)
+    }
+
     /// Is a membership re-query's first page still out with no Library page on top to pump it? The
     /// application pumps this store itself while it holds (`Bridge::reconcile_pump`).
     pub fn requery_owed(&self) -> bool {
@@ -269,6 +274,30 @@ impl BrowseStore {
         crate::browse::seed_items_for_owner_test(&mut self.state, count);
     }
 
+    /// [`seed_items_for_test`](Self::seed_items_for_test) with `count` collections: the listing a
+    /// section answers on `type=18`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_collections_for_test(&mut self, count: usize) {
+        crate::browse::seed_collections_for_owner_test(&mut self.state, count);
+    }
+
+    /// **Hold the listing's fetch**: the single-flight flag stays taken, so the page the section is
+    /// waiting for is never asked for and nothing lands. A host test's server is a closed port, whose
+    /// fetch fails at once; a page that wants to be read while its listing is LOADING needs the
+    /// listing to stay so. A seeded listing ([`seed_items_for_test`](Self::seed_items_for_test)) still
+    /// lands over the hold.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hold_listing_for_test(&mut self) {
+        crate::browse::hold_listing_for_owner_test(&self.adapter);
+    }
+
+    /// [`seed_collections_for_test`](Self::seed_collections_for_test) with each collection's
+    /// `(title, thumb)` stated.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_named_collections_for_test(&mut self, rows: &[(&str, &str)]) {
+        crate::browse::seed_named_collections_for_owner_test(&mut self.state, rows);
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn seed_sources_for_test(&mut self, count: usize, reachable: bool) {
         crate::browse::seed_sources_for_owner_test(&mut self.state, count, reachable);
@@ -337,6 +366,12 @@ impl BrowseStore {
             titles,
             per_row,
         );
+    }
+
+    /// A landing held behind the publication gate, as the worker leaves one: staged, not drawn.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stage_shelves_for_test(&mut self, section: usize) {
+        crate::browse::section_hubs::stage_shelves_for_owner_test(&mut self.state, section);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -656,6 +691,24 @@ mod contract_tests {
         assert_eq!(held.len(), shelf_only.len() + 3, "the shelves plus the three grid items: {:?}", rks(&held));
         assert!(!rks(&held).contains(&"7".to_string()), "past the window");
         assert!(browse.held_keys(SectionAddress { epoch: target.epoch + 1, ..target }).is_empty(), "a stale address holds nothing");
+    }
+
+    /// `hubs_committed` is the drawn set: nothing before the first publication, and still nothing
+    /// while a landing is only staged behind the gate; a stale address has none.
+    #[test]
+    fn hubs_committed_reads_the_drawn_set_not_the_staged_one() {
+        let _guard = plx_base::testlock::serial();
+        plx_plex::plex::reset_servers_for_test();
+        let mut browse = BrowseStore::default();
+        browse.seed_two_source_table_for_test();
+        let id = browse.hubs_snapshot().view().id().unwrap();
+        let target = SectionAddress { epoch: id.epoch, sid: id.sid, section: id.section };
+        assert!(!browse.hubs_committed(target), "nothing has been published");
+        crate::browse::section_hubs::stage_shelves_for_owner_test(&mut browse.state, 0);
+        assert!(!browse.hubs_committed(target), "a staged set is not drawn");
+        assert!(browse.run(BrowseCmd::Addressed { target, work: LibraryWork::Hubs { may_publish: true } }));
+        assert!(browse.hubs_committed(target), "the committed set is drawn");
+        assert!(!browse.hubs_committed(SectionAddress { epoch: target.epoch + 1, ..target }), "a stale address names no section");
     }
 
     #[test]

@@ -10,7 +10,9 @@
 //! paging all describe the same cells. [`neighbour`], [`settled`] and [`growth_before`] are
 //! column-count agnostic, and the Library's rail-aware layout uses them too.
 
-use crate::card_row::{self, RowStyle, LABEL_BAND_COLLAPSED, UNDER_LABEL_H};
+use crate::card_row::{self, RowStyle, LABEL_BAND_COLLAPSED};
+#[cfg(test)]
+use crate::card_row::UNDER_LABEL_H;
 #[cfg(test)]
 use crate::consts::CARD_H;
 use crate::consts::{CARD_W, MARGIN_X, MARGIN_Y, SCR_H, SCR_W, UNDER_LABEL_AIR};
@@ -39,12 +41,47 @@ impl GridBand {
 /// ten thousand rows costs exactly as much as a short one; no per-frame allocation or row walk.
 pub struct GridBands {
     focus: Option<usize>,
-    slots: [(Option<usize>, Spring); MAX_GRID_BANDS],
+    slots: [Slot; MAX_GRID_BANDS],
+    /// What the focused caption band shows (CONTRACT FREEZE: P3 sizes the band from it). A pref
+    /// input, not motion: it is not in [`write`](Self::write).
+    caption_policy: crate::caption_policy::CaptionPolicy,
+}
+
+/// One band: the row it opens under, the card of that row whose caption it carries (known once the
+/// row has held focus on a tick, so a band that closes behind a focus move still knows whose
+/// caption fades with it) and the spring that opens and closes it.
+#[derive(Clone, Copy)]
+struct Slot {
+    row: Option<usize>,
+    card: Option<usize>,
+    spring: Spring,
+}
+
+impl Slot {
+    const EMPTY: Self = Self { row: None, card: None, spring: Spring::at(0.0) };
 }
 
 impl GridBands {
     pub fn new() -> Self {
-        Self { focus: None, slots: [(None, Spring::at(0.0)); MAX_GRID_BANDS] }
+        Self {
+            focus: None,
+            slots: [Slot::EMPTY; MAX_GRID_BANDS],
+            caption_policy: crate::caption_policy::CaptionPolicy::DEFAULT,
+        }
+    }
+
+    pub fn set_caption_policy(&mut self, policy: crate::caption_policy::CaptionPolicy) {
+        self.caption_policy = policy;
+    }
+
+    pub fn caption_policy(&self) -> crate::caption_policy::CaptionPolicy {
+        self.caption_policy
+    }
+
+    /// The focused band's height under this grid's caption policy (0 / 80 / 112), what
+    /// [`growth_before_for`] and the other `_for` geometry take.
+    pub fn band_h(&self) -> f32 {
+        crate::caption_policy::band_h(&self.caption_policy)
     }
 
     /// The row whose band is open (or opening).
@@ -56,40 +93,61 @@ impl GridBands {
         if self.focus == row { return; }
         self.focus = row;
         if !animate {
-            self.slots = [(None, Spring::at(0.0)); MAX_GRID_BANDS];
-            if let Some(row) = row { self.slots[0] = (Some(row), Spring::at(1.0)); }
+            self.slots = [Slot::EMPTY; MAX_GRID_BANDS];
+            if let Some(row) = row { self.slots[0] = Slot { row: Some(row), card: None, spring: Spring::at(1.0) }; }
             return;
         }
         let Some(row) = row else { return };
-        if self.slots.iter().any(|(r, _)| *r == Some(row)) { return; }
+        if self.slots.iter().any(|s| s.row == Some(row)) { return; }
         // A stream faster than remote repeat can fill the bounded pool. Retire the smallest
         // closing band, never the focused row; normal input leaves several spare slots.
-        let at = self.slots.iter().position(|(r, _)| r.is_none()).unwrap_or_else(|| {
-            self.slots.iter().enumerate().min_by(|(_, a), (_, b)| a.1.pos.total_cmp(&b.1.pos))
+        let at = self.slots.iter().position(|s| s.row.is_none()).unwrap_or_else(|| {
+            self.slots.iter().enumerate().min_by(|(_, a), (_, b)| a.spring.pos.total_cmp(&b.spring.pos))
                 .map_or(0, |(at, _)| at)
         });
-        self.slots[at] = (Some(row), Spring::at(0.0));
+        self.slots[at] = Slot { row: Some(row), card: None, spring: Spring::at(0.0) };
+    }
+
+    /// Note which card of the focused row `row` the focus is on, so the band, once it closes behind
+    /// a move, still knows whose caption it carries ([`closing`](Self::closing)). A card outside the
+    /// focused row is not noted.
+    pub fn note_card(&mut self, row: usize, card: usize) {
+        if self.focus != Some(row) { return; }
+        if let Some(slot) = self.slots.iter_mut().find(|s| s.row == Some(row)) { slot.card = Some(card); }
+    }
+
+    /// The bands closing behind a focus move, as `(row, card, expansion)`: each is the caption of
+    /// `card` (the one the row held focus on) at its band's own progress. The focused row's band is
+    /// not among them; a band with no card noted (a row that never held a tick) or fully shut is not.
+    pub fn closing(&self) -> impl Iterator<Item = (usize, usize, f32)> + '_ {
+        self.slots.iter().filter_map(|s| {
+            let (row, card) = (s.row?, s.card?);
+            (self.focus != Some(row) && s.spring.pos > 0.0).then_some((row, card, s.spring.pos))
+        })
     }
 
     pub fn tick(&mut self, k: f32, dt: f32) {
-        for (row, spring) in &mut self.slots {
-            let Some(r) = *row else { continue };
+        for slot in &mut self.slots {
+            let Some(r) = slot.row else { continue };
             let target = f32::from(self.focus == Some(r));
-            spring.step(target, k, dt);
-            if target == 0.0 && spring.pos.abs() < 1.0e-5 && spring.vel.abs() < 1.0e-4 { *row = None; }
+            slot.spring.step(target, k, dt);
+            if target == 0.0 && slot.spring.pos.abs() < 1.0e-5 && slot.spring.vel.abs() < 1.0e-4 { *slot = Slot::EMPTY; }
         }
     }
 
     pub fn geometry(&self) -> [GridBand; MAX_GRID_BANDS] {
-        self.slots.map(|(row, spring)| row.map_or(GridBand::CLOSED,
-            |row| GridBand { row, expansion: spring.pos }))
+        self.slots.map(|s| s.row.map_or(GridBand::CLOSED,
+            |row| GridBand { row, expansion: s.spring.pos }))
     }
 
     pub fn write(&self, c: &mut plx_machine::machine::Canon) {
         c.option(self.focus, |c, row| { c.u32(row as u32); });
-        c.seq(self.slots.iter().filter(|(row, _)| row.is_some()).count());
-        for (row, spring) in &self.slots {
-            if let Some(row) = row { c.u32(*row as u32).f32(spring.pos).f32(spring.vel); }
+        c.seq(self.slots.iter().filter(|s| s.row.is_some()).count());
+        for s in &self.slots {
+            if let Some(row) = s.row {
+                c.u32(row as u32).f32(s.spring.pos).f32(s.spring.vel);
+                c.option(s.card, |c, card| { c.u32(card as u32); });
+            }
         }
     }
 }
@@ -265,8 +323,14 @@ pub fn rows(len: usize) -> usize { len.div_ceil(COLS) }
 
 /// How far every open band above row `row` pushes it down.
 pub fn growth_before(row: usize, bands: &[GridBand]) -> f32 {
+    growth_before_for(card_row::LEGACY_BAND_H, row, bands)
+}
+
+/// [`growth_before`] for bands of `band_h` ([`crate::caption_policy::band_h`]): 40 px per open
+/// one-line band, 72 px per two-line one, nothing when the policy shows nothing.
+pub fn growth_before_for(band_h: f32, row: usize, bands: &[GridBand]) -> f32 {
     bands.iter().filter(|band| band.row < row)
-        .map(|band| card_row::under_band(band.expansion) - LABEL_BAND_COLLAPSED).sum()
+        .map(|band| card_row::under_band_for(band_h, band.expansion) - LABEL_BAND_COLLAPSED).sum()
 }
 
 /// Row `row`'s top in document space (before scroll), with every open band above it counted.
@@ -274,7 +338,12 @@ pub fn growth_before(row: usize, bands: &[GridBand]) -> f32 {
 pub fn row_top(row: usize, top: f32, bands: &[GridBand]) -> f32 { row_top_in(&Geom::DEFAULT, row, top, bands) }
 
 pub fn row_top_in(g: &Geom, row: usize, top: f32, bands: &[GridBand]) -> f32 {
-    top + row as f32 * g.pitch() + growth_before(row, bands)
+    row_top_in_for(card_row::LEGACY_BAND_H, g, row, top, bands)
+}
+
+/// [`row_top_in`] for bands of `band_h`.
+pub fn row_top_in_for(band_h: f32, g: &Geom, row: usize, top: f32, bands: &[GridBand]) -> f32 {
+    top + row as f32 * g.pitch() + growth_before_for(band_h, row, bands)
 }
 
 #[cfg(test)]
@@ -283,8 +352,14 @@ pub fn cell(index: usize, top: f32, scroll: f32, bands: &[GridBand]) -> Rect {
 }
 
 pub fn cell_in(g: &Geom, index: usize, top: f32, scroll: f32, bands: &[GridBand]) -> Rect {
+    cell_in_for(card_row::LEGACY_BAND_H, g, index, top, scroll, bands)
+}
+
+/// [`cell_in`] for bands of `band_h`.
+pub fn cell_in_for(band_h: f32, g: &Geom, index: usize, top: f32, scroll: f32, bands: &[GridBand]) -> Rect {
     let col = index % g.cols;
-    Rect::new(g.left + col as f32 * (g.w + g.gap), row_top_in(g, index / g.cols, top, bands) - scroll, g.w, g.h)
+    Rect::new(g.left + col as f32 * (g.w + g.gap),
+        row_top_in_for(band_h, g, index / g.cols, top, bands) - scroll, g.w, g.h)
 }
 
 #[cfg(test)]
@@ -321,14 +396,39 @@ pub fn snap_row(current: f32, row: usize, len: usize, top: f32, edge: f32) -> f3
 }
 
 pub fn snap_row_in(g: &Geom, current: f32, row: usize, len: usize, top: f32, edge: f32) -> f32 {
+    snap_row_in_for(card_row::LEGACY_BAND_H, g, current, row, len, top, edge)
+}
+
+/// [`snap_row_in`] for bands of `band_h`: the focused row shows whole with its open band.
+pub fn snap_row_in_for(band_h: f32, g: &Geom, current: f32, row: usize, len: usize, top: f32, edge: f32) -> f32 {
     if row == 0 || len == 0 { return 0.0; }
     let bands = settled(Some(row));
-    let focused_top = row_top_in(g, row, top, &bands);
-    let min = card_row::reveal(current, focused_top + g.h + UNDER_LABEL_H - (SCR_H - MARGIN_Y),
+    let focused_top = row_top_in_for(band_h, g, row, top, &bands);
+    let min = card_row::reveal(current, focused_top + g.h + shown_band(band_h) - (SCR_H - MARGIN_Y),
         focused_top - edge, f32::INFINITY);
     if min <= 0.0 { return 0.0; }
-    (0..=row).map(|k| row_top_in(g, k, top, &bands) - edge).find(|&at| at >= min - 0.5)
+    (0..=row).map(|k| row_top_in_for(band_h, g, k, top, &bands) - edge).find(|&at| at >= min - 0.5)
         .unwrap_or(focused_top - edge)
+}
+
+/// **The rest rule: a focused row rests where the first row does.** The scroll that puts row `row`'s
+/// poster top at the first row's resting y: `row` pitches down, plus `growth_before`, the growth of
+/// every open band above it (none for the row the focus itself opened). Row 0 rests at the head,
+/// scroll 0. The document's end holds it at `max`: the last rows of a list cannot scroll past the
+/// end, so they rest lower. A row never rests above the line.
+///
+/// The Library's `Layout::row_reveal` (its grid, and the Collections page that is the same layout)
+/// and a [`Grid`](crate::cards::Grid) built with `GridSpec::resting` (the Watchlist) both land here,
+/// so the line (244 on those pages) is one rule, not two.
+pub fn rest_scroll(row: usize, pitch: f32, growth_before: f32, max: f32) -> f32 {
+    if row == 0 { return 0.0; }
+    (row as f32 * pitch + growth_before).min(max).max(0.0)
+}
+
+/// The label block a focused row shows under its posters for a band of `band_h`: the band less the
+/// air [`UNDER_LABEL_AIR`] below it ([`UNDER_LABEL_H`] for the legacy band), never negative.
+fn shown_band(band_h: f32) -> f32 {
+    (card_row::open_gap(band_h) - UNDER_LABEL_AIR).max(0.0)
 }
 
 /// The D-pad neighbour of card `index` in a `len`-card grid of `cols` columns. Down from above a
@@ -353,9 +453,14 @@ pub fn visible(len: usize, top: f32, scroll: f32) -> std::ops::Range<usize> {
 }
 
 pub fn visible_in(g: &Geom, len: usize, top: f32, scroll: f32) -> std::ops::Range<usize> {
+    visible_in_for(card_row::LEGACY_BAND_H, g, len, top, scroll)
+}
+
+/// [`visible_in`] for bands of `band_h`.
+pub fn visible_in_for(band_h: f32, g: &Geom, len: usize, top: f32, scroll: f32) -> std::ops::Range<usize> {
     if len == 0 { return 0..0; }
     let pitch = g.pitch();
-    let first = ((scroll - top - g.h - UNDER_LABEL_H) / pitch).floor().max(0.0) as usize;
+    let first = ((scroll - top - g.h - shown_band(band_h)) / pitch).floor().max(0.0) as usize;
     let last = ((scroll + SCR_H - top) / pitch).ceil().max(0.0) as usize + 1;
     first.saturating_mul(g.cols)..last.saturating_mul(g.cols).min(len)
 }
@@ -420,15 +525,18 @@ mod tests {
         let closing = geometry.iter().find(|b| b.row == 0).unwrap().expansion;
         assert!(opened > 0.0 && opened < 1.0 && closing > 0.0 && closing < 1.0);
         assert!((opened + closing - 1.0).abs() < 0.0001);
-        assert_eq!(card_row::band_reveal(opened), 0.0, "caption waits until its space is open");
+        assert!(
+            (card_row::band_fade(opened) + card_row::band_fade(closing) - 1.0).abs() < 0.0001,
+            "the two captions of a move are one hand-over, out = 1 - in"
+        );
         for _ in 0..120 { bands.tick(k, 1.0 / 60.0); }
         let (_, moving) = plx_machine::idle::scoped_motion(|| bands.tick(k, 1.0 / 60.0));
         assert!(!moving, "a settled grid lets idle suppression sleep");
-        assert_eq!(bands.slots.iter().filter(|(r, _)| r.is_some()).count(), 1);
-        assert!(card_row::band_reveal(bands.geometry().iter().find(|b| b.row == 1).unwrap().expansion) > 0.999);
+        assert_eq!(bands.slots.iter().filter(|s| s.row.is_some()).count(), 1);
+        assert!(card_row::band_fade(bands.geometry().iter().find(|b| b.row == 1).unwrap().expansion) > 0.999);
         bands.focus(None, true);
         for _ in 0..120 { bands.tick(k, 1.0 / 60.0); }
-        assert!(bands.slots.iter().all(|(r, _)| r.is_none()));
+        assert!(bands.slots.iter().all(|s| s.row.is_none()));
     }
 
     /// The pop is armed from rest by a deliberate move, adopted whole when focus arrives
@@ -460,11 +568,11 @@ mod tests {
         for row in 1..200 {
             bands.focus(Some(row), true);
             bands.tick(RowStyle::EPISODE.k_scroll, 1.0 / 240.0);
-            assert!(bands.slots.iter().any(|(r, _)| *r == Some(row)));
-            assert!(bands.slots.iter().filter(|(r, _)| r.is_some()).count() <= MAX_GRID_BANDS);
+            assert!(bands.slots.iter().any(|s| s.row == Some(row)));
+            assert!(bands.slots.iter().filter(|s| s.row.is_some()).count() <= MAX_GRID_BANDS);
         }
         for _ in 0..120 { bands.tick(RowStyle::EPISODE.k_scroll, 1.0 / 60.0); }
-        assert_eq!(bands.slots.iter().filter(|(r, _)| r.is_some()).count(), 1);
+        assert_eq!(bands.slots.iter().filter(|s| s.row.is_some()).count(), 1);
         assert!(bands.geometry().iter().find(|b| b.row == 199).unwrap().expansion > 0.999);
         let before = bands.geometry();
         bands.focus(Some(199), true);

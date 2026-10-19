@@ -217,6 +217,9 @@ pub trait StackPage<H: Host> {
     fn wide_extent(&self, _k: Self::Key) -> bool {
         true
     }
+    /// Groups the page declares beyond its sections' own, appended after them (the group of a
+    /// listing still on its way: `PageRegions::declare_pending`).
+    fn extra_groups(&self, _cx: &Cx<'_, H>, _out: &mut Vec<GroupSpec>) {}
     /// The focus group of a focusable `Custom` / `Overlay` section.
     fn plain_group(&self, _cx: &Cx<'_, H>, _k: Self::Key, id: GroupId, extent: Rect) -> GroupSpec {
         GroupSpec {
@@ -240,6 +243,12 @@ pub trait StackPage<H: Host> {
     fn draw_heading(&self, _k: Self::Key, _f: &mut DrawFrame<'_, '_, H>, _r: Rect, _lift: f32) {}
     /// A `Custom` / `Overlay` section drawn in `r` (screen space); `scroll` is the page's.
     fn custom_draw(&self, _k: Self::Key, _f: &mut DrawFrame<'_, '_, H>, _r: Rect, _scroll: f32) {}
+    /// The Under posters policy grid section `k` opens its focused caption band by (0 / 80 / 112 px,
+    /// `caption_policy::band_h`). `None` keeps the legacy band (title and caption, 92 px): a page
+    /// whose captions are not the Under posters setting's keeps it.
+    fn caption_policy(&self, _k: Self::Key) -> Option<crate::caption_policy::CaptionPolicy> {
+        None
+    }
     /// The cards grid section `k`'s landing is fading out, painted BEFORE the grid's own cards so
     /// the ones that slid over their cells cover them. A page that keeps the cards it removed
     /// paints them with [`Grid::paint_ghosts`] (named by [`Grid::ghost_keys`]); the default keeps none.
@@ -588,6 +597,13 @@ impl<K: Copy + Eq> Stack<K> {
 
     /// Hand every grid the page: its top in document space and the scroll.
     fn sync_pages<H: Host, P: StackPage<H, Key = K>>(&mut self, p: &P, cx: &Cx<'_, H>) {
+        for i in 0..self.bodies.len() {
+            if let (Body::Grid(g), Some(policy)) = (&mut self.bodies[i], p.caption_policy(self.specs[i].key)) {
+                if g.caption_policy() != Some(policy) {
+                    g.set_caption_policy(policy);
+                }
+            }
+        }
         self.retop(p, cx);
         for i in 0..self.bodies.len() {
             if let Body::Grid(g) = &mut self.bodies[i] {
@@ -763,6 +779,10 @@ impl<K: Copy + Eq> Stack<K> {
                     heading + style.h + card_row::under_band((n == focus) as i32 as f32) + p.shelf_foot(self.specs[n].key)
                 }
             }
+            Kind::Grid { .. } => match &self.bodies[n] {
+                Body::Grid(g) => g.settled_height(self.len_of(p, cx, n), n == focus),
+                _ => self.height(p, cx, n),
+            },
             _ => self.height(p, cx, n),
         }
     }
@@ -772,7 +792,9 @@ impl<K: Copy + Eq> Stack<K> {
     /// names, [`StackPage::reveal_with`]) otherwise.
     fn wanted<H: Host, P: StackPage<H, Key = K>>(&self, p: &P, cx: &Cx<'_, H>, i: usize) -> f32 {
         if let Body::Grid(g) = &self.bodies[i] {
-            return g.reveal_target().unwrap_or(self.target);
+            // a resting grid's row rests where the first row does, held by the document's end
+            let want = if g.rests() { g.rest_target(self.max_with_focus(p, cx, i)) } else { g.reveal_target() };
+            return want.unwrap_or(self.target);
         }
         if matches!(self.specs[i].kind, Kind::Overlay { .. }) {
             return self.target;
@@ -1060,6 +1082,7 @@ impl<K: Copy + Eq, H: Host<Elem = u32>, P: StackPage<H, Key = K>> Focusable<H> f
                 _ => {}
             }
         }
+        p.extra_groups(cx, out);
     }
 
     fn group_of(&self, key: &H::Elem, cx: &Cx<'_, H>) -> Option<GroupId> {

@@ -25,7 +25,6 @@
 //! sub-255 pixel more than 2px inside the ink except where the geometry really is notched (it
 //! resolves to a clean gap at 4×), and no ink on the border.
 #![allow(dead_code)]
-use plx_gfx::gfx::upload_rgba;
 use crate::{Painter, Rect};
 use std::os::raw::c_uint;
 use std::ptr::addr_of_mut;
@@ -401,11 +400,37 @@ fn tex_for(id: Icon, px: i32) -> c_uint {
         let tex = match plx_gfx::svg::rasterize(src(id), hi, hi) {
             Some(rgba) => {
                 let small = downsample_alpha(&rgba, hi, SS);
-                upload_rgba(0, target, target, small.as_ptr())
+                upload(target, &small)
             }
             None => 0,
         };
         cache.push(Entry { id, px: raster_px, tex });
+        tex
+    }
+}
+
+/// Upload a rasterized mask, or — in a HOST TEST — do not.
+///
+/// The same seam, and the same reason, as `underlay::upload`: the test binary LINKS OpenGL but
+/// never creates a context, so `glGenTextures` dereferences a null dispatch table and takes the
+/// whole binary down. A host test that draws a whole page descriptively (`frame::backdrop::discover`)
+/// reaches this through the page header's icons; it is handed a stand-in name per cache entry,
+/// specced in `gfx::tex_ledger` as the real upload would be, so the paint the icon declares still
+/// carries a texture and the cache keeps its one-entry-per-size shape.
+fn upload(side: i32, px: &[u8]) -> c_uint {
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        plx_gfx::gfx::upload_rgba(0, side, side, px.as_ptr())
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let _ = px;
+        /// Far above any name a test hand-picks for its own stand-in fields.
+        const STAND_IN_BASE: u32 = 0x4943_0000;
+        static NEXT: AtomicU32 = AtomicU32::new(STAND_IN_BASE);
+        let tex = NEXT.fetch_add(1, Ordering::Relaxed);
+        plx_gfx::gfx::tex_ledger::specified(tex, side, side);
         tex
     }
 }
@@ -435,7 +460,17 @@ fn downsample_alpha(src: &[u8], sw: i32, ss: i32) -> Vec<u8> {
 /// Draw icon `id` filling `r` (rasterized+cached at r's pixel size), tinted `tint` (a white mask
 /// times the tint = a solid-colour icon; tint alpha fades it). No-op if rasterization failed.
 pub fn draw(p: Painter, id: Icon, r: Rect, tint: [f32; 4]) {
-    let px = r.w.max(r.h).round() as i32;
+    draw_raster(p, id, r, r.w.max(r.h).round() as i32, tint);
+}
+
+/// [`draw`] with the RASTER's size chosen by the caller instead of read off `r`: the mask cached at
+/// `raster_px` is stretched over `r`. For a glyph whose box moves continuously (a control popping
+/// on its lift spring) so the mask it is drawn from stays ONE texture for the whole motion: sized
+/// from `r`, the cache key would change at each whole pixel the box crosses, and the glyph would be
+/// re-rasterized (a different edge, with nothing moving) on the frame the spring settles. At
+/// `r.w == raster_px` this is exactly [`draw`], 1:1.
+pub fn draw_raster(p: Painter, id: Icon, r: Rect, raster_px: i32, tint: [f32; 4]) {
+    let px = raster_px;
     // A text-recording painter submits no primitive; rasterising the mask for it would only
     // spend the transition's prewarm budget on something it then does not draw.
     if px <= 0 || p.is_recording() {
@@ -566,8 +601,9 @@ mod ink_tests {
         }
     }
 
-    /// The collection mark at the sizes its tile draws it (`collection_tile::glyph_px` across a
-    /// grid poster's rest and pop, and a shelf's): full opacity inside, nothing on the border.
+    /// The collection mark at the sizes its tiles draw it (`collection_tile::glyph_px` of each
+    /// page's RESTING tile width; a focus pop does not change the size, the card's zoom grows the
+    /// cached mask): full opacity inside, nothing on the border.
     #[test]
     fn the_collection_mark_rasterizes_clean_at_its_tile_sizes() {
         for px in [64, 72, 76, 80, 84] {

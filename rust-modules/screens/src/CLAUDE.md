@@ -71,13 +71,14 @@ that mixes async content with a live cursor:
   reloading" — so `Layout::grid_head` stays true while a grid-scoped transition is in flight.
 - **A seat nobody chose follows the head.** A page that seats its own focus on its document's
   first block must re-seat when a landing changes what that block is, until the user moves. The
-  Library's grid is usually prepared before its shelves land, so its first seat was the grid's
-  heading; the shelves then committed above it and the first DOWN went on into the grid
-  (`LibraryScreen::provisional`). A restore is only what the reader chose: the engine remembers
+  Library's grid was prepared before its hub shelves landed (they have since moved to the
+  Recommended page), so its first seat was the grid's heading; the shelves then committed above it
+  and the first DOWN went on into the grid (`LibraryScreen::provisional` keeps the rule for any
+  block that lands late). A restore is only what the reader chose: the engine remembers
   the page's own seats too, so the page keeps their provenance (`LibraryScreen::placed`). Home already has this shape (the hero seats when its action row
   arrives, while focus is still on the strip); Search seats its field, which never arrives async,
   and Person and Detail keep no self-seat for a landing to strand.
-- **The grid absorbs an index landing, the page shifts its scroll.** The Library's All grid is a
+- **The grid absorbs an index landing, the page shifts its scroll.** The Library's grid is a
   `cards::Grid` in `ScrollMode::External`: when the focused element's index changes with no
   `FocusMoved` (an insert or reorder before it) the grid moves its pop with the element and
   `Grid::landed_shift()` is the document shift that keeps the tile where it was on screen;
@@ -138,17 +139,20 @@ Every Settings drill-down is a family-stack push through `family::form_activate`
   the go row, and Remove is `destructive(true)`. `Action::has_subject()` (not `!rk().is_empty()`) is
   the activation guard, because `WatchlistAdd` has no ratingKey.
 - **The hero disc is second and unlabelled** (`detail/hero.rs`: `ELEM_WATCHLIST`, `HeroCtl::Watchlist`;
-  the face, glyphs and `flip_frame` are `plx_appkit::watchlist_disc`, shared with Home's hero). There is one element id for both faces so focus survives a flip,
+  the face, glyphs, `flip_frame` and the `Disc` that owns the membership, flip spring and press flag are
+  `plx_appkit::watchlist_disc`, shared with Home's hero). There is one element id for both faces so focus survives a flip,
   it is always the circle width so it never unfurls, and it is not a focus anchor in full-trailer
   mode. Its guid must be `plex://movie|show/<24 hex>` or it is absent: `HeroSet::watchlist` is
-  set from `catalog_hex_of_guid` and `hero_ctls` omits the disc otherwise. The first membership
-  answer snaps the fill (`set_watchlist`); only a change from a known face plays the flip.
+  set from `catalog_hex_of_guid` and `hero_ctls` omits the disc otherwise. When the fill snaps and
+  when it flips is `Disc::set`'s one rule (the first answer snaps; a change from a known face, or one
+  answering the user's own press, plays the flip); a screen never copies it.
 - **Home's hero carries the same disc** (`home/mod.rs`: `HERO_WATCHLIST_ELEM`, `HeroDisc`). A hero
   control's SLOT (`Located::Hero(slot)`: 0 Play, 1 Info, 2 disc, the `CtlPop` index) is not its
   POSITION in the row (`hero_slots`: Play, disc, Info); neighbours, the focus extent and the hit
   stops all go through `hero_slots` / `hero_rects`. The disc exists only for a hero row with a known
-  catalog id; the application feeds `set_watchlist(hex, membership)` for the title shown, and the
-  flip plays only when that same title's membership changes (a first answer or a rotation snaps).
+  catalog id; the application feeds `set_watchlist(hex, membership)` for the title shown, and `HeroDisc`
+  keeps only which title the shared `Disc` is for: a rotation `reset`s it onto the new face, and the
+  same title's change is `Disc::set`'s rule.
 - **New widths, rungs and ids come from the existing systems.** The catalog page's 36 px board line
   is drawn at `HEADLINE` because the type ladder has no 36 rung; where a board and the shipped
   tokens disagree the tokens win and the difference is reported, not patched in with a literal.
@@ -190,3 +194,10 @@ Captures are the check — see the `ui-sim` and `which-tier` skills, and `../../
   screen.
 - The person page's bio provider 401s on an injected token, so a headless boot cannot reach it —
   sign in, or drive that leg a different way.
+
+## Under posters settings page (library redesign)
+
+`SettingsPage::UnderPosters` (ScreenId 113, `settings_under_posters.rs`) is pushed from Settings >
+Libraries, which now has two rows (Favorite libraries, Under posters). The page has three rows (Title switch, Details › with the current line on the right, Reset to default) and a framed preview (a still row of three posters from the library the Library last showed, `cards::SampleRow`, the middle one lifted and captioned, a blank face carrying no word); Details pushes `SettingsPage::UnderPostersDetails` (ScreenId 114, `DetailsPage` in the same file), the picker of the one details line (Nothing first, a sample on each row), which pops on a durable write. `settings::caption_policy_of`
+maps the stored `UnderPosters` to the ui `CaptionPolicy`. The Library page is the full grid under one
+header row (`library/header.rs`); the hub shelves live on the Recommended page (`library/recommended.rs`), which the header's Recommended control pushes.

@@ -183,12 +183,22 @@ pub struct CardRow {
     /// reserving. See [`label_band`]; the screens turn it into a row pitch.
     band: Spring,
     pub base_y: f32,
+    /// What the focused caption band shows (CONTRACT FREEZE: P3 makes `focused_caption` and the
+    /// band height read it). A pref input, not motion: it is not in the canon.
+    caption_policy: crate::caption_policy::CaptionPolicy,
 }
 impl CardRow {
+    pub fn set_caption_policy(&mut self, policy: crate::caption_policy::CaptionPolicy) {
+        self.caption_policy = policy;
+    }
+    pub fn caption_policy(&self) -> crate::caption_policy::CaptionPolicy {
+        self.caption_policy
+    }
+
     /// Motion read by placement/reveal is behavioral state for an owned, replayable screen.
     /// Destructure exhaustively so adding a field requires revisiting the census.
     pub fn write_motion(&self, c: &mut plx_machine::machine::Canon) {
-        let Self { scale, overflow, focus, scroll_x, lift, band, base_y } = self;
+        let Self { scale, overflow, focus, scroll_x, lift, band, base_y, caption_policy: _ } = self;
         c.seq(scale.len());
         for spring in scale { c.f32(spring.pos).f32(spring.vel); }
         for spring in [overflow, scroll_x, lift, band] { c.f32(spring.pos).f32(spring.vel); }
@@ -204,6 +214,7 @@ impl CardRow {
             lift: Spring::at(0.0),
             band: Spring::at(0.0),
             base_y: 0.0,
+            caption_policy: crate::caption_policy::CaptionPolicy::DEFAULT,
         }
     }
     /// Whether every spring sits bit-exactly at its target with no velocity and nothing holds
@@ -414,6 +425,10 @@ impl CardRow {
     #[inline]
     pub fn under_band(&self) -> f32 {
         under_band(self.band.pos)
+    }
+    /// The focused band's height under this row's [`CaptionPolicy`](crate::caption_policy::CaptionPolicy).
+    pub fn policy_band_h(&self) -> f32 {
+        crate::caption_policy::band_h(&self.caption_policy)
     }
     /// How much of the focused label block this shelf may show right now — [`band_reveal`] of
     /// [`CardRow::band_expand`]. Chain it onto the `TileLabel` with [`TileLabel::revealed`].
@@ -772,6 +787,15 @@ pub struct TileLabel {
     /// block's alignment and width at the tile's SETTLED screen position, so a glide does not
     /// re-decide them on every frame.
     pub settle_lag: f32,
+    /// Set the lines with the Under-posters text shadow (`0 1px 8px` black 35%,
+    /// [`crate::caption_policy::CAPTION_SHADOW`]): the caption is then set on the page itself, not
+    /// on a scrim.
+    pub shadowed: bool,
+    /// Hold the block to the LIFTED tile it names ([`TileLabel::within_tile`]): its window is the
+    /// tile's width instead of the shared reach into the neighbours' room, and a line the window
+    /// cannot hold glides on the shared marquee and dissolves into the window's edge
+    /// ([`LABEL_EDGE_FADE`]) instead of being cut there.
+    pub within_tile: bool,
 }
 
 /// **Hand-written, not derived, for one field**: `reveal` defaults to 1 (fully on screen), where a
@@ -785,6 +809,8 @@ impl Default for TileLabel {
             glyph: false,
             reveal: 1.0,
             settle_lag: 0.0,
+            shadowed: false,
+            within_tile: false,
         }
     }
 }
@@ -802,6 +828,27 @@ impl TileLabel {
     pub fn settling(mut self, lag: f32) -> Self {
         self.settle_lag = lag;
         self
+    }
+    /// **Hold this block to its tile.** For a tile whose caption carries a name that is wider than
+    /// the tile (the Collections page: the face cuts the name, the caption tells it whole): the
+    /// block's window is the tile, so the name never runs under the next column, and what the
+    /// window cannot hold glides on the shared label marquee, dissolving into the edge
+    /// ([`LABEL_EDGE_FADE`]) rather than being cut mid-letter. Every other label keeps the shared
+    /// reach into its neighbours' room ([`under_budget`]).
+    pub fn within_tile(mut self) -> Self {
+        self.within_tile = true;
+        self
+    }
+    /// A block from [`crate::caption_policy::caption_lines`]: the title line (if the policy shows
+    /// one) over the details line, centred and shadowed. A line the policy leaves out is absent.
+    pub fn from_lines(lines: [Option<String>; 2]) -> Self {
+        let [title, details] = lines;
+        TileLabel {
+            title: title.and_then(|t| std::ffi::CString::new(t).ok()),
+            caption: details.and_then(|d| std::ffi::CString::new(d).ok()),
+            shadowed: true,
+            ..Default::default()
+        }
     }
     /// Title only — the plain poster shelf.
     pub fn title(t: &str) -> Self {
@@ -872,17 +919,59 @@ pub fn draw_focused(
     label: &TileLabel,
     measure: &dyn plx_machine::machine::Measure,
 ) {
+    draw_focused_led(p, art, rect, s, sty, resume, label, measure, None);
+}
+
+/// Ask for the focused tile's art ahead of its draw: what [`draw_focused_led`] takes as `led`.
+/// The focused tile paints LAST (over its neighbours) and so, drawn in order, asks for its poster
+/// last; the source serves the newest frame's requests in the order they came, and the tile the
+/// reader is looking at waited for every other one (CONFIRM A1). A grid calls this before it
+/// paints the others and passes the answer to the draw, so the tile still resolves ONCE.
+/// `rect` and `s` are the draw's own.
+pub fn lead_focused(p: Painter, art: &Art<'_>, rect: Rect, s: f32) -> crate::widgets::ArtImage {
+    crate::widgets::lead_card_art(p, rect.scaled(1.0 / s), art, true, s)
+}
+
+/// [`draw_focused`] for a tile whose art was asked for ahead of its draw ([`lead_focused`]).
+/// `led` is that answer; `None` resolves in the draw.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_focused_led(
+    p: Painter,
+    art: Art,
+    rect: Rect,
+    s: f32,
+    sty: &RowStyle,
+    resume: Option<f32>,
+    label: &TileLabel,
+    measure: &dyn plx_machine::machine::Measure,
+    led: Option<crate::widgets::ArtImage>,
+) {
+    draw_focused_tile_led(p, art, rect, s, sty, resume, led);
+    draw_label(p, rect, s, sty, label, measure);
+}
+
+/// [`draw_focused_led`] without the label block: the lifted tile, its sheen and its resume bar.
+/// For a caller that paints the label on its own turn (the grid paints every caption beneath
+/// every tile, [`draw_label`] first).
+pub fn draw_focused_tile_led(
+    p: Painter,
+    art: Art,
+    rect: Rect,
+    s: f32,
+    sty: &RowStyle,
+    resume: Option<f32>,
+    led: Option<crate::widgets::ArtImage>,
+) {
     let rad = sty.tile_radius(rect, s);
     // Home Screen focus treatment: soft drop-shadow + 1px perimeter sheen, both FOLDED into card()'s
     // single composite pass and ramped in with the pop `f` (the same 0→1 pop scalar the ring used).
     let f = ((s - 1.0) / sty.ring_denom()).clamp(0.0, 1.0);
     // `card` takes the RESTING rect and the scale, not the popped rect: whatever it sets from the
     // tile's size (a fan's live name) must not re-layout on every frame of a pop.
-    card(p, rect.scaled(1.0 / s), art, rad, true, s, f);
+    crate::widgets::card_named_led(p, rect.scaled(1.0 / s), art, None, rad, true, s, f, led);
     if let Some(frac) = resume {
         resume_bar(p, rect, frac, rad);
     }
-    draw_label(p, rect, s, sty, label, measure);
 }
 
 /// The label block under a tile drawn at `rect` (scale `s`) alone, without the tile: what
@@ -950,7 +1039,7 @@ pub fn focused_caption(m: &TileFacts<'_>, is_continue: bool) -> Option<std::ffi:
     }
     let s = if m.kind == TileKind::Collection {
         // A collection is its size, never a year: the members span several, and PMS sends none.
-        crate::fmt::item_count(m.child_count)
+        crate::fmt::collection_count(m.subtype, m.child_count)
     } else if m.kind == TileKind::Episode && m.ep_index > 0 {
         if m.season_index > 0 {
             plx_platform::i18n::msg::widgets_card_season_episode(m.ep_index as i64, m.season_index as i64)
@@ -966,7 +1055,7 @@ pub fn focused_caption(m: &TileFacts<'_>, is_continue: bool) -> Option<std::ffi:
 }
 
 /// The focused Continue-Watching card's secondary line (Home Screen.dc): an in-progress item reads
-/// "<show> · 8 min left" (episodes) or just the time-remaining (a resumed movie); a next-up episode
+/// "<show> · 8m left" (episodes) or just the time-remaining (a resumed movie); a next-up episode
 /// (no resume point yet) reads "<show> · New episode". `title` above it carries the episode name.
 ///
 /// "In progress" is `PmsMovie::resume_frac` — THE resume rule, which the caller applies when it
@@ -974,7 +1063,7 @@ pub fn focused_caption(m: &TileFacts<'_>, is_continue: bool) -> Option<std::ffi:
 /// asks for this caption. A hand-written
 /// `resume_ms > 0 && dur_ns > 0` here dropped that rule's end-guard, so a finished item whose
 /// server never cleared `viewOffset` drew NO bar (`resume_frac`'s answer) under a caption still
-/// promising "1 min left" — `fmt::time_left` floors at a minute, so it could not even read zero.
+/// promising "1m left" — `fmt::time_left` floors at a minute, so it could not even read zero.
 /// One item, described two ways in one draw. Whether that tile also wore the watched TICK is a
 /// separate question with a separate answer: `widgets::poster_mark` reads `PmsMovie::watched`, so
 /// a stale past-end `viewOffset` on an item the server has not marked watched drew no mark at all.
@@ -1046,7 +1135,28 @@ pub const LABEL_BAND_COLLAPSED: f32 =
 /// `consts::ROW_PITCH - UNDER_LABEL_H`, and `under_band(1.0)` is `UNDER_LABEL_H` exactly, so a
 /// focused shelf is byte-identical to the geometry that existed before the band could close.
 pub fn under_band(e: f32) -> f32 {
-    LABEL_BAND_COLLAPSED + (UNDER_LABEL_H - LABEL_BAND_COLLAPSED) * e.clamp(0.0, 1.0)
+    under_band_for(LEGACY_BAND_H, e)
+}
+
+/// The whole gap under a focused poster before the next row (the label block and the air below
+/// it) with the legacy 92 px caption block: what Home, Search and every other shelf still open to.
+/// The Libraries' "Under posters" setting replaces it with [`crate::caption_policy::band_h`].
+pub const LEGACY_BAND_H: f32 = UNDER_LABEL_H + crate::consts::UNDER_LABEL_AIR;
+
+/// The gap a collapsed row keeps under its posters: [`LABEL_BAND_COLLAPSED`] plus the air, the
+/// design system's `space::LG` (40 px).
+const COLLAPSED_GAP: f32 = LABEL_BAND_COLLAPSED + crate::consts::UNDER_LABEL_AIR;
+
+/// The gap a FOCUSED row opens to for a band of `band_h` ([`crate::caption_policy::band_h`]): the
+/// band itself, never less than the collapsed gap, so a policy showing nothing opens nothing.
+pub fn open_gap(band_h: f32) -> f32 {
+    band_h.max(COLLAPSED_GAP)
+}
+
+/// [`under_band`] for a band of `band_h`: the label band at expansion `e` (0 collapsed → 1 open).
+/// Only the focused row opens it; non-focused rows stay [`COLLAPSED_GAP`] apart.
+pub fn under_band_for(band_h: f32, e: f32) -> f32 {
+    LABEL_BAND_COLLAPSED + (open_gap(band_h) - COLLAPSED_GAP) * e.clamp(0.0, 1.0)
 }
 
 /// **How much of the focused label block may be on screen at expansion `e`** — and this is solved
@@ -1055,7 +1165,7 @@ pub fn under_band(e: f32) -> f32 {
 /// The block is drawn at a FIXED offset under its card the instant its shelf takes focus, while the
 /// room for it opens over the band's whole travel. So for the first part of every focus move the
 /// caption sits on top of the NEXT shelf's heading — which is exactly what the first simulator pass
-/// showed, "Recently Added Movies" printed through "WeCrashed · 35 min left".
+/// showed, "Recently Added Movies" printed through "WeCrashed · 35m left".
 ///
 /// The two distances, both measured down from this shelf's card bottom: the next heading's cap top
 /// is at `UNDER_LABEL_AIR + under_band(e)`, and the block's own caption ends at [`UNDER_LABEL_H`].
@@ -1068,11 +1178,35 @@ pub fn under_band(e: f32) -> f32 {
 /// title fading up. On the way out it is the reverse and it is FAST — the block is gone inside the
 /// first third of the collapse, well before the shelf below arrives where it was.
 pub fn band_reveal(e: f32) -> f32 {
-    let room = crate::consts::UNDER_LABEL_AIR + under_band(e);
-    let holds = UNDER_LABEL_H; // the room at which the block is fully clear of the next heading
-    let settled = crate::consts::UNDER_LABEL_AIR + UNDER_LABEL_H;
+    band_reveal_for(LEGACY_BAND_H, e)
+}
+
+/// [`band_reveal`] for a band of `band_h`: the same collision-free curve, solved against that
+/// band's own settled room (the room the next heading leaves, less the air under the block).
+pub fn band_reveal_for(band_h: f32, e: f32) -> f32 {
+    let room = crate::consts::UNDER_LABEL_AIR + under_band_for(band_h, e);
+    let settled = open_gap(band_h);
+    let holds = settled - crate::consts::UNDER_LABEL_AIR; // fully clear of the next heading
     let t = ((room - holds) / (settled - holds)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// **A grid row's caption alpha at its band's expansion `e`** (0 collapsed → 1 open): the band's
+/// own progress, as it is. A caption fades in while its gap opens and out while its gap closes, on
+/// the very spring the layout reads the gap from (no second clock), and a focus move's two bands
+/// sum to 1, so the departing and the arriving caption are one hand-over, `out = 1 - in`: the rule
+/// the Grid landing draws its leaving copy and arriving card by. The spring already eases (it
+/// leaves rest slowly and settles slowly); an easing laid over it moved the caption 0.1 % on the
+/// key frame while its gap had opened 2 %, and left the arriving one 5 % in at a gap 14 % open.
+///
+/// This is deliberately NOT [`band_reveal_for`]. That curve is solved against the heading of the
+/// NEXT shelf, which a shelf's block must never be drawn over, and so it stays 0 until the room is
+/// nearly open (`e` > 0.69 for a 112 px band): measured on a grid that is no caption on screen at
+/// all for the middle of every move, the departing one already gone and the arriving one not yet
+/// there. A grid's neighbour is the next row's posters, which the opening band carries down and
+/// which draw over a departing caption; an arriving one overhangs them only while it is faint.
+pub fn band_fade(e: f32) -> f32 {
+    e.clamp(0.0, 1.0)
 }
 
 /// The fixed half of a poster shelf's pitch — everything `consts::ROW_PITCH` is made of EXCEPT the
@@ -1094,9 +1228,15 @@ pub const BAND_OPEN: f32 = UNDER_LABEL_H - LABEL_BAND_COLLAPSED;
 /// GOING and both springs run one fixed distance, so their difference (which is what the eye sees:
 /// the row's screen y) is itself a single critically-damped move.
 pub fn settled_top(r: usize, focus: Option<usize>, pitch_fixed: f32) -> f32 {
+    settled_top_for(r, focus, pitch_fixed, BAND_OPEN)
+}
+
+/// [`settled_top`] for a focused row that opens by `band_open` (40 px for a one-line band of 80,
+/// 72 for two lines of 112, 0 for none: `under_band_for(band_h, 1.0) - LABEL_BAND_COLLAPSED`).
+pub fn settled_top_for(r: usize, focus: Option<usize>, pitch_fixed: f32, band_open: f32) -> f32 {
     r as f32 * (pitch_fixed + LABEL_BAND_COLLAPSED)
         + if focus.is_some_and(|f| f < r) {
-            BAND_OPEN
+            band_open
         } else {
             0.0
         }
@@ -1195,6 +1335,11 @@ impl LabelPlace {
     }
 }
 
+/// How far a label line dissolves into the edge of the window it glides inside, when the block is
+/// held to its tile ([`TileLabel::within_tile`]): the run is faded out over its last this-many px
+/// instead of being cut hard mid-letter.
+pub const LABEL_EDGE_FADE: f32 = 24.0;
+
 /// Air kept between a label block and the PANEL's edge (or a band the screen reserves there).
 /// A label belongs to its card, not to the safe area: it is never moved toward the safe frame.
 const EDGE_PAD: f32 = 16.0;
@@ -1246,6 +1391,43 @@ pub fn anchor_label(lead: f32, trail: f32, w: f32, want: f32, room: LabelRoom) -
         return LabelPlace { x: trail - w, w, align: LabelAlign::Trailing };
     }
     LabelPlace { x: lead, w: right.min(w).floor(), align: LabelAlign::Leading }
+}
+
+/// **The window of a block held to its tile** ([`TileLabel::within_tile`]): `tile_w` wide from the
+/// card's leading edge `lead`, never wider. A `run` that fits is centred on the card like any
+/// block; one that does not leads from the window's edge — the lines of the block share that edge,
+/// as they do in [`anchor_label`]'s leading case — and glides inside it (the caller's marquee).
+/// The tile is the UNSCALED card, so the pop never re-decides which lines overflow.
+fn tile_window(lead: f32, tile_w: f32, run: f32) -> LabelPlace {
+    if run <= tile_w {
+        LabelPlace { x: lead + (tile_w - run) * 0.5, w: run, align: LabelAlign::Centre }
+    } else {
+        LabelPlace { x: lead, w: tile_w, align: LabelAlign::Leading }
+    }
+}
+
+/// One line of a label block at `x`, plain, or — given the window's right edge — dissolving over
+/// the last [`LABEL_EDGE_FADE`] px before it, for the part of a gliding run that reaches there.
+/// `run_w` is the line's drawn width; a run that stays clear of the edge takes the plain program.
+fn block_text(
+    p: Painter,
+    text: *const c_char,
+    x: f32,
+    y: f32,
+    sz: std::os::raw::c_int,
+    ink: [f32; 4],
+    bold: std::os::raw::c_int,
+    run_w: f32,
+    edge: Option<f32>,
+) {
+    match edge {
+        Some(right) if x + run_w > right - LABEL_EDGE_FADE => {
+            p.text_fade(text, x, y, sz, ink, bold, right - LABEL_EDGE_FADE - x, right - x);
+        }
+        _ => {
+            p.text(text, x, y, sz, ink, 0, bold);
+        }
+    }
 }
 
 /// **Place a `w`-wide label block under the tile `rect`** — [`place_label_wide`] for a block with
@@ -1307,6 +1489,8 @@ fn title_marquee(
     glyph: bool,
     w: f32,
     block: Option<&marquee::Block>,
+    shadowed: bool,
+    fade: bool,
 ) {
     let (sz, bold) = (theme::size::LABEL, 1);
     let isz = play_icon_size(sz);
@@ -1327,6 +1511,9 @@ fn title_marquee(
         let gx = at.run_x(lead + w);
         if glyph {
             draw_glyph(gx);
+        }
+        if shadowed {
+            p.text(text, gx + lead, y + crate::caption_policy::CAPTION_SHADOW_DY, sz, crate::caption_policy::CAPTION_SHADOW, 0, bold);
         }
         p.text(text, gx + lead, y, sz, theme::TEXT_PRIMARY, 0, bold);
         return;
@@ -1349,7 +1536,12 @@ fn title_marquee(
             block.cycle_w,
             Rect::new(text_x0, y - MARQUEE_AIR, budget, UNDER_LINE_H + 2.0 * MARQUEE_AIR),
             |dx| {
-                p.text(text, text_x0 + dx, y, sz, theme::TEXT_PRIMARY, 0, bold);
+                let edge = fade.then_some(text_x0 + budget);
+                if shadowed {
+                    block_text(p, text, text_x0 + dx, y + crate::caption_policy::CAPTION_SHADOW_DY, sz,
+                        crate::caption_policy::CAPTION_SHADOW, bold, w, edge);
+                }
+                block_text(p, text, text_x0 + dx, y, sz, theme::TEXT_PRIMARY, bold, w, edge);
             },
         )
     });
@@ -1416,7 +1608,11 @@ fn draw_label_block(
     // …and the UNCAPPED widest run, which only a block that reaches left of its card may use
     // ([`anchor_label`]).
     let want = title_w_val.map_or(0.0, |w| lead + w).max(caption_w);
-    let at = place_label_wide(p, rect, sty, title_run.max(caption_w.min(full)), want, label.settle_lag);
+    let at = if label.within_tile {
+        tile_window(rect.cx() - sty.w * 0.5, sty.w, want)
+    } else {
+        place_label_wide(p, rect, sty, title_run.max(caption_w.min(full)), want, label.settle_lag)
+    };
     #[cfg(feature = "devtriggers")]
     {
         let placed = p.to_screen(Rect::new(at.x, 0.0, at.w, 1.0)).0;
@@ -1437,7 +1633,8 @@ fn draw_label_block(
         TITLE_CLOCK.with(|c| c.release());
     }
     if let Some(t) = &label.title {
-        title_marquee(p, at, t.as_ptr(), y, label.glyph, title_w_val.unwrap_or(0.0), block.as_ref());
+        title_marquee(p, at, t.as_ptr(), y, label.glyph, title_w_val.unwrap_or(0.0), block.as_ref(), label.shadowed,
+            label.within_tile);
         y += UNDER_LINE_H + UNDER_LINE_GAP;
     }
     if let Some(s) = &caption_str {
@@ -1451,11 +1648,22 @@ fn draw_label_block(
                     caption_w,
                     block.cycle_w,
                     Rect::new(at.x, y - MARQUEE_AIR, at.w, UNDER_CAPTION_H + 2.0 * MARQUEE_AIR),
-                    |dx| { p.text(tc.as_ptr(), at.x + dx, y, csz, theme::TEXT_SECONDARY, 0, 0); },
+                    |dx| {
+                        let edge = label.within_tile.then_some(at.x + at.w);
+                        if label.shadowed {
+                            block_text(p, tc.as_ptr(), at.x + dx, y + crate::caption_policy::CAPTION_SHADOW_DY, csz,
+                                crate::caption_policy::CAPTION_SHADOW, 0, caption_w, edge);
+                        }
+                        block_text(p, tc.as_ptr(), at.x + dx, y, csz, theme::CAPTION_DETAIL_INK, 0, caption_w, edge);
+                    },
                 )
             });
         } else {
-            p.text(tc.as_ptr(), at.run_x(caption_w), y, csz, theme::TEXT_SECONDARY, 0, 0);
+            if label.shadowed {
+                p.text(tc.as_ptr(), at.run_x(caption_w), y + crate::caption_policy::CAPTION_SHADOW_DY, csz,
+                    crate::caption_policy::CAPTION_SHADOW, 0, 0);
+            }
+            p.text(tc.as_ptr(), at.run_x(caption_w), y, csz, theme::CAPTION_DETAIL_INK, 0, 0);
         }
     }
 }
@@ -1779,6 +1987,16 @@ mod tests {
         // even beside the right margin, when the centred block still sits on the panel
         let at = anchor_label(1500.0, 1750.0, 500.0, 500.0, ROOM);
         assert_eq!(at.align, LabelAlign::Centre);
+    }
+
+    /// A block held to its tile ([`TileLabel::within_tile`]) never has a window wider than the
+    /// tile: a run that fits is centred like any block, one that does not leads from the tile's
+    /// edge inside a tile-wide window.
+    #[test]
+    fn a_block_held_to_its_tile_is_never_wider_than_the_tile() {
+        assert_eq!(tile_window(100.0, 250.0, 100.0), LabelPlace { x: 175.0, w: 100.0, align: LabelAlign::Centre });
+        assert_eq!(tile_window(100.0, 250.0, 250.0), LabelPlace { x: 100.0, w: 250.0, align: LabelAlign::Centre });
+        assert_eq!(tile_window(100.0, 250.0, 900.0), LabelPlace { x: 100.0, w: 250.0, align: LabelAlign::Leading });
     }
 
     /// A card with room on its right keeps today's leading-edge window: the whole block shows.

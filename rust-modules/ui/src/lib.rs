@@ -75,8 +75,14 @@ pub mod master_detail; // RESTRUCTURE (spec §10): reusable two-region focus/ret
 pub mod page_stack; // the drill-in page stack Tracks and More share
 pub mod panel_motion; // the resize/page-slide spring of the in-player table popovers (Tracks, More)
 pub mod nav; // the page transition's PRESENTATION, published once a frame from the container
+pub mod breadcrumb; // 'Films > Collections' crumb (PR5)
+pub mod page_header; // the page header row: one layout, paint, focus group and motion for the Library, Collections, Recommended and Watchlist pages
+pub mod page_regions; // the column NAV/HEADER/CONTENT/RAIL: one table for the pages' links, BACK and first seat
+pub mod caption_policy; // "Under posters": what a focused poster's caption band shows and how tall it is (CONTRACT FREEZE: P3 fills)
 pub mod pill; // THE CAPSULE OUTLINE — three blended arcs per corner, solved; not a stadium
 pub(crate) mod poster_grid; // uniform six-column portrait geometry for collection-like pages
+pub mod scroll_chrome; // the chrome/capsule handoff state a page owns, plus the capsule text and predicate, shared by the Library (and its Collections page) and the Watchlist
+pub mod scroll_capsule; // the scroll capsule + top fade a tucked long page leaves (live nav-pill glass)
 pub mod popover_glass; // the popover panel's glass: gradient face, rim, highlight, shadow (DS6)
 pub mod popover_morph; // the morph open style (pill -> panel) beside the shared K_APPEAR fade+slide
 pub mod popover; // shared modal open/appear choreography (track menu / info / chapters / account)
@@ -309,6 +315,52 @@ pub mod draw_census {
         TEXT.with(|l| *l.borrow_mut() = Some(Vec::new()));
         f();
         TEXT.with(|l| l.borrow_mut().take()).unwrap_or_default()
+    }
+
+    /// A recorded text run with its STYLE: what a test needs to say "regular weight, 65% white".
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Run {
+        pub text: String,
+        pub size: i32,
+        pub ink: [f32; 4],
+        pub bold: bool,
+        pub align: i32,
+        /// Anchor (x, y) and measured width, in screen space.
+        pub at: Rect,
+        /// The scissor window ([`Painter::clip`]) the run was drawn inside, in screen space; `None`
+        /// outside one. A recording painter paints no pixels, so this is how a test reads where a
+        /// gliding run is cut.
+        pub clip: Option<Rect>,
+        /// The horizontal dissolve ([`Painter::text_fade`]) as ABSOLUTE screen x, `(from, to)`:
+        /// glyph alpha 1 at `from`, 0 at `to`. `None` for a run drawn plain.
+        pub fade: Option<(f32, f32)>,
+    }
+    thread_local! {
+        static RUNS: RefCell<Option<Vec<Run>>> = const { RefCell::new(None) };
+        static CLIP: std::cell::Cell<Option<Rect>> = const { std::cell::Cell::new(None) };
+    }
+    pub fn note_run(run: Run) {
+        RUNS.with(|l| {
+            if let Some(v) = l.borrow_mut().as_mut() {
+                v.push(run);
+            }
+        });
+    }
+    /// A recording painter was handed a scissor window (`None`: it was released).
+    pub fn note_clip(window: Option<Rect>) {
+        CLIP.with(|c| c.set(window));
+    }
+    /// The scissor window in force now, for [`Run::clip`].
+    pub fn clip() -> Option<Rect> {
+        CLIP.with(|c| c.get())
+    }
+    /// Every text run a recording painter is handed while `f` runs, with size, ink, weight and
+    /// alignment: the census for a test that asks HOW a word was drawn.
+    pub fn capture_runs(f: impl FnOnce()) -> Vec<Run> {
+        CLIP.with(|c| c.set(None));
+        RUNS.with(|l| *l.borrow_mut() = Some(Vec::new()));
+        f();
+        RUNS.with(|l| l.borrow_mut().take()).unwrap_or_default()
     }
 
     thread_local! {
@@ -1053,6 +1105,11 @@ impl Painter {
         if self.records() { return; }
         let t = self.c(tint);
         let m = self.place(r);
+        // A plain mask (an icon) inside an ink clip (`widgets::paint_inked`) is cut per fragment by
+        // the clip's rounded shapes, through the text program: it samples the same coverage alpha.
+        if rad == 0.0 && uv == plx_gfx::gfx::UV_FULL && plx_gfx::text::draw_mask_inked(tex, m.x, m.y, m.w, m.h, t.as_ptr()) {
+            return;
+        }
         plx_gfx::gfx::draw_tex_uv(tex, uv, m.x, m.y, m.w, m.h, self.px(rad), t.as_ptr());
     }
     /// The FROSTED ground: what the frame drew behind `r`, blurred, clipped to `r`'s rounded rect.
@@ -1606,6 +1663,11 @@ impl Painter {
                 let at = self.place(Rect::new(x, y, w, 0.0));
                 draw_census::note(100, at);
                 draw_census::note_text(unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned(), at);
+                draw_census::note_run(draw_census::Run {
+                    text: unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned(),
+                    size: sz, ink: self.c(col), bold: bold != 0, align, at,
+                    clip: draw_census::clip(), fade: None,
+                });
             }
             return w;
         }
@@ -1613,7 +1675,7 @@ impl Painter {
         plx_gfx::text::draw_text(s, x + self.dx, y + self.dy, sz, c.as_ptr(), align, bold, self.screen_zoom())
     }
     /// [`text`](Self::text) with `letter_spacing` px of tracking between glyphs (DS8; negative
-    /// tightens, `plx_gfx::text::TRACKING_TITLE_TIGHT` is the Watchlist header's). At `0.0` this IS
+    /// tightens, `plx_gfx::text::TRACKING_TITLE_TIGHT` is the DS8 title tracking, unused since the Watchlist took the Library's header row). At `0.0` this IS
     /// `text`. The discovery pass sees the string's untracked declaration (the tracked draw only moves
     /// glyph gaps inside it); the recording pass prewarms the per-cluster strings the live draw uses.
     #[allow(clippy::too_many_arguments)]
@@ -1679,7 +1741,18 @@ impl Painter {
             plx_gfx::text::queue_prewarm(s, sz, bold);
             let w = recorded_text_width(s, sz, bold);
             #[cfg(any(test, feature = "test-support"))]
-            draw_census::note(100, self.place(Rect::new(x, y, w, 0.0)));
+            {
+                let at = self.place(Rect::new(x, y, w, 0.0));
+                draw_census::note(100, at);
+                if !s.is_null() {
+                    let text = unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned();
+                    draw_census::note_text(text.clone(), at);
+                    draw_census::note_run(draw_census::Run {
+                        text, size: sz, ink: self.c(col), bold: bold != 0, align: 0, at,
+                        clip: draw_census::clip(), fade: Some((at.x + fade_from, at.x + fade_to)),
+                    });
+                }
+            }
             return w;
         }
         let c = self.c(col);
@@ -1765,14 +1838,22 @@ impl Painter {
     /// with [`clip_clear`](Self::clip_clear) before the frame ends — scissor is global GL state.
     pub fn clip(self, r: Rect) {
         if frame::backdrop::discovering() { frame::backdrop::clip(Some(self.place(r))); return; }
-        if self.records() { return; }
+        if self.records() {
+            #[cfg(any(test, feature = "test-support"))]
+            draw_census::note_clip(Some(self.place(r)));
+            return;
+        }
         let m = self.place(r);
         plx_gfx::gfx::clip_set(m.x, m.y, m.w, m.h);
     }
     /// Release the clip set by [`clip`](Self::clip).
     pub fn clip_clear(self) {
         if frame::backdrop::discovering() { frame::backdrop::clip(None); return; }
-        if self.records() { return; }
+        if self.records() {
+            #[cfg(any(test, feature = "test-support"))]
+            draw_census::note_clip(None);
+            return;
+        }
         plx_gfx::gfx::clip_clear();
     }
 }

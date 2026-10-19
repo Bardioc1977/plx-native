@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use crate::registry::{merged_ranges, row_neighbourhood, tile_facts, LibraryIdentity, LibraryLike, LibrarySectionIdentity};
+use plx_ui::caption_policy::CaptionPolicy;
 use plx_ui::cards as ui_cards;
 use plx_ui::cards::{CardSource, Grid, GridSpec, Tile};
 use plx_ui::consts::{MARGIN_X, SCR_H};
@@ -34,8 +35,27 @@ pub(super) fn grid_art(item: &plx_data::pms::PmsMovie) -> Art<'_> {
     if item.kind == 3 { Art::Still(Some(tile_facts::of(item))) } else { Art::Poster(Some(tile_facts::of(item))) }
 }
 
-/// One label construction for the normal and modal-lifted focused grid card.
-pub(super) fn grid_label(item: &plx_data::pms::PmsMovie) -> ui_cards::TileLabel {
+/// The Under posters setting as the caption policy every Library grid card and band follows.
+pub(super) fn caption_policy() -> CaptionPolicy {
+    #[cfg(test)]
+    if let Some(setting) = TEST_UNDER_POSTERS.with(|cell| cell.get()) {
+        return crate::registry::caption_policy_of(setting);
+    }
+    crate::registry::caption_policy_of(plx_media::route::under_posters())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A per-thread Under posters setting for a test, so it never writes the process-wide cell the other
+    /// library tests read through [`caption_policy`].
+    pub(super) static TEST_UNDER_POSTERS: std::cell::Cell<Option<plx_plex::plex::session::UnderPosters>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// A grid poster card's label under `policy`: the focused caption band shows exactly what the
+/// Under posters setting chose. An episode and a season keep their own wording (an episode names
+/// its address and release date, a season the show it belongs to) and ride the same band.
+pub(super) fn grid_label(item: &plx_data::pms::PmsMovie, policy: &CaptionPolicy) -> ui_cards::TileLabel {
     if item.kind == 3 {
         let name = if item.title.is_empty() || item.title == item.show_title {
             plx_ui::fmt::episode_address(item.season_index as i64, item.ep_index as i64)
@@ -46,7 +66,11 @@ pub(super) fn grid_label(item: &plx_data::pms::PmsMovie) -> ui_cards::TileLabel 
         else { ui_cards::TileLabel::titled(&name,
             &plx_ui::fmt::pretty_date(&item.aired, item.year as i64)) };
     }
-    ui_cards::poster_label(&tile_facts::of(item))
+    if item.kind == 2 && !item.show_title.is_empty() {
+        return ui_cards::poster_label(&tile_facts::of(item));
+    }
+    ui_cards::TileLabel::from_lines(plx_ui::caption_policy::caption_lines(policy, &tile_facts::caption_facts(item),
+        plx_platform::i18n::current()))
 }
 
 #[derive(Default)]
@@ -171,7 +195,7 @@ impl GridPart {
     }
 
     pub(super) fn new(entry: EntryId, group: GroupId) -> Self {
-        let layout = Layout::new(false, &[], 0, false);
+        let layout = Layout::new(false, 0);
         Self {
             entry, group,
             total: 0,
@@ -204,10 +228,21 @@ impl GridPart {
     pub(super) fn on<H: LibraryLike>(&mut self, ev: &ScreenEvent<H>, cx: &Cx<'_, H>,
         fx: &mut Effects<'_, H>, scroll: f32) -> f32 {
         self.grid.set_page(CONTENT_TOP + self.layout.grid_top(), scroll);
-        let src = GridSrc { total: self.total, windows: &self.windows, indexes: &self.indexes, view: H::listing(cx) };
+        let src = GridSrc { total: self.total, windows: &self.windows, indexes: &self.indexes, view: H::listing(cx), policy: caption_policy() };
         let _ = self.grid.on(ev, cx, &src, fx);
         if matches!(ev, ScreenEvent::Tick(_)) { self.grid.landed_shift() } else { 0.0 }
     }
+
+    /// Hold the grid's cards at rest while the page is still dissolving in ([`Grid::dormant`]); the
+    /// lift begins on the first frame after. Set before each [`on`](Self::on).
+    pub(super) fn dormant(&mut self, held: bool) { self.grid.dormant(held); }
+
+    /// The focus the page seats next is its arrival, not a restore ([`Grid::arrive`]).
+    pub(super) fn arrive(&mut self) { self.grid.arrive(); }
+
+    /// The scale the focused card is drawn at now (see [`Grid::pop_probe`]).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn pop_probe(&self, index: Option<usize>) -> f32 { self.grid.pop_probe(index) }
 
     /// The document shift the grid's next tick will report for the cards as they stand now (see
     /// [`Grid::pending_shift`]): a scroll target set against a document that already landed is held
@@ -228,7 +263,14 @@ impl GridPart {
         self.target_layout = target_layout;
         self.scroll_target = scroll_target;
         self.grid.set_columns(layout.cols(), layout.style(), MARGIN_X);
+        self.grid.set_caption_policy(caption_policy());
         self.grid.set_page(CONTENT_TOP + layout.grid_top(), scroll);
+    }
+
+    /// The policy the grid's focused band is sized by, when it is not the stored setting as is (the
+    /// Collections page: `collections_page::band_policy`). After [`set_geometry`](Self::set_geometry).
+    pub(super) fn set_band_policy(&mut self, policy: CaptionPolicy) {
+        self.grid.set_caption_policy(policy);
     }
 
     pub(super) fn restore_keys(&mut self, keys: &KeyRegistry) {
@@ -400,6 +442,14 @@ impl GridPart {
     #[cfg(test)]
     pub(super) fn swap_for_test(&mut self, a: usize, b: usize) { self.windows[0].elems.swap(a, b); }
 
+    /// The two caption lines (title, details) the grid would draw under tile `i` of `view` now.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn probe_caption(&self, view: plx_data::stores::browse::ListingView<'_>, i: usize) -> [Option<String>; 2] {
+        let label = GridSrc { total: self.total, windows: &self.windows, indexes: &self.indexes, view, policy: caption_policy() }.tile_label(i);
+        let text = |line: &Option<std::ffi::CString>| line.as_ref().map(|c| c.to_string_lossy().into_owned());
+        [text(&label.title), text(&label.caption)]
+    }
+
     #[cfg(test)]
     pub(super) fn publication_ops(&self) -> (usize, usize) {
         (self.test_ops.slot_visits, self.test_ops.known_probes)
@@ -410,7 +460,7 @@ impl GridPart {
 
     /// The grid's content, read off the published items. O(1) to build: borrows, no copy.
     fn source<'a, 'v, H: LibraryLike>(&'a self, cx: &Cx<'v, H>) -> GridSrc<'a, 'v> {
-        GridSrc { total: self.total, windows: &self.windows, indexes: &self.indexes, view: H::listing(cx) }
+        GridSrc { total: self.total, windows: &self.windows, indexes: &self.indexes, view: H::listing(cx), policy: caption_policy() }
     }
 
     /// The painter the grid draws and registers stops through: the page's alpha, and the stops
@@ -473,6 +523,46 @@ struct GridSrc<'a, 'v> {
     windows: &'a [Window],
     indexes: &'a GridIndexes,
     view: plx_data::stores::browse::ListingView<'v>,
+    policy: CaptionPolicy,
+}
+
+impl GridSrc<'_, '_> {
+    /// The listing is the section's collections: the Collections page's tiles (caption "N films",
+    /// smart mark) rather than the library's.
+    fn collections(&self) -> bool { self.view.library_type() == plx_data::browse::LibraryType::Collections }
+
+    /// The label the grid draws under tile `i`: the one [`CardSource::label`] answers.
+    fn tile_label(&self, i: usize) -> ui_cards::TileLabel {
+        let Some(item) = self.view.item(i) else { return Default::default() };
+        if self.collections() { return collection_label(item); }
+        grid_label(item, &self.policy)
+    }
+}
+
+/// A collection tile's label on the Collections page: the lines the Under posters setting asks
+/// for, with the member count as the details line (`collections_page::caption`). A row with
+/// nothing to say gets the plain title.
+pub(super) fn collection_label(item: &plx_data::pms::PmsMovie) -> ui_cards::TileLabel {
+    let facts = super::collections_page::TileFacts {
+        title: &item.title, subtype: item.subtype.as_deref(), child_count: item.child_count,
+        name_cut: face_cuts_name(item),
+    };
+    let stored = crate::registry::caption_policy_of(plx_media::route::under_posters());
+    let lines = super::collections_page::caption(stored, &facts, plx_platform::i18n::current());
+    if lines.iter().all(Option::is_none) { return ui_cards::TileLabel::default(); }
+    // The caption tells the name the face cut: it stays under its own tile (never under the next
+    // column) and glides there when it is longer than the tile.
+    ui_cards::TileLabel::from_lines(lines).within_tile()
+}
+
+/// Does this collection's face cut its name? The face is the grid's resting card: a baked fan names
+/// itself live, a collection with no artwork wears the neutral tile's name, and a custom poster is
+/// artwork with no name on it to cut.
+fn face_cuts_name(item: &plx_data::pms::PmsMovie) -> bool {
+    use plx_ui::collection_tile::{name_is_cut, Face};
+    let facts = crate::registry::tile_facts::of(item);
+    let face = if facts.thumb.is_empty() { Face::Neutral } else if facts.composite_thumb { Face::Fan } else { return false };
+    name_is_cut(face, &item.title, plx_ui::Rect::new(0.0, 0.0, plx_ui::consts::CARD_W, plx_ui::consts::CARD_H))
 }
 
 impl<H: Host<Elem = u32>> CardSource<H> for GridSrc<'_, '_> {
@@ -482,9 +572,7 @@ impl<H: Host<Elem = u32>> CardSource<H> for GridSrc<'_, '_> {
     fn art(&self, i: usize) -> Art<'_> {
         self.view.item(i).map_or(Art::Poster(None), grid_art)
     }
-    fn label(&self, i: usize) -> ui_cards::TileLabel {
-        self.view.item(i).map(grid_label).unwrap_or_default()
-    }
+    fn label(&self, i: usize) -> ui_cards::TileLabel { self.tile_label(i) }
     fn progress(&self, i: usize) -> Option<f32> {
         self.view.item(i).filter(|item| item.kind != 3).and_then(|item| item.resume_frac())
     }
@@ -492,6 +580,10 @@ impl<H: Host<Elem = u32>> CardSource<H> for GridSrc<'_, '_> {
         #[cfg(test)] OVERLAID.with(|seen| seen.borrow_mut().push((i, tile.scale)));
         if let Some(item) = self.view.item(i).filter(|item| item.kind == 3) {
             plx_ui::widgets::still_overlay(p, &tile_facts::of(item), tile.rect, tile.radius, false, measure);
+        }
+        // A smart collection wears its mark, focused or not, on the popped tile's rect.
+        if self.collections() && self.view.item(i).is_some_and(|item| item.smart) {
+            plx_ui::collection_tile::draw_smart_mark(p, tile.rect);
         }
     }
     // Metadata still pages ahead via `LibraryWork::Want`; a slot whose page has not landed draws

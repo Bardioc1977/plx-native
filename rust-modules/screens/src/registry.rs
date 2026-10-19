@@ -25,6 +25,9 @@
 //! on the dispatcher yet. The bridge drains them after every dispatcher frame.
 
 pub use crate::family::SettingsPage;
+/// The stored Under posters setting as the ui caption policy: the shared door a screen outside
+/// Settings (the Library's Collections page) reads it through, so none names `crate::settings`.
+pub use crate::settings::caption_policy_of;
 use std::sync::Arc;
 use crate::settings::{Family, RouteSurface};
 use plx_data::stores::{StoreCmd, StoreId, StoreWork};
@@ -281,7 +284,13 @@ pub enum HomeCmd {
 pub enum LibraryReq {
     /// Evaluated after dispatch by the application, where the input owner can report a live arm.
     PublishShelves { target: plx_data::stores::browse::SectionAddress, hidden_page: bool, at_head: bool },
-    Menu { kind: LibraryMenuKind, anchor: [u32; 4], target: plx_data::stores::browse::SectionAddress },
+    Menu { kind: LibraryMenuKind, anchor: [u32; 4], target: plx_data::stores::browse::SectionAddress,
+        /// The `Sources` menu's contents: the directory sections the header's fold hid (empty for
+        /// every other menu).
+        folded: Vec<u32>,
+        /// The header control the menu hangs from: the page lifts it out of its own pass while
+        /// the menu is up (`Screen::opener`).
+        control: u32 },
     Play { sid: plx_plex::plex::ServerId, rk: String, resume_ns: i64 },
     /// Open the item's page. `from_deck` is the SHELF's answer (this library's own Continue
     /// Watching shelf): a deck episode opens its show, any other card its own page.
@@ -290,10 +299,19 @@ pub enum LibraryReq {
     Account,
     Tab(HomeTab),
     BackToHome { kind: plx_data::stores::browse::SecKind },
+    /// Push the library's Collections or Recommended page over this one (OK on the header's
+    /// control): `AppArg::LibraryCollections` / `LibraryRecommended` for `section`, the section's
+    /// key on its server. Never `Listing::All`, which is this page.
+    OpenListing { listing: crate::library::Listing, section: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LibraryMenuKind { Sort, Filter, Genre, Sources, Type }
+pub enum LibraryMenuKind {
+    Sort, Filter, Genre, Sources, Type,
+    /// The header's one Sort & Filter popover: Show / Sort / Filter sections. `Sort`, `Filter` and
+    /// `Type` remain as the single-purpose menus the scripted pipeline names.
+    SortFilter,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryMenuArg {
@@ -302,6 +320,13 @@ pub struct LibraryMenuArg {
     pub kind: LibraryMenuKind,
     /// Bit-preserving rest rectangle; valid in canonical arguments without float equality.
     pub anchor: [u32; 4],
+    /// The `Sources` menu lists exactly these directory sections, the libraries the header's fold
+    /// hid behind "+N". Empty for every other menu.
+    pub folded: Vec<u32>,
+    /// The page's entry and the control the menu grew out of. Every header menu names it, "+N"
+    /// included: the page leaves the control out of its pass and the opener lift draws it lit
+    /// above the panel's scrim (design review S12).
+    pub opener: Option<(plx_machine::machine::EntryId, u32)>,
 }
 
 impl plx_machine::machine::LogicalState for LibraryMenuArg {
@@ -310,8 +335,12 @@ impl plx_machine::machine::LogicalState for LibraryMenuArg {
             .u64(self.target.section as u64).u32(match self.kind {
                 LibraryMenuKind::Sort => 0, LibraryMenuKind::Filter => 1,
                 LibraryMenuKind::Genre => 2, LibraryMenuKind::Sources => 3, LibraryMenuKind::Type => 4,
+                LibraryMenuKind::SortFilter => 5,
             });
         for value in self.anchor { c.u32(value); }
+        c.seq(self.folded.len());
+        for value in &self.folded { c.u32(*value); }
+        match self.opener { Some((entry, control)) => { c.bool(true).u32(entry.0).u32(control); } None => { c.bool(false); } }
     }
     fn probe(&self, out: &mut String) { out.push_str("library_menu_arg"); }
 }
@@ -356,7 +385,7 @@ pub struct ItemMenuArg {
     pub rk: String,
     pub kind: ItemMenuKind,
     /// The PAGE entry the menu hangs off: its focused element is the anchor the panel sits beside
-    /// and the tile lifted back out of the modal dim (`app::bridge::redraw_opener`).
+    /// and the tile lifted back out of the modal dim (the dispatcher's lift pass).
     pub host: plx_machine::machine::EntryId,
     /// …and which element that is, as the host page's own focus at the press frame. The surface
     /// takes input the moment it is presented, so the host's live cursor is not the answer.
@@ -473,8 +502,8 @@ pub enum LibraryCmd {
     Enter(plx_data::stores::browse::SecKind),
     /// Seat focus on one grid card (tests, and the screenshot pipeline's `plxnative-libgrid`).
     FocusGrid { row: usize, col: usize },
-    /// Seat focus on one card of a hub shelf above the grid, `shelf` counted from the top (the
-    /// screenshot pipeline's `plxnative-libshelf`).
+    /// Seat focus on one card of a hub shelf of the Recommended page, `shelf` counted from the top
+    /// (the screenshot pipeline's `plxnative-libshelf`).
     FocusShelf { shelf: usize, col: usize },
     /// Open the Sort or Filter menu exactly as OK on its toolbar chip does (the screenshot
     /// pipeline's `plxnative-libmenu`).
@@ -482,6 +511,10 @@ pub enum LibraryCmd {
     /// Choose a TYPE menu value exactly as its row does (the screenshot pipeline's and the fps
     /// suite's `plxnative-libtype`).
     SetType(plx_data::browse::LibraryType),
+    /// Open the Collections or Recommended page exactly as OK on its header control does (the
+    /// screenshot pipeline's `plxnative-libtype=collections|recommended`, i.e. the
+    /// `library-collections` and `library-recommended` scenarios).
+    OpenListing(crate::library::Listing),
     Page(i32),
     Sweep,
     SwitchStep(u32),
@@ -1157,6 +1190,14 @@ pub trait PersonLike: AppLike + Sized {
 
 pub trait CollectionLike: AppLike + Sized {
     fn collection<'a>(cx: &Cx<'a, Self>) -> plx_data::collection::CollectionView<'a>;
+
+    /// **The title of the page BACK returns to**, as the user sees it on that page: the entry
+    /// beneath this one on the navigation stack, read from the container ([`Host::views_over`]),
+    /// never named by the Collection screen or threaded by whoever opened it (Home, a library
+    /// page, Search, an item's Detail). `None`: BACK leaves the page stack, or the page beneath has
+    /// no name to give, and the screen draws no caption. The default is `None`, so a host that
+    /// cannot say draws none rather than a wrong one.
+    fn back_to<'a>(_cx: &Cx<'a, Self>) -> Option<std::borrow::Cow<'a, str>> { None }
 }
 
 /// A host publishing the Metadata layer's read surface borrowed from its concrete store owner
@@ -1195,7 +1236,21 @@ pub trait LibraryLike: AppLike<Memory = PageMemory> + Sized {
     fn listing<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::ListingView<'a>;
     fn directory<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::DirectoryView<'a>;
     fn section_hubs<'a>(cx: &Cx<'a, Self>) -> plx_data::stores::browse::HubsView<'a>;
+    /// How many collections `section` holds, from the `type=18` `Size:0` probe of
+    /// `/library/sections/{id}/all` (`totalSize`). `None` = not known yet; `Some(Err(Forbidden))` =
+    /// the server answered HTTP 403 (the Collections control is then hidden); `Some(Ok(0))` = none.
+    ///
+    /// CONTRACT FREEZE: a provided method so every existing host compiles; P2 implements it on
+    /// `AppHost` (`src/app/bridge.rs`) over the probe, and P4 reads it.
+    fn collections_count(_cx: &Cx<'_, Self>, _section: u32) -> Option<Result<u32, Forbidden>> {
+        None
+    }
 }
+
+/// The server refused the collections listing (HTTP 403): the answer is final for this session, so
+/// it is kept distinct from "none yet" and from a count of zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Forbidden;
 
 /// A host carrying the retained Browse directory needed by Chrome and the Settings family.
 /// Full Library hosts implement this automatically; the nested Settings host carries only this
@@ -1618,6 +1673,23 @@ mod tests {
 // beside `Screen::name`; and `AppArg::route()`, the "which of the two spellings is this page"
 // resolution that every reader in `app/` had to perform first.)
 
+/// **The screen ids of the pages BACK can return to and that have a title to give**, named once so
+/// the one match that names a page ([`AppArg::id`], below) and the one that reads the kind of page
+/// beneath another ([`Host::views_over`]) cannot drift: an id is a screen's identity in a recorded
+/// state, so these numbers are the ones `id` has always answered.
+pub mod page_id {
+    use plx_machine::machine::ScreenId;
+    pub const HOME: ScreenId = ScreenId(4);
+    pub const LIBRARY: ScreenId = ScreenId(7);
+    pub const DETAIL: ScreenId = ScreenId(8);
+    pub const PERSON: ScreenId = ScreenId(9);
+    pub const SEARCH: ScreenId = ScreenId(10);
+    pub const COLLECTION: ScreenId = ScreenId(23);
+    pub const WATCHLIST: ScreenId = ScreenId(25);
+    pub const LIBRARY_COLLECTIONS: ScreenId = ScreenId(28);
+    pub const LIBRARY_RECOMMENDED: ScreenId = ScreenId(29);
+}
+
 /// **A screen argument: everything the container needs to mount one screen, and nothing else.**
 ///
 /// Three families in one enum, distinguished by nothing but which variant it is: the seven flat
@@ -1696,6 +1768,15 @@ pub enum AppArg {
     /// WHICH library is the `browse` store's business, not this argument's, which is why it
     /// carries nothing (the grid is re-ENTERED, never re-queried).
     Library,
+    /// The library's COLLECTIONS page ("Films > Collections"), pushed over [`Self::Library`] by the
+    /// header's Collections control: the same `LibraryScreen` in `Listing::Collections` mode (type
+    /// 18). CONTRACT FREEZE: P4 declares and routes it; P5 builds the page. Dev boot target
+    /// `library-collections`.
+    LibraryCollections { section: u32 },
+    /// The library's RECOMMENDED page: its server hubs in admin order, pushed over
+    /// [`Self::Library`] by the header's Recommended control (`Listing::Recommended`). P6 builds it.
+    /// Dev boot target `library-recommended`.
+    LibraryRecommended { section: u32 },
     /// The Search screen. A PEER of Home and the Library, not a stacking page: it is reached from
     /// the strip's last pill and BACK from it returns to Home. What it OPENS stacks; it does not.
     Search,
@@ -1717,7 +1798,16 @@ pub enum AppArg {
     FirstRunConsent(u8),
 }
 
-pub const ARG_SHAPE: &str = "AppArg{Login,Profiles,Onboard,Home,Library,Search,Watchlist,Player,Content:{Detail{sid:u32,rk:str},Person{sid:u32,key:str,guid:str,name:str,thumb:str},Filmography{sid:u32,key:str},Collection{sid:u32,rk:str,sec:i64,tag:i64,name:str},Catalog{hex:str}},Settings:SettingsPage{Root,Playback,AudioSubtitles,Favourites,Privacy,Legal,About,Document(u8),Preview(u8),ConsentStage(u8),Language,Contribute},FirstRunConsent(u8),LibraryMenu{host:u32,target:{epoch:u32,sid:u32,section:u64},kind:u32,anchor:[u32;4]},\
+impl AppArg {
+    /// Is this one of the library screen's three routes: the full grid and the two pages its header
+    /// pushes over it (Collections, Recommended)? They are all the one `LibraryScreen` family, so a
+    /// request or a command addressed to "the library" is answered on any of them.
+    pub fn is_library_family(&self) -> bool {
+        matches!(self, AppArg::Library | AppArg::LibraryCollections { .. } | AppArg::LibraryRecommended { .. })
+    }
+}
+
+pub const ARG_SHAPE: &str = "AppArg{Login,Profiles,Onboard,Home,Library,LibraryCollections{section:u32},LibraryRecommended{section:u32},Search,Watchlist,Player,Content:{Detail{sid:u32,rk:str},Person{sid:u32,key:str,guid:str,name:str,thumb:str},Filmography{sid:u32,key:str},Collection{sid:u32,rk:str,sec:i64,tag:i64,name:str},Catalog{hex:str}},Settings:SettingsPage{Root,Playback,AudioSubtitles,Favourites,Privacy,Legal,About,Document(u8),Preview(u8),ConsentStage(u8),Language,Contribute},FirstRunConsent(u8),LibraryMenu{host:u32,target:{epoch:u32,sid:u32,section:u64},kind:u32,anchor:[u32;4]},\
      PlayerOverlay{Tracks(tab:i32),Info,Chapters,More(quality:bool)},\
      AltSources{host:u32,sid:u32,rk:str,anchor:[u32;4]},\
      TracksPanel{page:i32},AboutPanel,PersonBio,CollectionAbout,AccountMenu,\
@@ -1759,6 +1849,9 @@ impl LogicalState for AppArg {
             // 11, after Player's 10: a page tag is a screen's identity in a recording, allocated forward.
             Self::Watchlist => { c.u32(0).u32(11); }
             Self::Player => { c.u32(0).u32(10); }
+            // 12 and 13, forward of Watchlist's 11 (both are in `ARG_SHAPE`).
+            Self::LibraryCollections { section } => { c.u32(0).u32(12).u32(*section); }
+            Self::LibraryRecommended { section } => { c.u32(0).u32(13).u32(*section); }
             Self::Content(arg) => { c.u32(1); arg.write(c); }
             Self::Settings(page) => { c.u32(2); page.write(c); }
             Self::FirstRunConsent(stage) => { c.u32(3).u8(*stage); }
@@ -1776,6 +1869,8 @@ impl plx_ui::screen::ScreenArg for AppArg {
     fn chrome(&self) -> Chrome {
         match self {
             AppArg::Home | AppArg::Library | AppArg::Search | AppArg::Watchlist => Chrome::TabBar,
+            // The two sub-pages of a library keep the bar, as the Library they are pushed over.
+            AppArg::LibraryCollections { .. } | AppArg::LibraryRecommended { .. } => Chrome::TabBar,
             AppArg::Login
             | AppArg::Profiles
             | AppArg::Onboard
@@ -1819,7 +1914,7 @@ impl plx_ui::screen::ScreenArg for AppArg {
             // it is holding two of them.
             AppArg::ItemMenu(_) => 20,
             // 25 and 26, forward of Collection's 24: the Watchlist page and its Sort & Filter menu.
-            AppArg::Watchlist => 25,
+            AppArg::Watchlist => page_id::WATCHLIST.0,
             AppArg::WatchlistMenu(_) => 26,
             // The seven page ids are the ones `Legacy(Route)` computed, unchanged: an id is a
             // screen's identity in a recorded state and in `same_instance`, so they are allocated
@@ -1828,18 +1923,21 @@ impl plx_ui::screen::ScreenArg for AppArg {
             AppArg::Login => 1,
             AppArg::Profiles => 2,
             AppArg::Onboard => 3,
-            AppArg::Home => 4,
-            AppArg::Library => 7,
-            AppArg::Search => 10,
+            AppArg::Home => page_id::HOME.0,
+            AppArg::Library => page_id::LIBRARY.0,
+            // 28 and 29, forward of the catalog page's 27.
+            AppArg::LibraryCollections { .. } => page_id::LIBRARY_COLLECTIONS.0,
+            AppArg::LibraryRecommended { .. } => page_id::LIBRARY_RECOMMENDED.0,
+            AppArg::Search => page_id::SEARCH.0,
             AppArg::Player => 11,
             // The ROOT payload is a boot address, not an identity: one Settings surface and one
             // consent question, whichever page each happens to have been rooted at.
             AppArg::Settings(_) => 12,
             AppArg::FirstRunConsent(_) => 13,
-            AppArg::Content(ContentArg::Detail { .. }) => 8,
-            AppArg::Content(ContentArg::Person { .. }) => 9,
+            AppArg::Content(ContentArg::Detail { .. }) => page_id::DETAIL.0,
+            AppArg::Content(ContentArg::Person { .. }) => page_id::PERSON.0,
             AppArg::Content(ContentArg::Filmography { .. }) => 14,
-            AppArg::Content(ContentArg::Collection(_)) => 23,
+            AppArg::Content(ContentArg::Collection(_)) => page_id::COLLECTION.0,
             // 27, forward of the Watchlist menu's 26: the catalog page (plan W6).
             AppArg::Content(ContentArg::Catalog { .. }) => 27,
         })
@@ -2024,6 +2122,21 @@ where
                 if let PageMemory::Library(memory) = &ret.memory { page.restore(memory); }
                 Box::new(page)
             }
+            // The server's hubs for the library, on their own screen.
+            AppArg::LibraryRecommended { .. } => {
+                let kind = self.library_kind.or_else(|| H::directory(cx).current().map(|i| H::directory(cx).sections()[i].kind))
+                    .unwrap_or(plx_data::stores::browse::SecKind::Movie);
+                let mut page = crate::library::RecommendedScreen::new(entry, id, kind);
+                if let PageMemory::Library(memory) = &ret.memory { page.restore(memory); }
+                Box::new(page)
+            }
+            // The library's grid in `Listing::Collections`: it asks the store for the section's collections (type=18)
+            // when it mounts, wears the "Films > Collections" crumb for a header, and hands the section back when left.
+            AppArg::LibraryCollections { .. } => {
+                let kind = self.library_kind.or_else(|| H::directory(cx).current().map(|i| H::directory(cx).sections()[i].kind))
+                    .unwrap_or(plx_data::stores::browse::SecKind::Movie);
+                Box::new(crate::library::LibraryScreen::new(entry, id, kind).with_listing(crate::library::Listing::Collections))
+            }
             AppArg::Search => {
                 let mut page = crate::search::SearchScreen::new(entry, id);
                 if let PageMemory::Search(memory) = &ret.memory { page.restore(memory); }
@@ -2092,6 +2205,8 @@ pub fn every_surface_arg() -> Vec<AppArg> {
             },
             kind: LibraryMenuKind::Sort,
             anchor: [0; 4],
+            folded: Vec::new(),
+            opener: None,
         }),
         AppArg::AccountMenu,
         AppArg::ItemMenu(ItemMenuArg {
@@ -2152,6 +2267,8 @@ pub fn every_surface_arg() -> Vec<AppArg> {
             | AppArg::Onboard
             | AppArg::Home
             | AppArg::Library
+            | AppArg::LibraryCollections { .. }
+            | AppArg::LibraryRecommended { .. }
             | AppArg::Search
             | AppArg::Watchlist
             | AppArg::Player
@@ -2193,6 +2310,8 @@ pub const SCREEN_SHAPES: &[&str] = &[
     crate::library::SHAPE[5],
     crate::library::SHAPE[6],
     crate::library::SHAPE[7],
+    crate::library::SHAPE[8],
+    crate::library::SHAPE[9],
     crate::library::menu::SHAPE[0],
     crate::library::menu::SHAPE[1],
     crate::account_menu::SHAPE,
@@ -2358,7 +2477,27 @@ pub const SCREEN_SHAPES: &[&str] = &[
 // Merged tree (origin/main's scrub click-to-confirm and Home-hero successor into the Watchlist
 // branch): both sides' shape changes stand; the pin below is the value the pin test reported for
 // the merged tree, and the three replay fixtures were re-recorded on it.
-const SCREEN_SHAPES_PIN: u64 = 0x07c8_d161_c006_f959;
+// Library/Collections redesign PR4: `LibraryScreen` drops the TYPE/SORT/FILTER chip row and its
+// capsule/pop motion for one `LibraryHeader` row (`switched` joins the first shape string),
+// `AppArg` gains `LibraryCollections{section}` / `LibraryRecommended{section}` (inserted after
+// `Library`, so `ARG_SHAPE`, the first entry, moves) and `LibraryMenuKind` gains `SortFilter`. One
+// bump; the replay fixtures that open the Library were re-recorded against it; the previous pin
+// was 0x07c8_d161_c006_f959.
+// Library shelf removal: `LibraryScreen` and its `Layout` drop the hub-shelf fields (the shelves are
+// `RecommendedScreen`'s alone), so both shape strings move. The replay fixtures that open the
+// Library need re-recording against it; the previous pin was 0xff36_edc2_57ab_505a.
+// Header-row motion (F2): the page header is one component with the top bar's motion. Each page
+// that wears it (`LibraryScreen` -- the Library and Collections page, `RecommendedScreen`,
+// `WatchlistScreen`) holds the row's `TabStrip` (the focus capsule and the selection plate) and a
+// one-spring `CtlPop`, in its canon (`write_motion`) and its shape string; `LibraryScreen::SHAPE`
+// gains two entries, appended (`SCREEN_SHAPES` lists both). One bump; the three replay fixtures were
+// re-recorded against it; the previous pin was 0x2560_8275_1136_934c.
+// Chrome handoff (FIX-A): the top chrome / capsule handoff is one state type the page owns
+// (`plx_ui::scroll_chrome::Handoff`: the decided state and the two drawn alphas), in the canon and
+// the shape string of `LibraryScreen` and of the Watchlist page (which drops its private head ramp
+// for it). One bump; the three replay fixtures were re-recorded against it; the previous pin was
+// 0xbd4f_cd3e_ff97_a15f.
+const SCREEN_SHAPES_PIN: u64 = 0xcbaf_3fdb_0c28_ad38;
 
 #[cfg(test)]
 mod arg_tests {
@@ -2418,14 +2557,21 @@ mod arg_tests {
     /// grades the other half, on a real tree.
     ///
     /// It is asked of `ScreenArg::chrome` DIRECTLY, here, rather than of its one-line consumer
-    /// (`app::input::wears_the_chip`, which is `chrome() == Chrome::TabBar` and nothing else):
+    /// (`app::bridge::wears_tab_bar`, which is `chrome() == Chrome::TabBar` and nothing else):
     /// this file is where a page argument joins the alphabet, so the bar-wearing set and the
     /// screen that joins it land in the same commit. A `screens/` module may not name
     /// `crate::app::` at all (`ci/check-deps.sh`'s `layer` gate), which is the same boundary
     /// stated as a rule.
     #[test]
     fn the_profile_chip_is_offered_on_exactly_the_bar_wearing_pages() {
-        for r in [AppArg::Home, AppArg::Library, AppArg::Search, AppArg::Watchlist] {
+        for r in [
+            AppArg::Home,
+            AppArg::Library,
+            AppArg::LibraryCollections { section: 0 },
+            AppArg::LibraryRecommended { section: 0 },
+            AppArg::Search,
+            AppArg::Watchlist,
+        ] {
             assert!((r.chrome() == Chrome::TabBar), "a bar-wearing page carries the chip");
         }
         for r in [

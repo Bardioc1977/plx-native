@@ -65,11 +65,16 @@ struct Cards {
     first: usize,
     /// The dive's sweep ([`CardSource::sweep`]).
     sweep: f32,
+    /// Every card carries a two-line caption (the Under posters setting's title over its details).
+    captioned: bool,
 }
+
+/// The census tag [`Cards::overlay`] notes after each tile it is handed.
+const TILE_PAINTED: u64 = 9999;
 
 impl Cards {
     fn new(elems: Vec<u32>, more: bool) -> Self {
-        Self { elems, more, epoch: 0, before: false, drawn: Default::default(), painted: Default::default(), focused: Default::default(), unindexed_from: usize::MAX, unloaded: 0..0, first: 0, sweep: 1.0 }
+        Self { elems, more, epoch: 0, before: false, drawn: Default::default(), painted: Default::default(), focused: Default::default(), unindexed_from: usize::MAX, unloaded: 0..0, first: 0, sweep: 1.0, captioned: false }
     }
 }
 
@@ -89,8 +94,12 @@ impl CardSource<FixtureHost> for Cards {
     fn art(&self, _i: usize) -> Art<'_> {
         Art::Poster(None)
     }
-    fn label(&self, _i: usize) -> TileLabel {
-        TileLabel::default()
+    fn label(&self, i: usize) -> TileLabel {
+        if self.captioned {
+            TileLabel::from_lines([Some(format!("Title {}", self.elems[i])), Some("2005 \u{b7} 1h 40m".into())])
+        } else {
+            TileLabel::default()
+        }
     }
     fn sweep(&self) -> f32 {
         self.sweep
@@ -108,6 +117,8 @@ impl CardSource<FixtureHost> for Cards {
         self.before
     }
     fn overlay(&self, p: Painter, i: usize, tile: &super::Tile, _measure: &dyn plx_machine::machine::Measure) {
+        // a tile is on screen: a marker in the draw census, so a test reads the order of paint
+        crate::draw_census::note(TILE_PAINTED, p.to_screen(tile.rect).1);
         self.drawn.borrow_mut().push((self.elems[i], p.to_screen(tile.rect).1));
         self.painted.borrow_mut().push((self.elems[i], p.to_screen(tile.rect).1, p.opacity()));
         self.focused.borrow_mut().push((self.elems[i], tile.focused));
@@ -1676,6 +1687,144 @@ fn a_restore_after_dormant_ticks_arrives_popped_and_a_deliberate_move_still_grow
     assert!(first > 1.0 && first < full - 0.02, "a deliberate arrival grows from rest: {first}");
 }
 
+/// The grid's twin of the shelf's dormant rule (the Library and the Collections page arrive in
+/// their first poster under a dissolve): nothing is lifted meanwhile, whatever focus does, and the
+/// first awake tick starts the focused card's pop FROM REST on the standard spring, even for an
+/// arrival that would otherwise be adopted whole.
+#[test]
+fn a_dormant_grid_keeps_its_cards_at_rest_and_wakes_growing_from_rest() {
+    let mut r = settled::<Grid>(8);
+    let full = RowStyle::HOME.focus_scale;
+    r.sect.dormant(true);
+    r.land_focus(102, By::Restore);
+    for _ in 0..30 {
+        r.run(1);
+        assert_eq!(r.scale(102), Some(1.0), "no lift under the fade");
+        assert_eq!(lifted(&r), 0);
+    }
+    r.sect.dormant(false);
+    r.run(1);
+    let first = r.scale(102).unwrap();
+    assert!(first > 1.0 && first < full - 0.02, "the pop starts from rest, not whole: {first}");
+    r.run(200);
+    assert!((r.scale(102).unwrap() - full).abs() < 0.002);
+    assert_eq!(lifted(&r), 1);
+}
+
+/// The restore rule survives idle dormant ticks on a grid too: a restore announced AFTER the grid
+/// slept, on the tick the page wakes, is adopted whole, while a deliberate arrival still grows.
+#[test]
+fn a_grid_restore_after_dormant_ticks_arrives_popped_and_a_deliberate_move_still_grows() {
+    let full = RowStyle::HOME.focus_scale;
+    let mut restored = settled::<Grid>(8);
+    restored.sect.dormant(true);
+    restored.run(3);
+    restored.sect.dormant(false);
+    restored.land_focus(102, By::Restore);
+    restored.run(1);
+    assert_eq!(restored.scale(102), Some(full), "a restore arrives already popped");
+
+    let mut dived = settled::<Grid>(8);
+    dived.sect.dormant(true);
+    dived.run(3);
+    dived.sect.dormant(false);
+    dived.land_focus(102, By::Dir);
+    dived.run(1);
+    let first = dived.scale(102).unwrap();
+    assert!(first > 1.0 && first < full - 0.02, "a deliberate arrival grows from rest: {first}");
+}
+
+/// A lifted grid card that goes dormant lets go and the grid keeps no lift while it sleeps.
+#[test]
+fn a_grid_that_goes_dormant_lets_its_lifted_card_go() {
+    let mut r = settled::<Grid>(8);
+    r.land_focus(101, By::Dir);
+    r.run(200);
+    assert!(r.scale(101).unwrap() > 1.05);
+    r.sect.dormant(true);
+    r.run(2);
+    assert_eq!(r.scale(101), Some(1.0));
+    assert_eq!(lifted(&r), 0);
+}
+
+/// **A dormant seat's caption opens with the lift, not under the dissolve.** A caption is its
+/// band's content (alpha = the band's expansion, `card_row::band_fade`), and a dormant grid keeps
+/// the focused tile at rest: with the band settled open, the details line stood at full strength
+/// under a tile that had not begun to lift (Library arrival, frames 19-25 of 46 measured in the
+/// simulator). The band of a seat nobody has lifted yet is shut; it opens on the same frames the
+/// lift runs, a Down's way.
+#[test]
+fn a_dormant_seats_caption_opens_with_its_lift_and_never_before_it() {
+    let cols = poster_grid::COLS;
+    let full = RowStyle::HOME.focus_scale;
+    let mut r = Rig::<Grid>::new(4 * cols);
+    r.src.captioned = true;
+    r.sect.set_caption_policy(crate::caption_policy::CaptionPolicy {
+        title: true,
+        details: crate::caption_policy::DetailsKind::YearLength,
+    });
+    r.run(2);
+    // the caption of card 0 on the frame the grid last drew
+    let caption = |r: &Rig<Grid>| -> f32 {
+        let cx = r.cx();
+        let f = DrawFrame::new(&cx, Painter::root());
+        r.sect.caption_probe(&f, f.painter, &r.src).iter().filter(|(i, _)| *i == 0).map(|(_, a)| *a).sum()
+    };
+    r.sect.dormant(true);
+    r.land_focus(100, By::Restore);
+    for frame in 0..30 {
+        r.run(1);
+        assert_eq!(r.scale(100), Some(1.0), "no lift under the fade, frame {frame}");
+        assert_eq!(caption(&r), 0.0, "a caption under a tile that has not lifted, frame {frame}");
+    }
+    r.sect.dormant(false);
+    // (caption alpha, lift progress 0..1) on each awake frame
+    let trace: Vec<(f32, f32)> = (0..80).map(|_| {
+        r.run(1);
+        (caption(&r), (r.scale(100).unwrap() - 1.0) / (full - 1.0))
+    }).collect();
+    let early: Vec<_> = trace.iter().enumerate().filter(|(_, (alpha, lift))| *alpha > 0.0 && *lift <= 0.0).collect();
+    assert!(early.is_empty(), "a caption on a frame the tile is still at rest: {early:?}");
+    let (first, lift) = trace[0];
+    assert!(first > 0.0 && first < 0.5 && lift > 0.0 && lift < 0.5, "the caption and the lift start together, from nothing: caption {first}, lift {lift}");
+    assert!(trace.windows(2).all(|w| w[1].0 >= w[0].0 - 1e-4), "the caption does not open monotonically: {trace:?}");
+    assert!((trace[79].0 - 1.0).abs() < 0.01 && (trace[79].1 - 1.0).abs() < 0.01, "caption and lift both end full: {:?}", trace[79]);
+}
+
+/// **Captions are painted beneath the tiles (CONFIRM judgment 1).** A caption used to paint with its
+/// card: the focused card's after the whole page of tiles, so an arriving details line was over the
+/// poster tops of the row below it (fixc-after-down1: at n=17 the line sat over the next row's
+/// poster top at ~50% of the band's opening). Draw order only, no timing: every caption of the
+/// frame is painted before any tile.
+#[test]
+fn captions_are_painted_beneath_every_tile() {
+    let policy = crate::caption_policy::CaptionPolicy {
+        title: true,
+        details: crate::caption_policy::DetailsKind::YearLength,
+    };
+    let mut r = Rig::<Grid>::new(4 * poster_grid::COLS);
+    r.src.captioned = true;
+    r.sect.set_caption_policy(policy);
+    r.run(2);
+    r.land_focus(100, By::Dir);
+    r.run(200);
+    let cx = r.cx();
+    let tile = r.sect.place(&cx, &r.src, &100, At::Drawn).expect("the focused card").rect;
+    let log = crate::draw_census::capture(|| {
+        let mut f = DrawFrame::new(&cx, Painter::recording());
+        r.sect.draw(&mut f, Painter::recording(), &r.src);
+    });
+    // the caption's text runs: in the focused card's column, in the band under it
+    let band = tile.y + tile.h..tile.y + tile.h + crate::caption_policy::band_h(&policy);
+    let captions: Vec<usize> = log.iter().enumerate()
+        .filter(|(_, (tag, at))| *tag == 100 && band.contains(&at.y) && at.x >= tile.x - 1.0 && at.x < tile.x + tile.w)
+        .map(|(k, _)| k).collect();
+    assert!(captions.len() >= 2, "the title and the details line are on screen: {log:?}");
+    let first_tile = log.iter().position(|(tag, _)| *tag == TILE_PAINTED).expect("the grid paints tiles");
+    assert!(captions.iter().all(|&k| k < first_tile),
+        "every caption run (log positions {captions:?}) comes before the first tile primitive ({first_tile})");
+}
+
 /// A lifted card that goes dormant lets go over frames and ends parked exactly at rest.
 #[test]
 fn a_shelf_that_goes_dormant_lets_its_lifted_card_go() {
@@ -1851,6 +2000,7 @@ mod stack {
     const HEAD_H: f32 = 400.0;
     const ROW_STYLE: &RowStyle = &card_row::RowStyle::HOME;
     const COLS_SPEC: GridSpec = GridSpec::new(0.0, 96.0);
+    const RESTING_SPEC: GridSpec = GridSpec::resting(0.0);
 
     /// A page of a header, a shelf, a grid and a Retry-like overlay, over `Cards`.
     struct Page {
@@ -1863,6 +2013,8 @@ mod stack {
         aside: bool,
         /// A header tall enough that the shelf below it needs the page scrolled to be on screen.
         tall: bool,
+        /// The grid's rows REST ([`GridSpec::resting`]) instead of snapping to an edge.
+        rest: bool,
     }
 
     impl CardSource<FixtureHost> for &Cards {
@@ -1887,7 +2039,7 @@ mod stack {
                 out.push(SectionSpec::new(Sec::Aside, Kind::Custom { height: 0.0, focusable: true }, GroupId(6)).ranked(1));
             }
             out.push(SectionSpec::new(Sec::Row, Kind::Shelf { style: ROW_STYLE, heading: 60.0 }, GroupId(3)).ranked(1));
-            out.push(SectionSpec::new(Sec::Items, Kind::Grid { spec: COLS_SPEC }, GroupId(0)));
+            out.push(SectionSpec::new(Sec::Items, Kind::Grid { spec: if self.rest { RESTING_SPEC } else { COLS_SPEC } }, GroupId(0)));
             if self.status {
                 out.push(SectionSpec::new(Sec::Status, Kind::Overlay { rect: Rect::new(96.0, 460.0, 400.0, 80.0), focusable: true }, GroupId(9)).ranked(2));
             }
@@ -1918,10 +2070,15 @@ mod stack {
     type Mrig = PageRig<Msec, Multi>;
 
     fn rig(row: usize, items: usize) -> Rig {
+        rig_with(row, items, false)
+    }
+
+    /// [`rig`] with the grid's spec chosen up front: a grid keeps the spec it was built with.
+    fn rig_with(row: usize, items: usize, rest: bool) -> Rig {
         let ids = |base: u32, n: usize| (0..n as u32).map(|i| base + i).collect::<Vec<_>>();
         let mut r = PageRig {
             stack: Stack::new(ENTRY),
-            page: Page { row: Cards::new(ids(100, row), false), items: Cards::new(ids(1000, items), false), revision: 1, status: false, pending: false, aside: false, tall: false },
+            page: Page { row: Cards::new(ids(100, row), false), items: Cards::new(ids(1000, items), false), revision: 1, status: false, pending: false, aside: false, tall: false, rest },
             view: FixtureView::default(),
             focus: None,
             ms: 0,
@@ -1974,6 +2131,92 @@ mod stack {
         fn step(&self, elem: u32, dir: Dir) -> Step<u32> {
             self.stack.view(&self.page).neighbour(FocusKey { entry: ENTRY, elem }, dir, &self.cx())
         }
+    }
+
+    /// A page of a header and a RESTING grid of `items` cards (no shelf, so the first row stands at
+    /// the header's foot, y 400, when the page is at the top).
+    fn resting_rig(items: usize) -> Rig {
+        rig_with(0, items, true)
+    }
+
+    /// Where the poster of `elem` stands on screen now: the drawn rect of a card with no focus pop.
+    fn drawn_y(r: &Rig, elem: u32) -> f32 {
+        r.place(elem).expect("a placed card").rect.y
+    }
+
+    /// **A resting grid puts the focused row where the first row stands** (the Library's rule,
+    /// `poster_grid::rest_scroll`): focus a card of row `n` and the page rests with that row's
+    /// posters at the y the first row had at scroll 0, whatever the row. Measured on the row's
+    /// FIRST card while focus is on its second (the focus pop raises the focused card's rect). A
+    /// default grid snaps to its edge instead (its first snap puts row 0 on the edge, so row 1
+    /// stands a pitch under it), which the same walk pins as unchanged.
+    #[test]
+    fn a_resting_grid_rests_every_focused_row_where_the_first_row_stands() {
+        let mut r = resting_rig(60);
+        let first = drawn_y(&r, 1000);
+        assert_eq!(first, HEAD_H, "premise: the first row stands at the header's foot");
+        for row in [1u32, 2, 4, 7] {
+            r.go(1000 + row * 6 + 1, By::Dir);
+            r.run(300);
+            let y = drawn_y(&r, 1000 + row * 6);
+            assert!((y - first).abs() < 0.5, "row {row} rests at {first}, not {y} (scroll {})", r.stack.scroll());
+        }
+        r.go(1001, By::Dir);
+        r.run(300);
+        assert!(r.stack.scroll().abs() < 0.5, "row 0 rests at the head: {}", r.stack.scroll());
+
+        let mut snapping = rig(0, 60);
+        snapping.go(1007, By::Dir);
+        snapping.run(300);
+        let pitch = RowStyle::HOME.h + card_row::LABEL_BAND_COLLAPSED + crate::consts::UNDER_LABEL_AIR;
+        assert!((drawn_y(&snapping, 1006) - (96.0 + pitch)).abs() < 0.5,
+            "a default grid is unchanged: it rests on its first snap (row 0 on the edge, y 96), so row 1 stands a pitch under it: {}",
+            drawn_y(&snapping, 1006));
+    }
+
+    /// **The document's end holds the last rows lower**: a row whose rest would scroll past the end
+    /// of the page stands lower than the line, with its posters whole above the foot margin, and
+    /// the scroll is the page's own furthest (`Stack::max_scroll`, measured at the settled bands).
+    #[test]
+    fn a_resting_grid_is_held_by_the_documents_end() {
+        let mut r = resting_rig(60);
+        let first = drawn_y(&r, 1000);
+        let last_row = 9u32;
+        r.go(1000 + last_row * 6 + 1, By::Dir);
+        r.run(300);
+        let y = drawn_y(&r, 1000 + last_row * 6);
+        let pitch = RowStyle::HOME.h + card_row::LABEL_BAND_COLLAPSED + crate::consts::UNDER_LABEL_AIR;
+        assert!(r.stack.scroll() < last_row as f32 * pitch, "the end holds the scroll below the unclamped rest: {}", r.stack.scroll());
+        assert!(y > first + 0.5, "so the last row stands lower than the first row's line: {y}");
+        assert!((r.stack.scroll() - r.stack.max_scroll(&r.page, &r.cx())).abs() < 0.5, "at the page's furthest scroll");
+        assert!(y + RowStyle::HOME.h <= crate::consts::SCR_H - crate::consts::MARGIN_Y + 0.5, "with its posters above the foot margin");
+    }
+
+    /// **The end is measured against the SETTLED caption band**, not the one still opening: the
+    /// target a focus move names on the first frame is the one the page comes to rest at, so the
+    /// clamp does not chase the band for as long as it animates.
+    #[test]
+    fn a_resting_grids_target_is_the_destination_from_the_first_frame() {
+        let mut r = resting_rig(60);
+        r.go(1000 + 9 * 6 + 1, By::Dir);
+        r.run(1);
+        let first = r.stack.target();
+        r.run(300);
+        assert!(first > 0.0, "setup: the last row wants a scroll: {first}");
+        assert_eq!(r.stack.target(), first, "the end was the settled one from the first frame");
+        assert!((r.stack.scroll() - first).abs() < 0.5);
+    }
+
+    /// **The row above the rested one stays drawn**, under the page's chrome, as on the Library: a
+    /// resting grid culls only what is wholly off the screen's top (a snapping grid culls the row
+    /// over the edge).
+    #[test]
+    fn a_resting_grid_keeps_the_row_above_drawn() {
+        let mut r = resting_rig(60);
+        r.go(1000 + 4 * 6 + 1, By::Dir);
+        r.run(300);
+        let painted = r.stack.grid(Sec::Items).expect("the grid").painted(Painter::recording(), 60);
+        assert!(painted.contains(&(3 * 6)), "the row above (cards 18..24) is painted: {painted:?}");
     }
 
     #[test]
@@ -3879,5 +4122,133 @@ fn the_conformance_cases_and_the_removal_contract_pass_with_landings_animated() 
     let _guard = plx_base::testlock::serial();
     for (screen, mount) in table {
         assert_eq!(conformance::removal_focuses_next(mount), Outcome::Pass, "{screen}");
+    }
+}
+
+// ---- the caption band --------------------------------------------------------------------
+
+/// What one grid row's caption and caption band did on one frame.
+#[derive(Clone, Copy, Debug)]
+struct RowFrame {
+    /// The caption's painted alpha (0 when no caption of the row is on screen).
+    alpha: f32,
+    /// How open the row's band is, 0..1: the spring the layout reads for the row's gap.
+    open: f32,
+}
+
+/// A six-column grid under the two-line Under posters policy (a 112 px band) with focus seated on
+/// card 0, its band open. Frame by frame, `downs` are the frames a Down lands on (`FocusMoved` by
+/// `Dir`, then the tick), over `frames` frames; the result is, per row, what its caption and its
+/// band did on each frame: sample 0 is the settled frame before the first move, sample `n + 1` the
+/// frame `n` drew.
+fn caption_trace(rows: usize, downs: &[usize], frames: usize) -> Vec<Vec<RowFrame>> {
+    let cols = poster_grid::COLS;
+    let mut r = Rig::<Grid>::new(rows * cols);
+    r.src.captioned = true;
+    r.sect.set_caption_policy(crate::caption_policy::CaptionPolicy {
+        title: true,
+        details: crate::caption_policy::DetailsKind::YearLength,
+    });
+    r.land_focus(100, By::Restore);
+    r.run(40);
+    let mut trace = vec![Vec::new(); rows];
+    let mut sample = |r: &Rig<Grid>| {
+        let cx = r.cx();
+        let f = DrawFrame::new(&cx, Painter::root());
+        let painted = r.sect.caption_probe(&f, f.painter, &r.src);
+        let bands = r.sect.band_geometry();
+        for (row, series) in trace.iter_mut().enumerate() {
+            series.push(RowFrame {
+                alpha: painted.iter().filter(|(i, _)| i / cols == row).map(|(_, a)| a).sum(),
+                open: bands.iter().find(|b| b.row == row).map_or(0.0, |b| b.expansion),
+            });
+        }
+    };
+    // the settled frame the first move starts from: sample 0
+    sample(&r);
+    let mut at = 0;
+    for frame in 0..frames {
+        if downs.contains(&frame) {
+            at += 1;
+            r.land_focus(100 + (at * cols) as u32, By::Dir);
+        }
+        r.run(1);
+        sample(&r);
+    }
+    trace
+}
+
+/// **A caption is the band's content: it fades with the band it sits in.** A Down closes the
+/// departing row's band and opens the arriving row's over the same few frames, and the caption of
+/// each follows ITS band's progress, never a cut and never a late arrival:
+///
+/// * the departing caption was cut in one frame (full on the frame before, gone on the next) while
+///   its gap was still closing, because only the FOCUSED card drew one;
+/// * the arriving caption stayed off until the gap was nearly open (a curve solved against the
+///   next shelf's heading, which a grid has no use for), so for the middle of the move no caption
+///   was on screen at all.
+///
+/// Read through `caption_probe`, the same decision `draw` paints, so the culling a row meets as it
+/// scrolls off the top is part of what is asserted.
+fn assert_captions_follow_their_bands(trace: &[Vec<RowFrame>]) {
+    for (row, series) in trace.iter().enumerate() {
+        for (t, w) in series.windows(2).enumerate() {
+            let jump = (w[1].alpha - w[0].alpha).abs();
+            assert!(jump <= 0.35, "row {row}: the caption jumped {jump:.2} between frames {t} and {} \
+                (alpha {:.2} -> {:.2}, band open {:.2} -> {:.2})", t + 1, w[0].alpha, w[1].alpha, w[0].open, w[1].open);
+        }
+        for (t, w) in series.iter().enumerate() {
+            assert!(w.open < 0.5 || w.alpha > 0.0,
+                "row {row} frame {t}: its band is {:.2} open and its caption is not on screen", w.open);
+            assert!(w.open > 0.0 || w.alpha == 0.0, "row {row} frame {t}: a caption under a closed band");
+        }
+    }
+    // never a frame mid-move with no caption anywhere while any gap is more than half open
+    for t in 0..trace[0].len() {
+        let open = trace.iter().map(|s| s[t].open).fold(0.0, f32::max);
+        let shown = trace.iter().map(|s| s[t].alpha).fold(0.0, f32::max);
+        assert!(open <= 0.5 || shown > 0.0, "frame {t}: a gap is {open:.2} open and no row shows a caption");
+    }
+}
+
+#[test]
+fn a_down_fades_the_departing_caption_out_and_the_arriving_one_in_with_their_bands() {
+    let trace = caption_trace(4, &[0], 60);
+    // the band the move leaves was open and showing its whole caption; it ends closed and bare
+    assert!(trace[0][0].open > 0.99 && trace[0][0].alpha > 0.99, "the move starts from an open band: {:?}", trace[0][0]);
+    assert!(trace[1].last().unwrap().alpha > 0.99, "the arriving caption settles whole: {:?}", trace[1].last());
+    assert!(trace[0].last().unwrap().alpha < 0.01, "the departing caption is gone once its band is closed");
+    assert_captions_follow_their_bands(&trace);
+}
+
+#[test]
+fn a_fast_repeat_of_downs_never_cuts_a_caption() {
+    // six Downs seven frames apart, a row each: bands are opened and closed before any settles
+    let trace = caption_trace(8, &[0, 7, 14, 21, 28, 35], 90);
+    assert_captions_follow_their_bands(&trace);
+}
+
+/// **One hand-over, on the one progress, from the key frame.** The departing and the arriving
+/// caption are `out = 1 - in` of the band spring that moves their gaps (the rule the Grid landing's
+/// leaving copy and arriving card are drawn by, `Landing::leaving`): each caption's alpha IS its
+/// own band's expansion, with no easing laid over the spring's own. Eased again, the hand-over
+/// is invisible on the key frame (the caption moved 0.1 % while its gap had opened 2 %) and the
+/// arriving caption is still 5 % in when its gap is 14 % open: it starts late, not in the scroll's
+/// first half.
+#[test]
+fn a_down_hands_the_caption_over_on_its_band_progress_from_the_key_frame() {
+    let trace = caption_trace(4, &[0], 30);
+    // sample 1 is the frame the key lands on: both captions are already moving
+    assert!(trace[0][1].alpha < 0.99 && trace[1][1].alpha > 0.01,
+        "the hand-over does not start on the key frame: out {:?}, in {:?}", trace[0][1], trace[1][1]);
+    // through the move, each caption is its band's progress and the pair is complementary
+    for t in 0..=14 {
+        let (out, inn) = (trace[0][t], trace[1][t]);
+        assert!((out.alpha - out.open).abs() < 0.01,
+            "frame {t}: the departing caption {:.3} is not its band's progress {:.3}", out.alpha, out.open);
+        assert!((inn.alpha - inn.open).abs() < 0.01,
+            "frame {t}: the arriving caption {:.3} is not its band's progress {:.3}", inn.alpha, inn.open);
+        assert!((out.alpha + inn.alpha - 1.0).abs() < 0.01,
+            "frame {t}: out {:.3} + in {:.3} is not one hand-over", out.alpha, inn.alpha);
     }
 }

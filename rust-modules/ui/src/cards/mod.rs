@@ -43,8 +43,14 @@
 //!   `By::Pointer`) announced draws at FULL focus scale at once — a restore or reconcile is adopted
 //!   whole, a page returns exactly as it was left. An unfocused tile draws at rest (or the live
 //!   let-go of the one that just lost focus). A deliberate move grows from rest.
-//!   A shelf whose page is still dissolving in is [`dormant`](Shelf::dormant): nothing is lifted
-//!   under the fade, and the first awake tick grows the focused card from rest.
+//!   A shelf or grid whose page is still dissolving in is [`dormant`](Shelf::dormant) /
+//!   [`Grid::dormant`]: nothing is lifted under the fade, and the first awake tick grows the focused
+//!   card from rest (a focus the engine restored meanwhile is adopted whole, as above). A grid keeps
+//!   its caption bands shut meanwhile and the waking tick opens the focused row's on the lift's own
+//!   frames: a caption is its band's content (alpha = the band's expansion), so it never stands at
+//!   full strength under a tile that has not lifted. An owner seating its page's ARRIVAL later (a
+//!   listing that answered after the dissolve lands its first poster) says so with
+//!   [`Grid::arrive`], and that one `FocusMoved` grows from rest like a deliberate move, band and all.
 //! - **One frame convention.** A [`SectionFrame`]'s `y` is screen space; the painter handed to
 //!   `draw` may carry any translate (see [`SectionFrame`]).
 //! - **Press comes from the frame**, `cx.press` / `f.press` through `PressRead::dip_of()`, never the
@@ -74,6 +80,7 @@ mod avatars;
 mod grid;
 mod landing;
 mod pool;
+mod sample_row;
 mod shelf;
 mod stack;
 
@@ -81,15 +88,16 @@ pub use avatars::AvatarRow;
 // Geometry and painters a screen's own layout reads (L0 `card_row` / `poster_grid`, re-exported so
 // those modules can stay `pub(crate)`).
 pub use crate::card_row::{
-    column_near_x, draw_credit_label, draw_heading, focused_caption, heading_flow, heading_lift_max, label_band, paint_visible,
+    column_near_x, draw_credit_label, draw_heading, draw_label, focused_caption, heading_flow, heading_lift_max, label_band, paint_visible,
     poster_label, resume_bar, reveal, scroll_into_view, settled_top, tile_rect, under_band, RowStyle, TileLabel,
-    BAND_OPEN, CREDIT_ROLE_LEADING, LABEL_BAND_COLLAPSED, MAX_ROW_ITEMS, ROW_PITCH_FIXED, UNDER_LABEL_H,
+    BAND_OPEN, CREDIT_ROLE_LEADING, LABEL_BAND_COLLAPSED, LABEL_EDGE_FADE, LEGACY_BAND_H, MAX_ROW_ITEMS, ROW_PITCH_FIXED, UNDER_LABEL_H,
 };
 pub use crate::poster_grid::{
-    growth_before as grid_growth_before, settled as grid_settled, GridBand, COLS as GRID_COLS, MAX_GRID_BANDS,
+    growth_before as grid_growth_before, growth_before_for as grid_growth_before_for, rest_scroll as grid_rest_scroll, settled as grid_settled, GridBand, COLS as GRID_COLS, MAX_GRID_BANDS,
     STYLE as GRID_STYLE,
 };
 pub use grid::{DrawRole, Grid, GridSpec, ScrollMode};
+pub use sample_row::SampleRow;
 pub use shelf::{PageEdge, Shelf, PAGE_EDGE_CARDS};
 pub use stack::{Kind, SectionSpec, Stack, StackEvent, StackMemory, StackPage, StackView};
 

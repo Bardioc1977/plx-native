@@ -140,7 +140,7 @@ fn an_already_listed_title_does_not_flip_on_open() {
     s.set_watchlist(HEX_A, Membership::On);
     assert_eq!(s.disc.progress(HEX_A), 1.0);
     tick(&mut s, view, 30);
-    assert_eq!((s.disc.flip.pos, s.disc.flip.vel), (1.0, 0.0));
+    assert_eq!((s.disc.flip.pos(), s.disc.flip.animating()), (1.0, false));
     // The list landing after the page drew (Unknown, then On) snaps too.
     let mut late = screen(view);
     late.set_watchlist(HEX_A, Membership::Unknown);
@@ -164,10 +164,10 @@ fn rotating_the_hero_does_not_flip() {
     assert_eq!(s.disc.progress(HEX_B), 0.0);
     assert_eq!(s.disc.progress(HEX_A), 1.0, "the page sliding out still wears its filled face");
     tick(&mut s, view, 30);
-    assert_eq!((s.disc.flip.pos, s.disc.flip.vel), (0.0, 0.0));
+    assert_eq!((s.disc.flip.pos(), s.disc.flip.animating()), (0.0, false));
     // And back onto a listed title: snapped, not flipped.
     s.set_watchlist(HEX_A, Membership::On);
-    assert_eq!((s.disc.flip.pos, s.disc.flip.vel), (1.0, 0.0));
+    assert_eq!((s.disc.flip.pos(), s.disc.flip.animating()), (1.0, false));
 }
 
 /// A real change on the shown title plays the flip, and settles exactly on the new face.
@@ -181,13 +181,52 @@ fn a_membership_change_of_the_shown_title_flips() {
     s.set_watchlist(HEX_A, Membership::Off);
     tick(&mut s, view, 30);
     s.set_watchlist(HEX_A, Membership::On);
-    assert_eq!(s.disc.flip.pos, 0.0, "the flip starts at the old face");
+    assert_eq!(s.disc.flip.pos(), 0.0, "the flip starts at the old face");
     tick(&mut s, view, 4);
-    assert!(s.disc.flip.pos > 0.0 && s.disc.flip.pos < 1.0, "mid-flip after a few frames: {}", s.disc.flip.pos);
+    assert!(s.disc.flip.pos() > 0.0 && s.disc.flip.pos() < 1.0, "mid-flip after a few frames: {}", s.disc.flip.pos());
     let (_, mid) = plx_appkit::watchlist_disc::paint(s.disc.progress(HEX_A));
     assert!(mid.is_some(), "a flip in flight layers the fill");
     tick(&mut s, view, 120);
-    assert_eq!((s.disc.flip.pos, s.disc.flip.vel), (1.0, 0.0));
+    assert_eq!((s.disc.flip.pos(), s.disc.flip.animating()), (1.0, false));
+}
+
+/// The Add pressed on a list that has not landed (the membership is still `Unknown`) is the user's
+/// own change: the app answers it `On` at once, and the flip UNFURLS over several frames instead of
+/// snapping to the filled face. A Remove back out of it drains the same way, and an `Unknown` to
+/// `On` with no press (the list landing under an already-listed title) still snaps.
+#[test]
+fn an_add_pressed_from_an_unread_list_unfurls_like_a_remove() {
+    let _guard = plx_base::testlock::serial();
+    let snapshot = seeded(true);
+    let view = snapshot.view();
+    let mut s = screen(view);
+    tick(&mut s, view, 1);
+    s.set_watchlist(HEX_A, Membership::Unknown);
+    tick(&mut s, view, 30);
+    step(&mut s, view, None, &ScreenEvent::Activate(HERO_WATCHLIST_ELEM));
+    s.set_watchlist(HEX_A, Membership::On);
+    let mut add = Vec::new();
+    for _ in 0..8 {
+        tick(&mut s, view, 1);
+        add.push(s.disc.flip.pos());
+    }
+    assert!(add.iter().filter(|p| **p > 0.0 && **p < 1.0).count() >= 5, "the add unfurls over frames: {add:?}");
+    tick(&mut s, view, 120);
+    step(&mut s, view, None, &ScreenEvent::Activate(HERO_WATCHLIST_ELEM));
+    s.set_watchlist(HEX_A, Membership::Unknown);
+    let mut remove = Vec::new();
+    for _ in 0..8 {
+        tick(&mut s, view, 1);
+        remove.push(s.disc.flip.pos());
+    }
+    assert!(remove.iter().filter(|p| **p > 0.0 && **p < 1.0).count() >= 5, "the remove drains over frames: {remove:?}");
+    // No press: the list landing on a listed title is the first answer and snaps.
+    let mut fresh = screen(view);
+    tick(&mut fresh, view, 1);
+    fresh.set_watchlist(HEX_A, Membership::Unknown);
+    tick(&mut fresh, view, 30);
+    fresh.set_watchlist(HEX_A, Membership::On);
+    assert_eq!(fresh.disc.flip.pos(), 1.0, "an unpressed first answer snaps");
 }
 
 /// A focus resting on the disc when the hero rotates to a title without one returns to Play.
@@ -205,4 +244,148 @@ fn a_vanished_disc_returns_focus_to_play() {
     assert!(m.flip(mview, 1));
     let want = key(&m, HERO_WATCHLIST_ELEM);
     assert_eq!(Focusable::<TestHost>::reconcile(&m, want, &cx(mview, Some(want))).elem, HERO_PLAY_ELEM);
+}
+
+/// What the hero row's actions draw as text with the spring focus settled on `slot`.
+fn hero_runs(s: &mut HomeScreen, view: HubsView<'_>, slot: Option<usize>) -> Vec<String> {
+    for _ in 0..90 {
+        s.hero_pop.step(slot, 1.0 / 60.0);
+    }
+    let hero = s.selected_hero(view).expect("a hero").item;
+    let env = s.env(0.0);
+    plx_gfx::text::capture_text_runs_for_test(|| {
+        let focus = slot.map(Located::Hero);
+        s.draw_hero_actions(hero, &env, Painter::recording(), 0.0, true, 0.5, focus, &plx_ui::fixture::FixtureMeasure, 1.0);
+    })
+}
+
+fn names_in(runs: &[String], name: &str) -> bool {
+    runs.iter().any(|r| r.contains(name))
+}
+
+/// S25: the icon-only controls name themselves while focused, one rule with the Detail hero. The
+/// bookmark disc wears the state-aware Watchlist name, Info the page it opens, and a row with no
+/// focus on either draws neither.
+#[test]
+fn a_focused_icon_only_control_names_itself() {
+    let _guard = plx_base::testlock::serial();
+    let snapshot = seeded(true);
+    let view = snapshot.view();
+    let mut s = screen(view);
+    let add = plx_platform::i18n::msg::watchlist_action_add();
+    let on = plx_platform::i18n::msg::watchlist_action_on_list();
+    let go = plx_platform::i18n::msg::browse_menu_go_movie();
+
+    let rest = hero_runs(&mut s, view, Some(0));
+    assert!(!names_in(&rest, add) && !names_in(&rest, on) && !names_in(&rest, go), "{rest:?}");
+
+    let disc = hero_runs(&mut s, view, Some(2));
+    assert!(names_in(&disc, add) && !names_in(&disc, on), "the outline disc offers the add: {disc:?}");
+    s.disc.set(HEX_A, Membership::On);
+    let disc_on = hero_runs(&mut s, view, Some(2));
+    assert!(names_in(&disc_on, on) && !names_in(&disc_on, add), "the filled disc reports the state: {disc_on:?}");
+
+    let info = hero_runs(&mut s, view, Some(1));
+    assert!(names_in(&info, go) && !names_in(&info, on), "Info names the page it opens: {info:?}");
+}
+
+/// The three caption names of the Home hero's icon-only controls, with the alpha each is drawn at
+/// this frame (a name absent from the frame, or drawn at zero, is not on screen).
+fn caption_alphas(s: &HomeScreen, view: HubsView<'_>, slot: Option<usize>) -> Vec<(String, f32)> {
+    let hero = s.selected_hero(view).expect("a hero").item;
+    let env = s.env(0.0);
+    let names = [
+        plx_platform::i18n::msg::watchlist_action_add(),
+        plx_platform::i18n::msg::watchlist_action_on_list(),
+        plx_platform::i18n::msg::browse_menu_go_movie(),
+    ];
+    plx_ui::draw_census::capture_runs(|| {
+        let focus = slot.map(Located::Hero);
+        s.draw_hero_actions(hero, &env, Painter::recording(), 0.0, true, 0.5, focus, &plx_ui::fixture::FixtureMeasure, 1.0);
+    })
+    .into_iter()
+    .filter(|r| names.contains(&r.text.as_str()) && r.ink[3] > 0.0)
+    .map(|r| (r.text, r.ink[3]))
+    .collect()
+}
+
+/// The one name a settled slot shows, in full (a spring rests a hair short of 1).
+fn only_name(names: Vec<(String, f32)>) -> String {
+    assert!(matches!(names.as_slice(), [(_, a)] if *a > 0.999), "the slot shows one name in full: {names:?}");
+    names.into_iter().next().map(|(n, _)| n).unwrap_or_default()
+}
+
+/// **F2c: two strings in one slot never share a frame.** Focus moving from the listed bookmark disc
+/// to Info trades the caption slot: "On Watchlist" is out over the first half of the move and "Go to
+/// Movie" in over the second (the Home frames drew both at once and read "On WatGo to Movie").
+#[test]
+fn focus_moving_from_the_disc_to_info_never_draws_two_names_in_one_frame() {
+    let _guard = plx_base::testlock::serial();
+    let snapshot = seeded(true);
+    let view = snapshot.view();
+    let mut s = screen(view);
+    tick(&mut s, view, 1);
+    s.set_watchlist(HEX_A, Membership::On);
+    for _ in 0..90 {
+        s.hero_pop.step(Some(2), 1.0 / 60.0);
+    }
+    let on = plx_platform::i18n::msg::watchlist_action_on_list();
+    let go = plx_platform::i18n::msg::browse_menu_go_movie();
+    assert_eq!(only_name(caption_alphas(&s, view, Some(2))), on, "settled on the disc: its name, in full");
+    let (mut shown_out, mut shown_in) = (0, 0);
+    for frame in 0..60 {
+        s.hero_pop.step(Some(1), 1.0 / 60.0);
+        let names = caption_alphas(&s, view, Some(1));
+        assert!(names.len() <= 1, "frame {frame}: two names share the slot: {names:?}");
+        shown_out += usize::from(names.iter().any(|(n, _)| n == on));
+        shown_in += usize::from(names.iter().any(|(n, _)| n == go));
+    }
+    assert!(shown_out >= 2 && shown_in >= 2, "each name has frames of its own (out {shown_out}, in {shown_in})");
+    assert_eq!(only_name(caption_alphas(&s, view, Some(1))), go, "settled on Info: its name, in full");
+}
+
+/// **F2b: the name changes on the glyph's flip clock.** "Add to Watchlist" -> "On Watchlist" used to
+/// swap in the first frame the membership changed (n=64) while the glyph morphed over twelve: the
+/// words now trade the slot with it, the old one out over the first half of the flip and the new one
+/// in over the second, and a Remove drains the same way back.
+#[test]
+fn the_watchlist_name_changes_on_the_glyphs_flip_clock() {
+    let _guard = plx_base::testlock::serial();
+    let snapshot = seeded(true);
+    let view = snapshot.view();
+    let add = plx_platform::i18n::msg::watchlist_action_add();
+    let on = plx_platform::i18n::msg::watchlist_action_on_list();
+    for to in [Membership::On, Membership::Off] {
+        let mut s = screen(view);
+        tick(&mut s, view, 1);
+        s.set_watchlist(HEX_A, if to == Membership::On { Membership::Off } else { Membership::On });
+        for _ in 0..90 {
+            s.hero_pop.step(Some(2), 1.0 / 60.0);
+            plx_machine::idle::frame_begin(1.0 / 60.0);
+            s.disc.step(1.0 / 60.0);
+        }
+        let (from_name, to_name) = if to == Membership::On { (add, on) } else { (on, add) };
+        assert_eq!(only_name(caption_alphas(&s, view, Some(2))), from_name);
+        s.set_watchlist(HEX_A, to);
+        let (mut old_mid, mut new_mid) = (0, 0);
+        let mut last_pos = s.disc.progress(HEX_A);
+        for frame in 0..60 {
+            plx_machine::idle::frame_begin(1.0 / 60.0);
+            s.disc.step(1.0 / 60.0);
+            let pos = s.disc.progress(HEX_A);
+            let names = caption_alphas(&s, view, Some(2));
+            assert!(names.len() <= 1, "{to:?} frame {frame}: two names share the slot: {names:?}");
+            // the name that shows is the face the glyph is nearer, never ahead of it
+            let nearer = if (pos >= 0.5) == (to == Membership::On) { to_name } else { from_name };
+            assert!(names.iter().all(|(n, _)| n == nearer), "{to:?} frame {frame} (pos {pos:.2}): {names:?}");
+            if pos > 0.05 && pos < 0.95 {
+                old_mid += usize::from(names.iter().any(|(n, _)| n == from_name));
+                new_mid += usize::from(names.iter().any(|(n, _)| n == to_name));
+            }
+            last_pos = pos;
+        }
+        assert!(old_mid >= 2 && new_mid >= 2, "{to:?}: mid-flip the old name is out and the new one in, each over frames of its own ({old_mid}, {new_mid})");
+        assert_eq!(last_pos, if to == Membership::On { 1.0 } else { 0.0 });
+        assert_eq!(only_name(caption_alphas(&s, view, Some(2))), to_name, "{to:?}: settled on the new name");
+    }
 }

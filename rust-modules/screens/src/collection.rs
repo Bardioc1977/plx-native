@@ -1,6 +1,13 @@
 //! Owned collection page: a Person-like header over a stable six-column portrait grid. The
 //! Collection store owns resolution and paging; this screen owns only presentation state and the
 //! identity→element registry that lets Back restore the exact member tile.
+//! The heading is the page's own big title, so BACK is named the Settings family's way: "‹ Parent"
+//! above the title, in the title column, through the one shared crumb painter
+//! ([`route_screen::draw_back_crumb`]); it is not focusable, and BACK already returns. The page is
+//! opened from the Collections page, a Home hub, a library page, Recommended, Search and an item's
+//! Detail, so Parent is the title of the entry BENEATH this one on the navigation stack, which the
+//! container reports ([`CollectionLike::back_to`], from `Host::views_over`) and this screen neither
+//! names nor is told by its opener; with no entry beneath (BACK leaves) it draws no caption.
 //! The page is a `plx_ui::cards::Stack` of three sections (`Sec`): the head (drawn here, one focus
 //! element when the summary truncates), the member grid (this screen supplies its `CardSource`) and
 //! the status read-outs. The stack owns the layout, the one scroll, the groups and their seats,
@@ -23,6 +30,7 @@ use plx_machine::present::Provenance;
 use plx_ui::screen::{At, AxisMask, By, Dir, DrawFrame, EdgeRule, ElemKind,
     FocusSource, Focusable, GroupKind, GroupSpec, HitSource, Link,
     RenderStrategy, Screen, ScreenEvent, Seat};
+use plx_ui::route_screen::{self, CRUMB_BAND, CRUMB_RISE};
 use plx_ui::text_view::TextView;
 use plx_ui::theme;
 use plx_ui::widgets::{self, Art, PageGround, StatusKind, StatusOverlay};
@@ -114,11 +122,15 @@ fn summary_view<'a>(summary: &'a str, measure: &'a dyn plx_machine::machine::Mea
 /// The header's member count, and whether the line is the kind alone: with no members counted —
 /// before the header lands, on a failed load, and for an empty collection (C4a's meta line reads
 /// "Collection") — the line is the kind alone rather than "0 items".
-fn meta_key(collection: &Collection) -> (i64, bool) {
+fn meta_key(collection: &Collection) -> MetaKey {
     let count = if collection.child_count > 0 { collection.child_count } else { collection.total };
     let count = count as i64;
-    (count, count == 0)
+    (count, count == 0, collection.subtype.clone())
 }
+
+/// What the meta line is built from, which a cached line is keyed on: the count, whether the line is
+/// the kind alone, and the subtype that names the members.
+type MetaKey = (i64, bool, Option<String>);
 
 /// The grid heading's annotation: the member order the collection's owner chose, when the
 /// server stated one.
@@ -138,11 +150,12 @@ fn head_alpha(scroll: f32) -> f32 {
     (1.0 - scroll / (GRID_TOP - CONTENT_TOP)).clamp(0.0, 1.0)
 }
 
-/// The header's meta line — "Collection · N items", or the kind alone ([`meta_key`]).
+/// The header's meta line — "N films · Collection" (the noun is the collection's own, the one its
+/// tile's caption uses: `fmt::collection_count`), or the kind alone ([`meta_key`]).
 fn meta_line(collection: &Collection) -> CString {
     match meta_key(collection) {
-        (_, true) => plx_platform::i18n::msg::browse_collection_kind_c().to_owned(),
-        (count, false) => CString::new(plx_platform::i18n::msg::browse_collection_meta(&plx_ui::fmt::item_count(count)))
+        (_, true, _) => plx_platform::i18n::msg::browse_collection_kind_c().to_owned(),
+        (count, false, _) => CString::new(plx_platform::i18n::msg::browse_collection_meta(&plx_ui::fmt::collection_count(collection.subtype.as_deref(), count)))
             .unwrap_or_default(),
     }
 }
@@ -304,7 +317,7 @@ struct Page {
     pin_index: Vec<(u32, usize)>,
     /// The header's meta line and the `(count, kind-only)` it was built for ([`meta_line`]).
     /// Derived, not logical state.
-    meta: ((i64, bool), CString),
+    meta: (MetaKey, CString),
     return_pending: bool,
     /// The focused member's element, and the remembered one a Back is waiting for: neither key is
     /// ever pruned.
@@ -500,17 +513,28 @@ impl Page {
         Rect::new(COL_X, HEADER_TOP - scroll, TEXT_W, ART_H)
     }
 
+    /// The crumb's band, scrolled with the document: in the title column, ending one
+    /// `space::SM` above the title's cap top ([`CRUMB_RISE`] above `HEADER_TOP`). It sits in the
+    /// page's top margin, so the art, the title and every row below keep the lines they had; a test
+    /// grades that the band stays inside the safe area.
+    fn crumb_band(scroll: f32) -> Rect {
+        Rect::new(COL_X, HEADER_TOP - CRUMB_RISE - scroll, TEXT_W, CRUMB_BAND)
+    }
+
     /// The collection's art, scrolled with the document.
     fn art_rect(scroll: f32) -> Rect {
         Rect::new(MARGIN_X, HEADER_TOP - scroll, ART_W, ART_H)
     }
 
-    fn draw_header(&self, p: Painter, collection: &Collection, focused: bool,
+    fn draw_header(&self, p: Painter, collection: &Collection, focused: bool, back_to: Option<&str>,
         measure: &dyn plx_machine::machine::Measure, scroll: f32) {
         let dy = -scroll;
         let alpha = head_alpha(scroll);
         if alpha <= 0.0 { return; }
         let p = p.alpha(alpha);
+        if let Some(back_to) = back_to {
+            route_screen::draw_back_crumb(p, Self::crumb_band(scroll), back_to, measure);
+        }
         let art = Self::art_rect(scroll);
         let name = if collection.title.is_empty() { &collection.id.name } else { &collection.title };
         if collection.header_ready() && collection.thumb.is_empty() {
@@ -525,7 +549,7 @@ impl Page {
                 fan_name, theme::CARD_RING_RAD, false, 1.0, 0.0);
         }
         if collection.status == CollectionStatus::Ready {
-            ui_cards::draw_heading(p, plx_platform::i18n::msg::browse_collection_items(), order_note(collection),
+            ui_cards::draw_heading(p, plx_ui::fmt::collection_noun(collection.subtype.as_deref()), order_note(collection),
                 MARGIN_X, ITEMS_HEADING_Y + dy, SCR_W - 2.0 * MARGIN_X, measure);
         }
         let title = measure.fit_line(name, TEXT_W, theme::size::DISPLAY, true);
@@ -646,7 +670,7 @@ impl<H: ContentLike + CollectionLike> StackPage<H> for Page {
         let on = |elem: u32| f.focus.current.is_some_and(|key| key.entry == self.entry && key.elem == elem);
         match k {
             Sec::Head => if let Some(collection) = collection.filter(|c| CollectionScreen::shows_head(c)) {
-                self.draw_header(p, collection, on(HEADER_ELEM), f.measure, scroll);
+                self.draw_header(p, collection, on(HEADER_ELEM), H::back_to(f.cx).as_deref(), f.measure, scroll);
             },
             Sec::Status => if collection.is_none_or(|c| c.status != CollectionStatus::Ready) {
                 let overlay = CollectionScreen::status_overlay(collection, f.cx.tick.ms, f.measure).focused(on(RETRY_ELEM));
@@ -665,7 +689,7 @@ impl CollectionScreen {
     pub fn new(entry: EntryId, id: CollectionRef) -> Self {
         Self {
             page: Page { entry, id, header_marked: false, cards: CardKeys::new(FIRST_CARD_ELEM),
-                proj: Projection::default(), want: Default::default(), pin_index: Vec::new(), meta: ((0, true), CString::default()),
+                proj: Projection::default(), want: Default::default(), pin_index: Vec::new(), meta: ((0, true, None), CString::default()),
                 return_pending: false, focus_elem: None, restore_elem: None,
                 focus_index: None, restore_index: None, restore_counts: None, counts: (0, Vec::new()),
                 sent_window: None, want_end: 0, summary_more: false, links_c: Vec::new(), synced: None,
@@ -1030,7 +1054,9 @@ impl<H: ContentLike + CollectionLike> Screen<H> for CollectionScreen {
     }
     fn name(&self) -> &'static str { super::registry::word::COLLECTION }
     fn state(&self) -> &dyn LogicalState { self }
-    fn crumb(&self, _cx: &Cx<'_, H>) -> Option<std::borrow::Cow<'_, str>> { None }
+    fn crumb(&self, cx: &Cx<'_, H>) -> Option<std::borrow::Cow<'_, str>> {
+        H::back_to(cx).map(|name| std::borrow::Cow::Owned(name.into_owned()))
+    }
     fn prepare(&mut self, _budget: &mut plx_ui::frame::Budget, _cx: &Cx<'_, H>) {}
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, H>) {
         let p = f.painter.alpha(f.page_alpha);
@@ -1065,7 +1091,26 @@ mod tests {
         type Init = super::super::family::NoInit;
         type Memory = PageMemory;
     }
+    /// What this host's container reports as the title of the page beneath the screen: a catalog
+    /// string, as every title it reports is (a frame's text is graded against the catalog).
+    pub(super) fn parent() -> &'static str { plx_platform::i18n::msg::browse_chrome_home() }
     impl CollectionLike for CollectionHost {
+        fn collection<'a>(cx: &Cx<'a, Self>) -> plx_data::collection::CollectionView<'a> { cx.views }
+        fn back_to<'a>(_cx: &Cx<'a, Self>) -> Option<std::borrow::Cow<'a, str>> { Some(std::borrow::Cow::Borrowed(parent())) }
+    }
+
+    /// The same host with the Collection screen at the root of the page stack: BACK names nothing.
+    struct RootedHost;
+    impl Host for RootedHost {
+        type Arg = super::super::family::SettingsPage;
+        type Fx = AppFx;
+        type Msg = super::super::registry::AppMsg;
+        type Elem = u32;
+        type Views<'a> = plx_data::collection::CollectionView<'a>;
+        type Init = super::super::family::NoInit;
+        type Memory = PageMemory;
+    }
+    impl CollectionLike for RootedHost {
         fn collection<'a>(cx: &Cx<'a, Self>) -> plx_data::collection::CollectionView<'a> { cx.views }
     }
 
@@ -1273,7 +1318,7 @@ mod tests {
 
     /// A hold menu: the page keeps ticking (or is frozen) while the menu owns input, and what the
     /// opener redraw (`Screen::redraw_focused` -> `Grid::redraw_focused`) paints is the card drawn
-    /// as the focused one with the OPENER as the context's focus: `opener_parts` hands the lift a
+    /// as the focused one with the OPENER as the context's focus: `Dispatcher::opener_parts` hands the lift a
     /// `Cx` whose `focus.current` is the opener key, not the engine's (the menu's own rows). The
     /// member whose menu is open stays at full pop in both worlds: the page frozen on its own
     /// focus, and the page ticking while the engine's focus sits on the menu.
@@ -1300,7 +1345,7 @@ mod tests {
     }
 
     /// The menu is dismissed and focus moves off the opener: the page's own springs take over the
-    /// tiles at once (the host's `opener_lift` stands down), so the old opener lets go over frames
+    /// tiles at once (the dispatcher's lift stands down, `Dispatcher::lifted_opener`), so the old opener lets go over frames
     /// and the new one grows from rest; nothing stays at full pop for a stale lift to be taken
     /// from.
     #[test]
@@ -1349,6 +1394,22 @@ mod tests {
             "an empty collection is a quiet answer, not a failure");
     }
 
+    /// **S20: the Collection screen counts its members in the noun its tile does.** The header says
+    /// "6 films", not "6 items", for a movie collection; before the subtype lands it is items.
+    #[test]
+    fn the_meta_line_counts_in_the_noun_of_the_subtype() {
+        let _g = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+        let (mut store, _) = seeded();
+        store.edit_for_test(|c| { c.child_count = 6; c.subtype = None; });
+        assert_eq!(meta_line(store.view().current().unwrap()).to_str().unwrap(), "6 items \u{b7} Collection");
+        store.edit_for_test(|c| c.subtype = Some("movie".into()));
+        let c = store.view().current().unwrap();
+        assert_eq!(meta_line(c).to_str().unwrap(), "6 films \u{b7} Collection");
+        assert_ne!(meta_key(c), (6, false, None), "a landed subtype re-keys the cached line");
+        store.edit_for_test(|c| c.subtype = Some("show".into()));
+        assert_eq!(meta_line(store.view().current().unwrap()).to_str().unwrap(), "6 shows \u{b7} Collection");
+    }
+
     /// C4a: an empty collection keeps its header — the kind alone on the meta line, not
     /// "0 items" — and says so in the grid's region, centred where the mock centres it.
     #[test]
@@ -1356,7 +1417,7 @@ mod tests {
         let (mut store, _) = seeded();
         store.edit_for_test(|c| { c.replace_items_for_test(vec![]); c.child_count = 0; c.total = 0; c.status = CollectionStatus::Empty; });
         let c = store.view().current().unwrap();
-        assert_eq!(meta_key(c), (0, true), "the meta line is the kind alone");
+        assert_eq!(meta_key(c), (0, true, None), "the meta line is the kind alone");
         assert!(CollectionScreen::shows_head(c));
         let overlay = CollectionScreen::status_overlay(Some(c), 0, &FixtureMeasure);
         let f = overlay.frame;
@@ -1393,6 +1454,71 @@ mod tests {
         assert_eq!(first.y, 520.0);
         assert_eq!(first.x, MARGIN_X);
         assert!(ITEMS_HEADING_Y + theme::size::HEADLINE as f32 <= GRID_TOP);
+    }
+
+    /// **The Collection screen names its way back with the host's answer.** Its heading is its own
+    /// big title (the Settings family's shape, not the Library's header row), so the page says where
+    /// BACK goes the way that family does: "‹ Parent" above the title. The name is the title of the
+    /// entry beneath it on the navigation stack, which the screen cannot see and the host reports
+    /// ([`CollectionLike::back_to`]); the screen answers [`Screen::crumb`] with it and the frame
+    /// draws that same string, and a host with no page beneath (BACK leaves) draws no caption.
+    #[test]
+    fn the_collection_screen_names_the_page_beneath_it_above_its_title() {
+        use plx_ui::screen::DrawFrame;
+        let _serial = plx_base::testlock::serial();
+        let (store, mut screen) = seeded();
+        let context = cx(store.view(), None);
+        assert_eq!(Screen::<CollectionHost>::crumb(&screen, &context).as_deref(), Some(parent()),
+            "the screen declares the place BACK returns to");
+        let named = plx_gfx::text::capture_text_runs_for_test(|| {
+            let mut f = DrawFrame::new(&context, plx_ui::Painter::recording());
+            plx_gfx::gfx::without_frame_clear(|| Screen::<CollectionHost>::draw(&mut screen, &mut f));
+        });
+        assert!(named.iter().any(|run| run == parent()), "the frame draws {:?}: {named:?}", parent());
+
+        let rooted = Cx::<RootedHost> { views: store.view(), tick: Tick::default(), measure: &FixtureMeasure,
+            press: PressRead::default(), focus: FocusRead::default(), owner: InputOwner::Entry(EntryId(9)) };
+        assert_eq!(Screen::<RootedHost>::crumb(&screen, &rooted), None, "BACK leaves: nothing to declare");
+        let bare = plx_gfx::text::capture_text_runs_for_test(|| {
+            let mut f = DrawFrame::new(&rooted, plx_ui::Painter::recording());
+            plx_gfx::gfx::without_frame_clear(|| Screen::<RootedHost>::draw(&mut screen, &mut f));
+        });
+        let mut without = named.clone();
+        without.retain(|run| run != parent());
+        assert_eq!(bare, without, "…and the frame draws exactly the page without the caption");
+    }
+
+    /// **S21b geometry.** The crumb is in the title column, its band ends one `space::SM` above the
+    /// title's cap top, it shares no pixel with the art, the whole band is inside the safe area,
+    /// and it takes nothing from the page below: the art, the title and the grid keep the lines
+    /// `the_header_and_grid_sit_on_the_mocks_lines` pins, so the Items row's focused caption still
+    /// ends inside the safe area's bottom edge.
+    #[test]
+    fn the_crumb_sits_above_the_title_clear_of_the_art_and_inside_the_safe_area() {
+        let band = Page::crumb_band(0.0);
+        let column = Page::header_rect(0.0);
+        let art = Page::art_rect(0.0);
+        assert_eq!((band.x, band.w, band.h), (COL_X, TEXT_W, CRUMB_BAND), "the title column, the family's band");
+        assert_eq!(column.y - (band.y + band.h), theme::space::SM, "one SM of air above the title");
+        assert!(band.y + band.h <= art.y && band.x >= art.x + art.w,
+            "above the title and clear of the art: {band:?} / {art:?}");
+        assert!(inside_safe(band), "the band is required content: {band:?}");
+        assert!(GRID_TOP + CARD_H + ui_cards::UNDER_LABEL_H <= SAFE.y + SAFE.h,
+            "the Items row's focused caption ends inside the safe area");
+        assert_eq!(Page::crumb_band(120.0).y, band.y - 120.0, "it scrolls away with the head");
+    }
+
+    /// The crumb is the family's own painter and nothing else: this screen draws no chevron, sets
+    /// no caption type and names no ink of its own for it (`route_screen::draw_back_crumb` owns the
+    /// mark, the offsets and the type).
+    #[test]
+    fn the_crumb_is_drawn_by_the_shared_painter_and_names_no_glyph_here() {
+        let source = include_str!("collection.rs");
+        let production = &source[..source.find("#[cfg(test)]\nmod tests {").expect("the test module")];
+        assert!(production.contains("route_screen::draw_back_crumb("), "the screen calls the shared painter");
+        for private in ["ChevronLeft", "size::CAPTION", "TEXT_TERTIARY"] {
+            assert!(!production.contains(private), "a screen-local crumb primitive: {private}");
+        }
     }
 
     /// C2: scrolling to a lower row rests the first visible row on the content edge, with the
@@ -1660,8 +1786,9 @@ mod tests {
             let mark = member_label(&season);
             let w = m.width_str(&mark, theme::size::LABEL, true);
             if w > mark_budget { out.push(format!("{}: {mark:?} is {w:.0}px in {mark_budget:.0}px", language.tag())); }
-            for meta in [msg::browse_collection_kind().to_owned(),
-                msg::browse_collection_meta(&plx_ui::fmt::item_count(99_999))] {
+            for meta in [msg::browse_collection_kind().to_owned()].into_iter()
+                .chain([None, Some("movie"), Some("show")]
+                    .map(|sub| msg::browse_collection_meta(&plx_ui::fmt::collection_count(sub, 99_999)))) {
                 let w = m.width_str(&meta, theme::size::LABEL, false);
                 if w > TEXT_W * HEADROOM { out.push(format!("{}: {meta:?} is {w:.0}px in {TEXT_W:.0}px", language.tag())); }
             }
@@ -1673,9 +1800,11 @@ mod tests {
             let verdict = msg::browse_collection_unavailable();
             let w = m.width_str(verdict, theme::size::TITLE, true);
             if w > (SCR_W - 2.0 * MARGIN_X) * HEADROOM { out.push(format!("{}: {verdict:?} is {w:.0}px", language.tag())); }
-            let heading = format!("{} · {}", msg::browse_collection_items(), msg::browse_collection_order_release());
-            let w = m.width_str(&heading, theme::size::HEADLINE, true);
-            if w > (SCR_W - 2.0 * MARGIN_X) * HEADROOM { out.push(format!("{}: {heading:?} is {w:.0}px", language.tag())); }
+            for subtype in [None, Some("movie"), Some("show")] {
+                let heading = format!("{} · {}", plx_ui::fmt::collection_noun(subtype), msg::browse_collection_order_release());
+                let w = m.width_str(&heading, theme::size::HEADLINE, true);
+                if w > (SCR_W - 2.0 * MARGIN_X) * HEADROOM { out.push(format!("{}: {heading:?} is {w:.0}px", language.tag())); }
+            }
         }
         assert!(out.is_empty(), "collection text the television would clip:\n  {}", out.join("\n  "));
     }

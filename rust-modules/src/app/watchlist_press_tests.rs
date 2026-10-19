@@ -26,7 +26,7 @@ fn guid(n: u8) -> String {
 }
 
 /// A scripted plex.tv: a fixed list; reads and writes can be refused (offline).
-struct Script {
+pub(super) struct Script {
     items: Vec<WatchItem>,
     fail_writes: AtomicBool,
     fail_reads: AtomicBool,
@@ -45,14 +45,24 @@ struct Script {
 }
 
 impl Script {
-    fn new(titles: &[u8]) -> Arc<Script> {
+    /// The writes plex.tv was sent, in order.
+    pub(super) fn writes(&self) -> Vec<([u8; 12], Intent)> {
+        self.writes.lock().unwrap().clone()
+    }
+
+    pub(super) fn new(titles: &[u8]) -> Arc<Script> {
+        Self::with_kinds(titles, |_| WatchKind::Movie)
+    }
+
+    /// `titles` with the kind `kind_of` names for each number.
+    pub(super) fn with_kinds(titles: &[u8], kind_of: impl Fn(u8) -> WatchKind) -> Arc<Script> {
         Arc::new(Script {
             items: titles
                 .iter()
                 .map(|n| WatchItem {
                     hex: encode_hex(&[*n; 12]),
                     guid: guid(*n),
-                    kind: Some(WatchKind::Movie),
+                    kind: Some(kind_of(*n)),
                     title: Some(format!("Title {n}")),
                     added_at: Some(1_000 - i64::from(*n)),
                     ..Default::default()
@@ -170,8 +180,28 @@ fn inline(_: &str, f: Box<dyn FnOnce() + Send + 'static>) -> bool {
     true
 }
 
+/// A spawn that refuses every job: the store's worker never starts, so its first read stays ON ITS
+/// WAY (the store retries on its frame counter and is refused again; it never blocks).
+fn refuse(_: &str, _: Box<dyn FnOnce() + Send + 'static>) -> bool {
+    false
+}
+
+/// Hold the Watchlist's reads: until [`release_reads`] the list is `Loading`, the answer a real
+/// plex.tv has not given yet (a scripted one answers inside the call).
+pub(super) fn hold_reads(rig: &mut Bridge) {
+    let store = std::mem::take(rig.watchlist_for_test());
+    *rig.watchlist_for_test() = store.with_spawn_for_test(refuse);
+}
+
+/// Let the held read run: the store reads the list again and the next frames land the rows.
+pub(super) fn release_reads(rig: &mut Bridge) {
+    let store = std::mem::take(rig.watchlist_for_test());
+    *rig.watchlist_for_test() = store.with_spawn_for_test(inline);
+    rig.watchlist_for_test().run(plx_data::stores::watchlist::WatchlistCmd::Open);
+}
+
 /// A rig on Home, the Watchlist store over `script` and the catalog store over [`Discover`].
-fn rig_over(script: &Arc<Script>) -> (Dispatcher<AppHost>, Bridge) {
+pub(super) fn rig_over(script: &Arc<Script>) -> (Dispatcher<AppHost>, Bridge) {
     let mut d = Dispatcher::<AppHost>::new();
     let mut rig = Bridge::for_test(|| 0);
     *rig.watchlist_for_test() = WatchlistStore::with_io(script.clone()).with_spawn_for_test(inline);
@@ -182,7 +212,7 @@ fn rig_over(script: &Arc<Script>) -> (Dispatcher<AppHost>, Bridge) {
 }
 
 /// Land what the workers brought and feed the pages, a few frames.
-fn settle(d: &mut Dispatcher<AppHost>, rig: &mut Bridge, from: u32) {
+pub(super) fn settle(d: &mut Dispatcher<AppHost>, rig: &mut Bridge, from: u32) {
     for i in 0..6 {
         rig.watchlist_for_test().pump();
         rig.watchlist_feed(d);
@@ -307,6 +337,23 @@ fn a_press_flips_then_reverts_when_the_write_is_refused() {
     settle(&mut d, &mut rig, 10);
     assert_eq!(*script.writes.lock().unwrap(), vec![([5u8; 12], Intent::Add)], "the write was tried");
     assert!(!member(&mut rig, 5), "and the flip reverted");
+}
+
+/// The membership the hero discs are fed across an Add and a Remove on a list that never landed:
+/// `Unknown` -> `On` at the press (the shape the discs' flip must treat as the user's own change,
+/// `watchlist_disc::Disc::set`), and `On` -> `Unknown` at the Remove.
+#[test]
+fn an_add_on_an_unread_list_feeds_unknown_then_on() {
+    let _serial = plx_base::testlock::serial();
+    let script = Script::new(&[1]);
+    script.fail_reads.store(true, Ordering::SeqCst);
+    let (mut d, mut rig) = rig_over(&script);
+    read_list(&mut d, &mut rig);
+    assert_eq!(super::watchlist::membership_in(&rig.stores.watchlist.view(), &[5; 12]), Membership::Unknown);
+    rig.watchlist_add([5; 12]);
+    assert_eq!(super::watchlist::membership_in(&rig.stores.watchlist.view(), &[5; 12]), Membership::On);
+    assert!(rig.watchlist_remove(&guid(5), false));
+    assert_eq!(super::watchlist::membership_in(&rig.stores.watchlist.view(), &[5; 12]), Membership::Unknown);
 }
 
 /// plex.tv cannot be read at all: the membership is unknown, so the disc and the pill wear the Add

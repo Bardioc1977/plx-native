@@ -22,7 +22,29 @@
 use std::os::raw::c_int;
 
 use plx_data::pms::{PmsMovie, KIND_COLLECTION};
+use plx_ui::caption_policy::CaptionFacts;
 use plx_ui::tile::{Resume, TileFacts, TileKind};
+
+/// The facts of a catalog row a caption policy words its lines from: the Library grid's captions and
+/// the Under posters preview's tiles read one conversion, so a row is worded the same in both.
+pub fn caption_facts(item: &PmsMovie) -> CaptionFacts {
+    CaptionFacts {
+        title: Some(item.title.clone()),
+        year: Some(item.year),
+        duration_min: u32::try_from(item.dur_ns / 60_000_000_000).ok(),
+        genre: item.genre.clone(),
+        video_resolution: item.video_resolution.clone(),
+        hdr: item.hdr,
+        content_rating: Some(item.rating.clone()),
+        audience_rating: item.audience_rating,
+        leaf_count: item.leaf_count,
+        viewed_leaf_count: item.viewed_leaf_count,
+        child_count: u32::try_from(item.child_count).ok().filter(|n| *n > 0),
+        subtype: (item.kind == KIND_COLLECTION).then(|| item.subtype.clone().unwrap_or_default()),
+        is_show: item.kind == 1,
+        ..Default::default()
+    }
+}
 
 /// What `ui` reads of `m`. The result borrows from the row for `'a`, and carries the row's address
 /// as [`TileFacts::owner`], which is how a card's placement history stays keyed to the ROW and not
@@ -51,6 +73,15 @@ pub fn of(m: &PmsMovie) -> TileFacts<'_> {
         // flag, so the path is parsed for those alone rather than for every tile every frame.
         composite_thumb: m.kind == KIND_COLLECTION && is_composite_thumb(&m.thumb),
         blur: m.has_blur.then_some(m.blur),
+        subtype: m.subtype.as_deref(),
+        smart: m.smart,
+        genre: m.genre.as_deref(),
+        video_resolution: m.video_resolution.as_deref(),
+        hdr: m.hdr,
+        audience_rating: m.audience_rating,
+        leaf_count: m.leaf_count,
+        viewed_leaf_count: m.viewed_leaf_count,
+        added_at: m.added_at,
     }
 }
 
