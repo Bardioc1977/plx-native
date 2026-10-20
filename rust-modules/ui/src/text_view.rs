@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
 use std::os::raw::c_int;
-use std::ptr::addr_of_mut;
 use std::rc::Rc;
 
 // Wrapping is pixel-measured (text_width per word), which is far too slow to redo every frame for
@@ -38,7 +37,11 @@ struct Wrapped {
     widths: Vec<f32>,
     truncated: bool,
 }
-static mut WRAP_CACHE: Option<HashMap<u64, Rc<Wrapped>>> = None;
+// A `thread_local!`: the memo holds `Rc`s, which are `!Send` by design, and only the render thread
+// wraps text.
+thread_local! {
+    static WRAP_CACHE: std::cell::RefCell<HashMap<u64, Rc<Wrapped>>> = std::cell::RefCell::default();
+}
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! { static FORBID_LIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
@@ -54,15 +57,18 @@ impl Drop for ForbidLive {
 }
 
 fn wrap_memo(key: u64, compute: impl FnOnce() -> Wrapped) -> Rc<Wrapped> {
-    let cache = unsafe { (*addr_of_mut!(WRAP_CACHE)).get_or_insert_with(HashMap::new) };
-    if let Some(v) = cache.get(&key) {
-        return Rc::clone(v);
+    if let Some(v) = WRAP_CACHE.with(|cache| cache.borrow().get(&key).map(Rc::clone)) {
+        return v;
     }
-    if cache.len() > 512 {
-        cache.clear(); // crude cap — plenty for a page's worth of blocks across a few items
-    }
+    // No borrow is held while `compute` runs.
     let v = Rc::new(compute());
-    cache.insert(key, Rc::clone(&v));
+    WRAP_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() > 512 {
+            cache.clear(); // crude cap — plenty for a page's worth of blocks across a few items
+        }
+        cache.insert(key, Rc::clone(&v));
+    });
     v
 }
 
@@ -144,7 +150,7 @@ impl<'a> TextView<'a> {
         self
     }
     /// Borrow the frame's measurement capability for wrapping and inline-run placement.
-    /// Capability-backed wraps never consult the process-wide live-font memo: its entries
+    /// Capability-backed wraps never consult the render thread's live-font memo: its entries
     /// belong to a different measurement source and could hide a missing replay metric.
     pub fn with_measure(mut self, measure: &'a dyn plx_machine::machine::Measure) -> Self {
         self.measure = Some(measure);
@@ -329,7 +335,7 @@ impl<'a> TextView<'a> {
             // One borrowed view owns at most one wrap. Exact width/weight matter here;
             // nothing can survive a new capability, replay, or frame through this memo —
             // UNLESS the capability is the live font itself, whose answers are the ones the
-            // process memo already holds (`Measure::live_font`). Then the paragraph is wrapped
+            // thread's memo already holds (`Measure::live_font`). Then the paragraph is wrapped
             // once, not once per frame.
             width.to_bits().hash(&mut h);
             self.lead_bold.hash(&mut h);
@@ -775,7 +781,7 @@ mod tests {
     /// a fresh `TextView`, so a memo owned by the view dies with it; the Detail page re-wrapped
     /// its whole about/hero text through TrueType on every frame this way and was CPU-bound at
     /// 50 fps with nothing drawn (2026-09-19, stack samples + `drawmask=all`). A capability that
-    /// IS the live font shares the process memo; the test above still proves a table does not.
+    /// IS the live font shares the thread's memo; the test above still proves a table does not.
     #[test]
     fn a_live_font_capability_wraps_once_across_frames() {
         use plx_machine::machine::Measure;
@@ -792,7 +798,7 @@ mod tests {
             fn live_font(&self) -> bool { true }
         }
         let font = CountingLive(Cell::new(0));
-        // A text no other test wraps, so the process memo cannot already hold it.
+        // A text of its own, so the memo cannot already hold it.
         let text = "zq-live-memo alpha beta gamma delta epsilon zeta eta theta iota";
         let frame = || {
             TextView::new(text, theme::size::BODY, theme::TEXT_PRIMARY)
