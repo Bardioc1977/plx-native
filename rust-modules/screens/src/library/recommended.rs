@@ -269,10 +269,11 @@ impl ShelfRun {
     }
 }
 
-/// The height of a row of `landscape` cards whose caption band is `expanded` (0..1) open.
-pub(super) fn shelf_pitch(landscape: bool, expanded: f32) -> f32 {
+/// The height of a row of `landscape` cards whose caption band, `band_h` tall when it is open, is
+/// `expanded` (0..1) open.
+pub(super) fn shelf_pitch(landscape: bool, band_h: f32, expanded: f32) -> f32 {
     let art = if landscape { RowStyle::EPISODE.h } else { CARD_H };
-    TITLE_DY + CARD_DY + art + ui_cards::under_band(expanded) + UNDER_LABEL_AIR
+    TITLE_DY + CARD_DY + art + ui_cards::under_band_for(band_h, expanded) + UNDER_LABEL_AIR
 }
 
 fn hub_style(landscape: bool) -> &'static RowStyle { if landscape { &RowStyle::EPISODE } else { &RowStyle::HOME } }
@@ -529,8 +530,14 @@ impl RecommendedScreen {
     }
 
     fn relayout(&mut self, focus: Option<FocusKey<u32>>) {
-        self.run.set(self.shelves.iter().map(|row| shelf_pitch(row.landscape, row.cards.band_expand())));
-        self.target_run.set(self.shelves.iter().map(|row| shelf_pitch(row.landscape,
+        // The poster rows follow the Under posters setting; a landscape row (an episode still) is
+        // not a poster and keeps its own two-line block and band.
+        let policy = Some(crate::registry::captions::policy());
+        for row in &mut self.shelves {
+            row.cards.set_caption_policy(policy.filter(|_| !row.landscape));
+        }
+        self.run.set(self.shelves.iter().map(|row| shelf_pitch(row.landscape, row.cards.band_h(), row.cards.band_expand())));
+        self.target_run.set(self.shelves.iter().map(|row| shelf_pitch(row.landscape, row.cards.band_h(),
             f32::from(focus.is_some_and(|key| row.elems.contains(&key.elem))))));
         self.scroll_target = self.scroll_target.clamp(0.0, max_scroll(&self.target_run));
     }
@@ -952,7 +959,7 @@ impl RecommendedScreen {
                     self.initial = false;
                 }
                 if let InputKind::Wheel { dy } = input.kind {
-                    self.scroll_target = (self.scroll_target - dy * shelf_pitch(false, 0.0))
+                    self.scroll_target = (self.scroll_target - dy * shelf_pitch(false, ui_cards::LEGACY_BAND_H, 0.0))
                         .clamp(0.0, max_scroll(&self.target_run));
                     fx.invalidate(Provenance::Input);
                     return Handled::Yes;
@@ -991,9 +998,13 @@ impl RecommendedScreen {
         }).unwrap_or_default()
     }
 
-    /// Where row `index` sits for the component, in screen space: the top of its tiles.
+    /// Where row `index` sits for the component, in screen space: the top of its tiles. What stands
+    /// under its caption is the next row's heading, drawn lifted by that row's `heading_lift`.
     fn shelf_frame(&self, index: usize) -> SectionFrame {
-        SectionFrame { y: shelf_y(&self.run, index, self.scroll.pos) + CARD_DY, clip: content_clip() }
+        SectionFrame {
+            below_rise: self.shelves.get(index + 1).map_or(0.0, |next| next.cards.heading_lift()),
+            ..SectionFrame::new(shelf_y(&self.run, index, self.scroll.pos) + CARD_DY, content_clip())
+        }
     }
 
     /// Row `index`'s content, read off the published hub (borrows only).
@@ -1339,7 +1350,7 @@ impl<H: plx_machine::machine::Host<Elem = u32>> CardSource<H> for HubSrc<'_> {
         }
     }
     fn label(&self, i: usize) -> ui_cards::TileLabel {
-        self.shelf.map_or_else(|| ui_cards::TileLabel::title(""), |shelf| shelf_label(shelf, i))
+        self.shelf.map_or_else(ui_cards::TileLabel::default, |shelf| shelf_label(shelf, i))
     }
     fn progress(&self, i: usize) -> Option<f32> {
         self.shelf.filter(|shelf| !shelf.landscape).and_then(|_| self.item(i)).and_then(|item| item.resume_frac())
@@ -1356,22 +1367,9 @@ impl<H: plx_machine::machine::Host<Elem = u32>> CardSource<H> for HubSrc<'_> {
 }
 
 pub(super) fn shelf_label(shelf: &plx_data::browse::section_hubs::Shelf, col: usize) -> ui_cards::TileLabel {
-    let Some(item) = shelf.items.get(col) else { return ui_cards::TileLabel::title("") };
-    if shelf.landscape {
-        let name = if item.title.is_empty() || item.title == item.show_title {
-            plx_ui::fmt::episode_address(item.season_index as i64, item.ep_index as i64)
-        } else { item.title.clone() };
-        let fact = if shelf.is_continue && item.resume_frac().is_some() {
-            plx_ui::fmt::time_left(item.dur_ns / 1_000_000 - item.resume_ms)
-        } else if item.aired.is_empty() && item.year <= 0 { String::new() }
-        else { plx_ui::fmt::pretty_date(&item.aired, item.year as i64) };
-        return if fact.is_empty() { ui_cards::TileLabel::title(&name) }
-        else { ui_cards::TileLabel::titled(&name, &fact) };
-    }
-    let mut label = if shelf.is_continue && plx_media::route::deck_press().press_plays() { ui_cards::TileLabel::played(&item.title) }
-        else { ui_cards::TileLabel::title(&item.title) };
-    label.caption = ui_cards::focused_caption(&tile_facts::of(item), shelf.is_continue);
-    label
+    let Some(item) = shelf.items.get(col) else { return ui_cards::TileLabel::default() };
+    if shelf.landscape { return crate::registry::captions::still_label(item, shelf.is_continue, ""); }
+    crate::registry::captions::shelf_label(&crate::registry::captions::policy(), item, shelf.is_continue)
 }
 
 #[cfg(test)]

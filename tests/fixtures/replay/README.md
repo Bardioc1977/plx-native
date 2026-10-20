@@ -458,6 +458,22 @@ was replaced: the manifests (anchor flag included) already equal the new recorde
 `make check-replay` replays all three with `verdict=SAME` in Targets and Resolve and every
 difference counter at zero.
 
+The Under posters captions moved what Home draws without moving the shape: Home's poster shelves word
+their focused caption through the one caption policy, so under the default setting (Title Off,
+Year · Length) the focused poster's caption measures "1992 · 1h 40m" where Home's old caption
+measured the year alone ("1992") and two synthetic title names. Only `1-boot-home-chip-grid`
+moved (`plxnative-rec check` refused the fresh recording for one 13-character string; the replay of
+the committed one refused a measurement table miss from frame 304); `6-settings-family` and
+`12-filmography-detail-return` replayed `verdict=SAME` on the new tree. The owner decided the
+alphabet's answer (2026-10-20): ONE general pattern, `[0-9]{4} · ([0-9]+h )?[0-9]+m`, not the one
+literal (sourced in `_sources.year_length_caption`: `year_length`, `fmt::duration_minutes_in`,
+`core.duration_hours` / `core.duration_minutes`, and `tests/mock_pms.py` `_base` / `_movie`, which draw
+the year and the length). The fresh recording (`tests/focusfp.sh --rec --only 1`) passed
+`plxnative-rec check` with that pattern and nothing else added, and only
+`1-boot-home-chip-grid/rec-0000.jsonl` was replaced: the manifest (anchor flag included) already
+equals the new recorder's header, so it stands byte for byte. `make check-replay` replays all three
+with `verdict=SAME` in Targets and Resolve and every difference counter at zero.
+
 A card the focus has left now lands exactly on rest (`plx_ui::Spring::land`, called by
 `CardRow::update` for every cell that does not hold focus): the spring used to park one ulp above
 1.0 with a velocity of ~1e-6, which the canon hashes bit for bit (`CardRow::write_motion`). The
@@ -469,6 +485,12 @@ anchors against a build with only `Spring::land` made a no-op (all three SAME, e
 The anchor was recorded afresh (`tests/focusfp.sh --rec --only 1`) and only its `rec-0000.jsonl`
 replaced; `make check-replay` replays all three with `verdict=SAME` in Targets and Resolve and
 every difference counter at zero.
+
+The two changes above both move `1-boot-home-chip-grid`'s canon (the Under posters caption band,
+and the card landing at rest), and they landed apart: neither recording alone matched the merged
+code. The anchor was therefore re-recorded once on the merged tree (`tests/focusfp.sh --rec
+--only 1`), only `1-boot-home-chip-grid/rec-0000.jsonl` was replaced, and `make check-replay`
+replays all three with `verdict=SAME` in Targets and Resolve and every difference counter at zero.
 
 The grid let-go canon (`plx_ui::poster_grid::GridPop::write` writes the pop, then the let-gos in
 flight as a counted sequence, where it wrote one slot per let-go with no count; `LibraryGrid`'s
@@ -495,3 +517,28 @@ fixtures load) replayed all three SAME in Targets and Resolve, every difference 
 bump moves the fingerprint alone. The anchors were then recorded afresh on the committed tree
 (`tests/focusfp.sh --rec --only 1,6,12`), passed `plxnative-rec check`, and were installed with
 `tools/plxnative-rec rerecord`, anchors retained; the manifest diff is the `state_fp` line only.
+
+The per-line caption reveal and the Person page on `StackPage::shelf_foot` (`crx-grid-reveal`, merged
+with #863, #864 and #866) moved what two anchors hash and draw without moving the shape (`state_fp`
+stayed 2896094977091175041, so `rerecord` refuses). `6-settings-family` stayed SAME.
+`12-filmography-detail-return` replayed `DIVERGED` in both modes on the merged tree: `diverged=884` of
+923 frames, every visible counter at zero (`present_diffs`, `input_diffs`, `result_diffs`,
+`land_diffs`, `effect_diffs`, `focus_diffs`, `hit_diffs`), a pure state-hash divergence. It was
+attributed by replaying the committed anchor against a build of the merged tree with only
+`person.rs` put back to `origin/main`'s (the filmography labels through the one caption policy, the
+air under a shelf as `shelf_foot` where `Sec::Gap(kind)` stood before each shelf): SAME, `diverged=0`,
+every counter zero, in Targets and Resolve. The text measurements agree too: the fresh recording and
+the old one hold the same 136 `metrics` queries. `1-boot-home-chip-grid` diverged from frame 296 and
+was then refused (`replay: REFUSED — replay measurement table miss`, both modes), because main's
+recording predates the Under posters captions this branch carries (the paragraph above): attributed
+from the measurements themselves, by comparing the `metrics` records of a fresh recording against
+the committed one, which differ by exactly one gained Width query, Home's focused poster caption
+"1992 · 1h 40m" (24 px), and three lost, the year alone "1992" (24 px) and the two synthetic title
+names (26 px bold) the old caption measured. The owner approved re-anchoring for intended UI
+changes (the 2026-09-29/30 entries above, and the standing instruction not to stall on it). Both
+anchors were recorded afresh on the merged tree (`tests/focusfp.sh --rec --only 1,12`), passed
+`plxnative-rec check` against the alphabet unchanged by this step, and only their `rec-0000.jsonl`
+was replaced (`git rm -r`, `tools/plxnative-rec import`, the committed manifests restored byte for
+byte, `anchor: true` kept: they already equal the new recorder's header). `make check-replay`
+replays all three with `verdict=SAME` in Targets and Resolve and every difference counter at zero
+(three consecutive runs).

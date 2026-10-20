@@ -177,7 +177,7 @@ pub struct Grid {
     /// The animated landing of inserted and removed cards (`landing.rs`); off unless the spec asks.
     landing: Landing,
     /// What the focused caption band shows (the Library's Under posters setting); `None` keeps the
-    /// legacy 92 px band every grid without the setting opens to.
+    /// legacy 114 px band every grid without the setting opens to.
     caption_policy: Option<crate::caption_policy::CaptionPolicy>,
     /// The page is still dissolving in ([`dormant`](Grid::dormant)): no card is lifted yet.
     dormant: bool,
@@ -241,10 +241,12 @@ impl Grid {
         self.dormant = held;
     }
 
-    /// Size and caption the focused band by `policy` (the Library's Under posters setting). A grid
-    /// never given one keeps the legacy band.
-    pub fn set_caption_policy(&mut self, policy: crate::caption_policy::CaptionPolicy) {
-        self.caption_policy = Some(policy);
+    /// Size and caption the focused band by `policy` (the Library's Under posters setting), or with
+    /// `None` keep the legacy two-line band: a grid of LANDSCAPE stills (the Library's Episodes
+    /// listing) is not a poster surface and is off the policy, as a landscape [`Shelf`](super::Shelf)
+    /// is. A grid never given one keeps the legacy band.
+    pub fn set_caption_policy(&mut self, policy: Option<crate::caption_policy::CaptionPolicy>) {
+        self.caption_policy = policy;
         self.bands.set_caption_policy(policy);
     }
 
@@ -324,7 +326,7 @@ impl Grid {
             self.slept = true;
             self.seen = Seen::Nothing;
             self.pop.reset();
-            // A caption is its band's content (alpha = the band's expansion), so the band of a seat
+            // A caption is its band's content (its lines are drawn only as the band opens), so the band of a seat
             // nobody has lifted is shut too: it opens with the lift below, not under the fade. Shut
             // outright and not through `focus_band`, which would keep the open layout for the
             // landing to measure from, and a landing is not what wakes.
@@ -655,7 +657,7 @@ impl Grid {
     /// The caption bands closed and settled: a fresh content set whose old rows mean nothing.
     pub fn reset_bands(&mut self) {
         self.bands = GridBands::new();
-        if let Some(policy) = self.caption_policy { self.bands.set_caption_policy(policy); }
+        self.bands.set_caption_policy(self.caption_policy);
     }
 
     /// The grid's height for `len` cards with its caption bands as they are now: the span from the
@@ -757,13 +759,40 @@ impl Grid {
     pub fn place<H: Host, S: CardSource<H>>(&self, cx: &Cx<'_, H>, src: &S, elem: &H::Elem, how: At) -> Option<Placed> {
         let i = src.index_of(elem)?;
         let focus = super::focused_index(&cx.focus, self.entry, src);
-        let pressed = super::pressed_index(cx, self.entry, src);
-        let cell = self.slot(i, src.len(), &self.bands.geometry());
-        let s = match how {
-            At::Drawn => super::press_scale(self.pop(src, i, focus), i, pressed, cx),
-            At::SpringTarget => if focus == Some(i) { self.spec.style.focus_scale } else { 1.0 },
+        let bands = self.bands.geometry();
+        let cell = self.slot(i, src.len(), &bands);
+        let rect = match how {
+            At::Drawn => self.drawn_rect(pool::let_go_cards(&self.pop, src), cx, src, i, &bands),
+            At::SpringTarget => cell.scaled(if focus == Some(i) { self.spec.style.focus_scale } else { 1.0 }),
         };
-        Some(Placed { rect: cell.scaled(s), rest_rect: cell.scaled(self.spec.style.focus_scale), clip: Rect::FULL, index: Some(i as u32) })
+        Some(Placed { rect, rest_rect: cell.scaled(self.spec.style.focus_scale), clip: Rect::FULL, index: Some(i as u32) })
+    }
+
+    /// Card `i` as it is DRAWN now: its slot (a landing's slide folded in) scaled by its live pop
+    /// and the press dip, the rect [`place`](Self::place) answers for `At::Drawn`. The pop is the
+    /// draw's own ([`pop_in`](Self::pop_in) with the pass's `cards`), so a let-go still shrinking is
+    /// read the way the frame paints it, even over a source no tick has seen yet.
+    fn drawn_rect<H: Host, S: CardSource<H>>(&self, cards: LetGoCards, cx: &Cx<'_, H>, src: &S, i: usize, bands: &[GridBand]) -> Rect {
+        let focus = super::focused_index(&cx.focus, self.entry, src);
+        let pressed = super::pressed_index(cx, self.entry, src);
+        self.slot(i, src.len(), bands).scaled(super::press_scale(self.pop_in(cards, src, i, focus), i, pressed, cx))
+    }
+
+    /// **How far the tile directly below card `i` is drawn above its cell**, px: the live pop of the
+    /// card that takes (or lets go of) the focus under a caption, which is drawn OVER it. The one
+    /// number the grid hands the caption rule ([`card_row::line_reveal_for`]) so a line stops where
+    /// that tile's drawn top is, not where its cell rests. 0 for a card in the last row.
+    ///
+    /// The tile below may be a card focus has just left and that is still shrinking (a let-go: a held
+    /// Down or Right leaves one under every caption it passes), which is drawn above its rest top too.
+    /// Its scale is the draw's own, read through [`drawn_rect`](Self::drawn_rect) with the pass's
+    /// `cards`: never a second computation of what the frame paints.
+    fn rise_below<H: Host, S: CardSource<H>>(&self, cards: LetGoCards, cx: &Cx<'_, H>, src: &S, i: usize, bands: &[GridBand]) -> f32 {
+        let below = i + self.spec.cols;
+        if below >= src.len() {
+            return 0.0;
+        }
+        self.cell(below, bands).y - self.drawn_rect(cards, cx, src, below, bands).y
     }
 
     /// Draw the grid into `p` (page alpha already applied) and register its stops. Back to front:
@@ -783,7 +812,7 @@ impl Grid {
         let paints: Vec<_> = plan.into_iter().map(|(role, i)| {
             let s = super::press_scale(self.pop_in(cards, src, i, focus), i, pressed, f.cx);
             let focused = role == DrawRole::Focus;
-            (i, s, focused, self.card_paint(f, p, src, i, s, focused, &bands))
+            (i, s, focused, self.card_paint(f, p, src, cards, i, s, focused, &bands))
         }).collect();
         // The focused card paints last, over its neighbours, but it is the card the reader is
         // looking at: it asks the source for its poster FIRST, so it is the first one served
@@ -894,8 +923,9 @@ impl Grid {
     ) {
         let Some(i) = focus.filter(|k| k.entry == self.entry).and_then(|k| src.index_of(&k.elem)) else { return };
         let pressed = super::pressed_index(f.cx, self.entry, src);
-        let s = super::press_scale(self.pop(src, i, Some(i)), i, pressed, f.cx);
-        let Some(paint) = self.card_paint(f, p, src, i, s, true, &self.bands.geometry()) else { return };
+        let cards = pool::let_go_cards(&self.pop, src);
+        let s = super::press_scale(self.pop_in(cards, src, i, Some(i)), i, pressed, f.cx);
+        let Some(paint) = self.card_paint(f, p, src, cards, i, s, true, &self.bands.geometry()) else { return };
         self.draw_caption(f, &paint, s, true);
         self.draw_card(f, src, i, s, true, paint, None);
     }
@@ -903,7 +933,7 @@ impl Grid {
     /// What card `i` is painted with, decided apart from the GL calls so that [`draw_card`](Self::draw_card)
     /// and the host test that reads the captions ([`caption_probe`](Self::caption_probe)) cannot
     /// disagree about what is on screen: the cell it fills, the painter it is drawn with (an arriving
-    /// card's fade applied) and the caption block under it with its alpha in `reveal`. `None` when
+    /// card's fade applied) and the caption block under it with the band it hangs in in `reveal`. `None` when
     /// the card is not painted at all: not loaded, lifted into a menu, or culled.
     #[allow(clippy::too_many_arguments)]
     fn card_paint<H: Host, S: CardSource<H>>(
@@ -911,6 +941,7 @@ impl Grid {
         f: &DrawFrame<'_, '_, H>,
         p: Painter,
         src: &S,
+        cards: LetGoCards,
         i: usize,
         s: f32,
         focused: bool,
@@ -924,7 +955,9 @@ impl Grid {
         }
         // The caption a card carries: the focused card's, at its band's progress; or, on a card the
         // focus has left, the caption its row's band is still closing on, at that band's progress.
-        // Either way the alpha is the band's own, so the caption goes with the gap.
+        // Either way each line is revealed by the band's own progress and the room it has made
+        // (`card_row::line_reveal_for`), so the caption goes with the gap and never stands over
+        // the row under it.
         let label = if focused {
             let row = i / self.spec.cols;
             let open = bands.iter().find(|band| band.row == row).map_or(0.0, |band| band.expansion);
@@ -932,12 +965,13 @@ impl Grid {
             // ghost keeps the caption as drawn ([`paint_ghosts`](Self::paint_ghosts)); the card
             // focus reconciled to takes it up with the landing's first step.
             let label = if self.caption_held() { super::TileLabel::default() } else { src.label(i) };
-            Some(label.revealed(card_row::band_fade(open)))
+            Some((label, open))
         } else {
             self.bands.closing()
                 .find(|&(row, card, _)| card == i && row == i / self.spec.cols)
-                .map(|(_, _, open)| src.label(i).revealed(card_row::band_fade(open)))
-        };
+                .map(|(_, _, open)| (src.label(i), open))
+        }
+        .map(|(label, open)| label.revealed(self.band_h(), open, self.rise_below(cards, f.cx, src, i, bands)));
         let rect = super::to_local(p, self.slot(i, src.len(), bands)).scaled(s);
         if !card_row::paint_visible(p, rect, s, label.is_some()) {
             return None;
@@ -993,7 +1027,8 @@ impl Grid {
         src.overlay(p, i, &Tile { rect, scale: s, radius: self.spec.style.tile_radius(rect, s), focused }, f.measure);
     }
 
-    /// Test support: the captions [`draw`](Self::draw) puts on screen now, `(card index, alpha)`,
+    /// Test support: the captions [`draw`](Self::draw) puts on screen now, `(card index, alpha of its
+    /// most visible line)`,
     /// read from the same decision the draw paints (`card_paint`: loaded, lifted, culled, arriving
     /// fade and all), so a caption that is cut or late on screen is cut or late here.
     #[cfg(any(test, feature = "test-support"))]
@@ -1004,10 +1039,35 @@ impl Grid {
         let cards = pool::let_go_cards(&self.pop, src);
         self.draw_plan(src.len(), focus, &bands).into_iter().filter_map(|(role, i)| {
             let s = super::press_scale(self.pop_in(cards, src, i, focus), i, pressed, f.cx);
-            let paint = self.card_paint(f, p, src, i, s, role == DrawRole::Focus, &bands)?;
+            let paint = self.card_paint(f, p, src, cards, i, s, role == DrawRole::Focus, &bands)?;
             let label = paint.label?;
-            (label.title.is_some() || label.caption.is_some()).then(|| (i, label.reveal * paint.p.opacity()))
+            (label.title.is_some() || label.caption.is_some()).then(|| {
+                (i, label.lines().iter().flatten().map(|l| l.alpha).fold(0.0, f32::max) * paint.p.opacity())
+            })
         }).collect()
+    }
+
+    /// Test support: every caption LINE [`draw`](Self::draw) puts on screen now, `(card index, top y,
+    /// bottom y, alpha)` in the grid's own space, from the same decision the draw paints
+    /// (`card_paint`) and the same boxes ([`TileLabel::lines`](card_row::TileLabel::lines)): a line
+    /// that is not drawn (alpha 0) is not listed, so a test reads exactly the ink a frame carries.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn caption_lines_probe<H: Host, S: CardSource<H>>(&self, f: &DrawFrame<'_, '_, H>, p: Painter, src: &S) -> Vec<(usize, f32, f32, f32)> {
+        let focus = super::focused_index(&f.focus, self.entry, src);
+        let pressed = super::pressed_index(f.cx, self.entry, src);
+        let bands = self.bands.geometry();
+        let cards = pool::let_go_cards(&self.pop, src);
+        let mut out = Vec::new();
+        for (role, i) in self.draw_plan(src.len(), focus, &bands) {
+            let s = super::press_scale(self.pop_in(cards, src, i, focus), i, pressed, f.cx);
+            let Some(paint) = self.card_paint(f, p, src, cards, i, s, role == DrawRole::Focus, &bands) else { continue };
+            let Some(label) = paint.label else { continue };
+            let bottom = card_row::unscaled_bottom(paint.rect, s);
+            for line in label.lines().into_iter().flatten().filter(|l| l.alpha * paint.p.opacity() > 0.0) {
+                out.push((i, bottom + line.top, bottom + line.bottom, line.alpha * paint.p.opacity()));
+            }
+        }
+        out
     }
 
     /// The focused card left as a ghost and the landing has not made its first moving step (the menu's
@@ -1081,6 +1141,13 @@ impl Grid {
     #[cfg(any(test, feature = "test-support"))]
     pub fn pop_probe(&self, focus: Option<usize>) -> f32 {
         focus.filter(|_| !self.dormant).map_or(1.0, |i| self.pop.pop_scale(i, &self.spec.style))
+    }
+
+    /// Card `i`'s settled (unpopped) cell as the grid stands now, the caption bands folded in: where
+    /// a test reads how much room the focused row opened under its cards.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cell_probe(&self, i: usize) -> Rect {
+        self.cell(i, &self.bands.geometry())
     }
 
     /// What a landing is doing to card `i` of `n` right now: `((x, y) offset px, alpha)`.
@@ -1160,10 +1227,10 @@ impl Grid {
             // the new focus card's, which moves with the focus.
             if g.focused && self.landing_waiting() {
                 let open = bands.iter().find(|band| band.row == g.was / self.spec.cols).map_or(0.0, |band| band.expansion);
-                let label = ghosts.label(j).revealed(card_row::band_fade(open));
-                if label.reveal > 0.0 {
-                    card_row::draw_label(pr.alpha(label.reveal), rect, s, &self.spec.style, &label, f.measure);
-                }
+                // nothing below it lifts while the landing waits: the card focus reconciled to rests
+                // until the landing's first step (`pop`), so the ghost's caption sees its row at rest
+                let label = ghosts.label(j).revealed(self.band_h(), open, 0.0);
+                card_row::draw_label(pr, rect, s, &self.spec.style, &label, f.measure);
             }
         }
     }

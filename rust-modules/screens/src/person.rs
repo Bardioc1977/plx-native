@@ -68,8 +68,9 @@ enum Sec {
     Entry,
     /// The skeleton / empty read-out in the shelves' place, while no shelf has content.
     State,
-    /// The air above the shelf of this kind.
-    Gap(usize),
+    /// The air between the header band and the first shelf. The air under a shelf is its own foot
+    /// ([`StackPage::shelf_foot`]), so two shelves are adjacent sections.
+    Gap,
     /// The shelf of this kind (0 = Movies, 1 = Shows).
     Shelf(usize),
 }
@@ -80,7 +81,7 @@ const ENTRY_GROUP: GroupId = GroupId(0);
 const SHELF_GROUP: [GroupId; NSHELF] = [GroupId(2), GroupId(3)];
 /// Sections with no focus element still carry a distinct id ([`SectionSpec::group`]); none is listed.
 const STATE_GROUP: GroupId = GroupId(8);
-const GAP_GROUP: [GroupId; NSHELF] = [GroupId(9), GroupId(10)];
+const GAP_GROUP: GroupId = GroupId(9);
 
 #[cfg(test)]
 pub(crate) mod cards_harness; // Tier 2 card conformance (cards_conformance_tests.rs)
@@ -132,6 +133,8 @@ const BIO_MORE_GAP: f32 = theme::space::LG;
 // heading below it, not the full `XL` region gap the band and its first shelf shipped with — the
 // pill is part of the header's own block, not a separate section.
 const BAND_GAP_TO_SHELF: f32 = theme::space::MD;
+/// The air under a shelf that has another under it ([`StackPage::shelf_foot`]): the label band's air,
+/// which keeps the pitch Home's shelves have.
 const SHELF_GAP: f32 = UNDER_LABEL_AIR;
 const SHELF_LABEL_H: f32 = TITLE_DY + CARD_DY;
 const SHELF_STYLE: RowStyle = RowStyle::HOME;
@@ -341,9 +344,17 @@ impl<H: ContentLike> CardSource<H> for ShelfCards<'_> {
     fn art(&self, i: usize) -> Art<'_> {
         Art::Poster(self.person.shelf(self.kind).get(i).map(tile_facts::of))
     }
+    /// A filmography poster follows the Under posters setting through the one builder. The character
+    /// the credit plays is the PAGE's own state for the tile (the way a Continue Watching tile's time
+    /// left is), so it is the details line under every setting but Nothing; a credit with no
+    /// character (every crew credit, and every credit before the roles batch lands) reads the picked
+    /// fact like any other poster.
     fn label(&self, i: usize) -> TileLabel {
         match self.person.shelf(self.kind).get(i) {
-            Some(m) => TileLabel::titled(&m.title, self.person.role(self.kind, i)),
+            Some(m) => {
+                let role = Some(self.person.role(self.kind, i)).filter(|role| !role.is_empty()).map(str::to_owned);
+                crate::registry::captions::label(&crate::registry::captions::policy(), &tile_facts::caption_facts(m), role, false)
+            }
             None => TileLabel::default(),
         }
     }
@@ -1099,10 +1110,22 @@ impl<H: ContentLike + PersonLike> StackPage<H> for Page {
         out.push(SectionSpec::new(Sec::Head, Kind::Custom { height: HEADER_TOP + self.header.exp_h, focusable: person.is_some() }, HEADER_GROUP));
         out.push(SectionSpec::new(Sec::Entry, Kind::Custom { height: 0.0, focusable: person.is_some_and(entry_reachable) }, ENTRY_GROUP));
         out.push(SectionSpec::new(Sec::State, Kind::Custom { height: 0.0, focusable: false }, STATE_GROUP));
-        for (pos, &kind) in kinds[..n].iter().enumerate() {
-            let gap = if pos == 0 { BAND_GAP_TO_SHELF } else { SHELF_GAP };
-            out.push(SectionSpec::new(Sec::Gap(kind), Kind::Custom { height: gap, focusable: false }, GAP_GROUP[kind]));
+        if n > 0 {
+            out.push(SectionSpec::new(Sec::Gap, Kind::Custom { height: BAND_GAP_TO_SHELF, focusable: false }, GAP_GROUP));
+        }
+        for &kind in &kinds[..n] {
             out.push(SectionSpec::new(Sec::Shelf(kind), Kind::Shelf { style: &SHELF_STYLE, heading: SHELF_LABEL_H }, SHELF_GROUP[kind]));
+        }
+    }
+
+    /// Every shelf but the last keeps the label band's air under it, so the next shelf stands at
+    /// Home's pitch; the last ends where its block does (the page rests it one margin above the
+    /// bottom edge). The shelves present are read the way `sections` reads them.
+    fn shelf_foot(&self, cx: &Cx<'_, H>, k: Sec) -> f32 {
+        let (kinds, n) = self.person(cx).map_or(([0; NSHELF], 0), present);
+        match k {
+            Sec::Shelf(kind) if kinds[..n].last() != Some(&kind) => SHELF_GAP,
+            _ => 0.0,
         }
     }
 
@@ -1110,6 +1133,11 @@ impl<H: ContentLike + PersonLike> StackPage<H> for Page {
     fn fallback(&self, _cx: &Cx<'_, H>, out: &mut Vec<Sec>) {
         out.extend((0..NSHELF).map(Sec::Shelf));
         out.push(Sec::Head);
+    }
+
+    /// Every filmography shelf is a row of posters: they follow the Under posters setting.
+    fn caption_policy(&self, k: Sec) -> Option<plx_ui::caption_policy::CaptionPolicy> {
+        matches!(k, Sec::Shelf(_)).then(crate::registry::captions::policy)
     }
 
     fn cards<'a>(&'a self, cx: &'a Cx<'_, H>, k: Sec) -> Option<ShelfCards<'a>> {
@@ -1179,7 +1207,7 @@ impl<H: ContentLike + PersonLike> StackPage<H> for Page {
                 }
             }
             Sec::State => self.draw_shelf_state(p, &Env::inert(), person, r.y + BAND_GAP_TO_SHELF),
-            Sec::Entry | Sec::Gap(_) | Sec::Shelf(_) => {}
+            Sec::Entry | Sec::Gap | Sec::Shelf(_) => {}
         }
     }
 }
@@ -3115,7 +3143,7 @@ mod tests {
             .unwrap();
         let tile_top = placed.rest_rect.cy() - CARD_H / 2.0;
         let block_top = tile_top - SHELF_LABEL_H;
-        let block_bottom = tile_top + CARD_H + ui_cards::under_band(1.0);
+        let block_bottom = tile_top + CARD_H + ui_cards::under_band_for(plx_ui::caption_policy::band_h(&crate::registry::captions::policy()), 1.0);
         assert!(block_bottom <= SCR_H, "the block's bottom edge is on screen: {block_bottom}");
         assert!(block_top >= HEADER_TOP - 0.5, "and its top keeps the page margin: {block_top}");
         // and no further: the last shelf rests exactly one page margin above the bottom edge
@@ -3125,11 +3153,47 @@ mod tests {
 
     #[test]
     fn a_shelf_here_pitches_like_a_shelf_on_home() {
-        assert_eq!(
-            SHELF_GAP + SHELF_LABEL_H + CARD_H + ui_cards::under_band(1.0),
-            plx_ui::consts::ROW_PITCH
-        );
+        // the fixed part of the pitch; the band under it is the Under posters setting's, as Home's
+        assert_eq!(SHELF_GAP + SHELF_LABEL_H + CARD_H, ui_cards::ROW_PITCH_FIXED);
         assert_eq!(SHELF_LABEL_H, TITLE_DY + CARD_DY);
+    }
+
+    /// **The first filmography shelf's caption stops short of the heading of the shelf under it.**
+    /// A Down from the Movies shelf onto the Shows shelf lifts the Shows heading while the Movies
+    /// caption is still leaving, and an Up back does the reverse; at the 112 px band no caption line
+    /// of the Movies shelf ends below the Shows heading's drawn top (`SectionFrame::below_rise`).
+    #[test]
+    fn a_shelfs_caption_keeps_clear_of_the_next_shelfs_lifted_heading() {
+        use crate::registry::captions::TEST_UNDER_POSTERS;
+        use plx_plex::plex::session::{UnderPosters, UnderPostersDetails as Details};
+        let _serial = plx_base::testlock::serial();
+        TEST_UNDER_POSTERS.with(|cell| cell.set(Some(UnderPosters { title: true, details: Details::YearLength })));
+        let (mut store, mut s) = shelved_page(PORTRAIT_EXP);
+        let (movies, shows) = (focus_of(&s, &store, 0, 0), focus_of(&s, &store, 1, 0));
+        settle_shelves(&mut s, &store, movies, 120);
+        let (mut worst, mut lines, mut from) = (f32::MIN, 0, movies);
+        for frame in 0..130 {
+            let to = match frame { 0 => shows, 60 => movies, _ => from };
+            if to != from {
+                feed(&mut s, &store, &FixtureMeasure, Some(to), ScreenEvent::FocusMoved { from: Some(from), to, by: By::Dir });
+                from = to;
+            }
+            settle_shelves(&mut s, &store, from, 1);
+            let cxv = cx_at(&FixtureMeasure, store.view(), from);
+            let f = DrawFrame::new(&cxv, Painter::root());
+            let (first, second) = (Sec::Shelf(0), Sec::Shelf(1));
+            let above = s.stack.shelf_frame(&s.page, &cxv, first).expect("the Movies shelf");
+            let heading = s.stack.shelf_frame(&s.page, &cxv, second).expect("the Shows shelf").y - SHELF_LABEL_H
+                - s.stack.shelf(second).expect("the Shows shelf").heading_lift();
+            let src = StackPage::<PersonHost>::cards(&s.page, &cxv, first).expect("the Movies cards");
+            let drawn = s.stack.shelf(first).expect("the Movies shelf").caption_lines_probe(&f, &src, above);
+            lines += drawn.len();
+            worst = drawn.iter().fold(worst, |worst, &(_, _, bottom, _)| worst.max(bottom - heading));
+        }
+        TEST_UNDER_POSTERS.with(|cell| cell.set(None));
+        store.run(PersonCmd::Close);
+        assert!(lines > 0, "the walk saw no caption line");
+        assert!(worst <= 0.0, "a caption line of the Movies shelf ends {worst:.1} px below the drawn top of the Shows heading");
     }
 
 }

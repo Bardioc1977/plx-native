@@ -318,6 +318,14 @@ impl World {
         w
     }
 
+    /// The Movies library showing its section's EPISODES listing (the landscape stills), settled.
+    pub(super) fn episodes_library(name: &str) -> World {
+        let mut w = Self::movies_library(name, false);
+        w.bridge.stores.browse.borrow_mut().seed_episodes_for_test(60);
+        w.frames(60);
+        w
+    }
+
     /// The Movies library whose section has published no shelves yet (its listing answered): the
     /// Recommended page opened from it has a first publication still to come.
     pub(super) fn movies_library_unshelved(name: &str) -> World {
@@ -442,20 +450,51 @@ impl World {
     /// A movie's Detail page (record `rk` carrying the guid of the catalog id `hex`) pushed over Home,
     /// over the same scripted plex.tv, settled.
     pub(super) fn detail_with_disc(name: &str, hex: [u8; 12]) -> World {
-        let mut w = Self::scripted(name);
-        super::show_page(&mut w.d, AppArg::Home);
-        w.frames(20);
-        // Installed BEFORE the mount: the page keys its element identities from the item it finds current.
-        plx_data::metadata::set_current_for_test(w.bridge.stores.metadata.state_mut(), Some(plx_data::metadata::Detail {
+        Self::detail_page(name, plx_data::metadata::Detail {
             sid: plx_plex::plex::ServerId::UNSET,
             rk: "movie".into(),
             kind: "movie".into(),
             guid: format!("plex://movie/{}", plx_data::watchlist::encode_hex(&hex)),
             ..Default::default()
-        }));
+        })
+    }
+
+    /// The Detail page of record `movie` holding `detail` (its `related` shelf, its collection), pushed
+    /// over Home over the same scripted plex.tv, settled.
+    pub(super) fn detail_page(name: &str, detail: plx_data::metadata::Detail) -> World {
+        let mut w = Self::scripted(name);
+        super::show_page(&mut w.d, AppArg::Home);
+        w.frames(20);
+        // Installed BEFORE the mount: the page keys its element identities from the item it finds current.
+        plx_data::metadata::set_current_for_test(w.bridge.stores.metadata.state_mut(), Some(detail));
         super::nav_push_with_return(&mut w.d, detail_arg("movie"), Default::default());
         w.frames(60);
         assert!(w.on(&detail_arg("movie")), "premise: the Detail page is on top");
+        w
+    }
+
+    /// The Search page with `shelves` (of the world's own server) published as its results, settled.
+    /// The query is set the way a typed one is, so the page shows results rather than recents.
+    pub(super) fn search_results(name: &str, shelves: impl FnOnce(plx_plex::plex::ServerId) -> Vec<plx_data::search::Shelf>) -> World {
+        let mut w = Self::new(name);
+        super::show_page(&mut w.d, AppArg::Search);
+        w.bridge.search_run(plx_data::stores::search::SearchCmd::SetQuery("synthetic".into()));
+        let shelves = shelves(w.own);
+        w.bridge.stores.search.publish_shelves_over_directory_for_test(shelves, w.bridge.directory.view());
+        w.frames(60);
+        assert!(w.on(&AppArg::Search), "premise: Search is on top");
+        w
+    }
+
+    /// The person page of `actor-a` whose filmography is `movies` and `shows`, `movie_roles` being the
+    /// characters the roles batch named the movie tiles' credits as, settled.
+    pub(super) fn person_page(name: &str, movies: Vec<plx_data::pms::PmsMovie>, shows: Vec<plx_data::pms::PmsMovie>, movie_roles: &[&str]) -> World {
+        let mut w = Self::new(name);
+        super::show_page(&mut w.d, person_arg("actor-a"));
+        w.frames(30);
+        w.bridge.stores.person.install_for_test(movies, shows);
+        w.bridge.stores.person.install_roles_for_test(0, movie_roles.iter().map(|r| (*r).to_owned()).collect());
+        w.frames(60);
         w
     }
 
@@ -526,15 +565,19 @@ impl World {
         let mut glass = plx_ui::frame::glass::GlassPlan::new();
         let sources = glass.sources.clone();
         sources.borrow_mut().begin(self.d.backdrop_layers(1.0));
-        let words = {
-            let _declarations = backdrop::discover(sources.clone());
-            plx_ui::draw_census::capture_text(|| {
-                self.d.draw_with_glass_below(&mut self.bridge, &mut glass, true, backdrop::Z::ALL);
-            })
-        };
+        let mut words = Vec::new();
+        let mut runs = Vec::new();
+        let marks = plx_ui::draw_census::capture_play_marks(|| {
+            runs = plx_ui::draw_census::capture_runs(|| {
+                let _declarations = backdrop::discover(sources.clone());
+                words = plx_ui::draw_census::capture_text(|| {
+                    self.d.draw_with_glass_below(&mut self.bridge, &mut glass, true, backdrop::Z::ALL);
+                });
+            });
+        });
         sources.borrow_mut().resolve();
         backdrop::commit(&sources);
-        Drawn { words }
+        Drawn { words, runs, marks }
     }
 
     /// Present the hit map the bar registers for this frame (`Dispatcher::present_bar_stops`): what a pointer
@@ -587,11 +630,21 @@ impl World {
             .expect("a Library page (the grid or the Collections page) is on top")
     }
 
+    /// Poster `i`'s settled cell on the grid page on top (the Library grid or the Collections page, the
+    /// Watchlist, the Collection screen's members), the caption band folded in.
+    pub(super) fn poster_cell(&self, i: usize) -> plx_ui::Rect {
+        let any = self.d.top_screen().and_then(|screen| screen.as_any()).expect("a page is on top");
+        if let Some(page) = any.downcast_ref::<plx_screens::library::LibraryScreen>() { return page.probe_cell(i).0; }
+        if let Some(page) = any.downcast_ref::<plx_screens::watchlist::page::WatchlistScreen>() { return page.probe_cell(i).expect("the Watchlist holds a grid"); }
+        if let Some(page) = any.downcast_ref::<plx_screens::collection::CollectionScreen>() { return page.probe_cell(i).expect("the Collection screen holds a grid"); }
+        panic!("the top page holds no poster grid");
+    }
+
     /// **Every card's pop as the top page's draw paints it**, shelf by shelf (Home or the Recommended
     /// page): `1.0` is a card at EXACT rest, which `ui::widgets::pop_factor` turns into `0.0` and the card
     /// compositor into the plain program and the resting split. Anything above `1.0` on a card the
     /// focus is not on is a card that never came to rest (`Spring::land`).
-    fn card_pops(&self) -> Vec<Vec<f32>> {
+    pub(super) fn card_pops(&self) -> Vec<Vec<f32>> {
         let any = self.d.top_screen().and_then(|screen| screen.as_any()).expect("a page is on top");
         if let Some(page) = any.downcast_ref::<plx_screens::home::HomeScreen>() { return page.probe_card_pops(self.d.focus()); }
         if let Some(page) = any.downcast_ref::<plx_screens::library::RecommendedScreen>() { return page.probe_card_pops(self.d.focus()); }
@@ -693,11 +746,24 @@ impl World {
 /// One frame's draw, as [`World::drawn`] reads it: the text, since a host paints no pixels.
 pub(super) struct Drawn {
     pub(super) words: Vec<(String, plx_ui::Rect)>,
+    /// The same runs with their style: `ink[3]` is the alpha the page drew each at (the cascade folded in).
+    pub(super) runs: Vec<plx_ui::draw_census::Run>,
+    /// Every amber play mark the frame drew (a host paints no icon: the census notes each one), as
+    /// the rect it stands in.
+    pub(super) marks: Vec<plx_ui::Rect>,
 }
 
 impl Drawn {
     /// Was `text` drawn, exactly as one run?
     pub(super) fn says(&self, text: &str) -> bool { self.words.iter().any(|(words, _)| words == text) }
+
+    /// **The lines of the focused tile's label block this frame drew**, top to bottom, with no list of
+    /// words to look for: every run `card_row::draw_label_block` drew, whatever its ink
+    /// (`plx_ui::draw_census::label_lines`), so a line the setting turned off, or one nothing asked
+    /// for, is not there, and one that should not be (a stray UNSHADOWED legacy block under Nothing
+    /// included) fails the test that compares this list. A line's shadow and a gliding line's
+    /// follower are the same line; two lines that read alike stay two.
+    pub(super) fn caption_lines(&self) -> Vec<String> { plx_ui::draw_census::label_lines(&self.runs) }
 }
 
 pub(super) use super::super::words::every_route;

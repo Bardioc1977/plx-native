@@ -99,6 +99,15 @@ pub const STRIP_ACCOUNT_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 4;
 pub const STRIP_WATCHLIST_ELEM: u32 = plx_ui::dispatch::STRIP_BASE + 5;
 
 const MAX_ITEMS: usize = plx_data::pms::MAX_SHELF_ITEMS;
+/// **How much of a resting shelf's posters must stand above the bottom margin for the pointer to take
+/// focus onto them**, from the poster's top (0..1). The page rests the focused shelf at one fixed
+/// line (`rest_scroll`), so the shelf below it stands cut by the bottom margin by a few tens of px
+/// and the shelf above it is off the top: a rule that wanted a shelf WHOLE on screen
+/// left the pointer nothing it could take focus onto (a shelf cut by the TOP still never takes it,
+/// so one passing under the pointer on its way off does not steal focus). The wheel moves the
+/// focus shelf by shelf either way (`bridge::wheel_input`, an Up or Down key).
+const POINTER_REACH: f32 = 0.5;
+
 const HERO_FLIP_CD: f32 = 0.35;
 const HERO_AUTO_S: f32 = 8.0;
 /// How near its target (px) a shelf's horizontal glide and the page's vertical reveal have to be
@@ -1499,6 +1508,10 @@ impl HomeScreen {
     }
 
     fn layout_grid(&mut self) {
+        let policy = Some(crate::registry::captions::policy());
+        for shelf in &mut self.grid.shelves {
+            shelf.set_caption_policy(policy);
+        }
         let top = PEEK_Y + (GRID_TOP_Y - PEEK_Y) * self.snap.pos;
         let mut flow = 0.0;
         for shelf in &mut self.grid.shelves {
@@ -1559,16 +1572,9 @@ impl HomeScreen {
                 fx.push(Fx::App(AppFx::Store(StoreId::Hubs, StoreCmd::Hubs(HubsCmd::Hold { lo: hold.0, hi: hold.1 }))));
             }
         }
-        let revealed = focused.map(|(row, _)| (row, Some(row)))
-            .or_else(|| self.focused_heading(cx.focus.current).map(|row| (row, None)));
-        if let Some((row, band_row)) = revealed.filter(|(r, _)| *r < self.rows.len()) {
-            let (lo, hi) = row_reveal_band(shelf_top_banded(row, band_row));
-            self.grid.scroll_target = ui_cards::reveal(
-                self.grid.scroll_y.pos,
-                lo,
-                hi,
-                grid_max_scroll(self.rows.len()),
-            );
+        let rested = focused.map(|(row, _)| row).or_else(|| self.focused_heading(cx.focus.current));
+        if let Some(row) = rested.filter(|row| *row < self.rows.len()) {
+            self.grid.scroll_target = rest_scroll(row, self.rows.len());
         }
         self.grid
             .scroll_y
@@ -2227,11 +2233,16 @@ impl HomeScreen {
                 continue;
             }
             let row_y = self.grid.base_y(row);
+            // The heading rides the page under the chrome, which stays: it fades by where it is
+            // DRAWN (`scroll_chrome`'s clearance, at the place the lift leaves it) and is gone
+            // before it reaches the chip, so no ink of it ever stands over the chip's rows. The
+            // focused row's heading rests whole: its drawn place is clear of the ramp.
+            let alpha = env.sp * plx_ui::scroll_chrome::clearance_under_shown_chrome(heading_y(row_y, self.grid.lift(row)));
             if let Some(linked) = self.heading_widget(view, row).filter(|_| env.sp > 0.02) {
                 let m = linked.measure(f.measure);
                 let focus_t = f32::from(heading == Some(row) && env.sp > 0.5);
                 linked.draw(
-                    p.alpha(env.sp),
+                    p.alpha(alpha),
                     MARGIN_X,
                     heading_y(row_y, self.grid.lift(row)),
                     focus_t,
@@ -2240,7 +2251,7 @@ impl HomeScreen {
                 );
             } else if env.sp > 0.02 {
                 ui_cards::draw_heading(
-                    p.alpha(env.sp),
+                    p.alpha(alpha),
                     hub.title,
                     hub.source,
                     MARGIN_X,
@@ -2269,6 +2280,8 @@ impl HomeScreen {
         SectionFrame {
             y: self.grid.base_y(row) + CARD_DY,
             clip: Rect::new(0.0, plx_ui::widgets::TOP_BAR_BOTTOM, SCR_W, SCR_H - plx_ui::widgets::TOP_BAR_BOTTOM),
+            // what stands under this row's caption is the next shelf's heading, as it is drawn
+            below_rise: self.grid.lift(row + 1),
         }
     }
 
@@ -2329,12 +2342,14 @@ impl HomeScreen {
                     continue;
                 }
                 // Every tile of the row shares one y, so one answer says whether a pointer passing
-                // over the row may take its focus.
+                // over the row may take its focus: its posters stand clear of the top margin and
+                // their upper part clears the bottom one ([`POINTER_REACH`]), which is what the shelf
+                // below the focused one is at rest.
                 let rest = Rect::new(0.0, self.grid.base_y(row_index) + CARD_DY, CARD_W, CARD_H)
                     .scaled(RowStyle::HOME.focus_scale);
-                let fully_visible = rest.y >= 40.0 && rest.y + rest.h <= SCR_H - 20.0;
+                let pointable = rest.y >= 40.0 && rest.y + rest.h * POINTER_REACH <= SCR_H - 20.0;
                 let src = HomeCards {
-                    hover: if fully_visible || row_focused { Hover::Focus } else { Hover::OnlyIfFocused },
+                    hover: if pointable || row_focused { Hover::Focus } else { Hover::OnlyIfFocused },
                     ..self.cards(view, row_index)
                 };
                 if let Some(shelf) = self.grid.shelves.get(row_index) {
@@ -2610,7 +2625,7 @@ impl<H: HomeLike> Focusable<H> for HomeScreen {
                     MARGIN_X,
                     top + CARD_DY,
                     SCR_W - 2.0 * MARGIN_X,
-                    CARD_H + ui_cards::UNDER_LABEL_H,
+                    CARD_H + band_h(),
                 ),
                 len: projection.elems.len(),
                 elem: ElemKind::Card,
@@ -3053,7 +3068,7 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
                     self.visible_activation = None;
                     if let Some(Located::Item(row, col)) = to_loc {
                         // The saved viewport is a preference, not an assertion about today's
-                        // catalog order. Minimally reveal the reconciled item before first draw.
+                        // catalog order. Rest the reconciled item's shelf before first draw.
                         if let (Some(shelf), Some(hub)) =
                             (self.grid.shelves.get_mut(row), self.rows.get(row))
                         {
@@ -3062,9 +3077,7 @@ impl<H: HomeLike> Machine<H> for HomeScreen {
                                 CARD_W, GAP, SCR_W - 2.0 * MARGIN_X);
                             shelf.restore_scroll(scroll, count);
                         }
-                        let (lo, hi) = row_reveal_band(shelf_top_settled(row, row));
-                        self.grid.scroll_target = ui_cards::reveal(self.grid.scroll_y.pos,
-                            lo, hi, grid_max_scroll(self.rows.len()));
+                        self.grid.scroll_target = rest_scroll(row, self.rows.len());
                         self.grid.scroll_y.jump(self.grid.scroll_target);
                     }
                     self.layout_grid();
@@ -3492,13 +3505,33 @@ fn col_at(x: f32, scroll: f32, count: usize) -> Option<usize> {
 fn heading_y(row_y: f32, lift: f32) -> f32 {
     row_y - TITLE_DY - lift
 }
-fn row_reveal_band(top: f32) -> (f32, f32) {
-    let lo = top + GRID_TOP_Y + CARD_DY + CARD_H + 96.0 - (SCR_H - MARGIN_Y);
-    (lo, top)
+/// The focused shelf's caption band under the stored Under posters setting (0 / 80 / 112 px): the
+/// height every shelf here reserves, opens and reveals by (`Shelf::set_caption_policy`).
+fn band_h() -> f32 {
+    plx_ui::caption_policy::band_h(&crate::registry::captions::policy())
+}
+/// How far the focused band carries the rows below it down.
+fn band_open() -> f32 {
+    ui_cards::band_open_for(band_h())
+}
+/// **The scroll a focused shelf RESTS at: the Library's rest rule** (`poster_grid::rest_scroll`,
+/// `ui_cards::grid_rest_scroll`): the shelf's top comes to `GRID_TOP_Y`, the first shelf's own
+/// resting line, and the document's end holds the last shelves lower. Every shelf above it has
+/// scrolled off, so no heading but the focused one stands in the top band.
+///
+/// It was the NEAREST scroll that showed the focused shelf with its caption band open
+/// (`ui_cards::reveal` between a `lo` and the shelf's top): Down came to rest at `lo`, which is
+/// the caption's reach short of the bottom margin, so the focused shelf's y followed the Under
+/// posters band (531 / 563 / 603 for 112 / 80 / 0) and the heading of the shelf above rested at
+/// 22 / 54 / 94 with it, under the account chip at the two smaller bands, while Up came to rest at
+/// the shelf's top. A rest that depends on the band and on the direction of the last move is not a
+/// rest a heading can be kept out of the chrome by.
+fn rest_scroll(row: usize, rows: usize) -> f32 {
+    ui_cards::grid_rest_scroll(row, ui_cards::ROW_PITCH_FIXED + ui_cards::LABEL_BAND_COLLAPSED, 0.0, grid_max_scroll(rows))
 }
 fn grid_max_scroll(rows: usize) -> f32 {
     let n = rows.max(1);
-    let h = ui_cards::settled_top(n, Some(n - 1), ui_cards::ROW_PITCH_FIXED);
+    let h = ui_cards::settled_top_for(n, Some(n - 1), ui_cards::ROW_PITCH_FIXED, band_open());
     (h - (SCR_H - CONTENT_Y) + 60.0).max(0.0)
 }
 fn shelf_top_settled(row: usize, focus_row: usize) -> f32 {
@@ -3507,7 +3540,7 @@ fn shelf_top_settled(row: usize, focus_row: usize) -> f32 {
 /// [`shelf_top_settled`] with the open label band named explicitly: `None` while a linked heading
 /// holds focus, which opens no row's band.
 fn shelf_top_banded(row: usize, band_row: Option<usize>) -> f32 {
-    ui_cards::settled_top(row, band_row, ui_cards::ROW_PITCH_FIXED)
+    ui_cards::settled_top_for(row, band_row, ui_cards::ROW_PITCH_FIXED, band_open())
 }
 
 fn wash_corners(hero: Option<&PmsMovie>, grid: [[f32; 4]; 4], snap: f32) -> [[f32; 4]; 4] {
@@ -3736,17 +3769,6 @@ mod placeholder_tests;
 #[cfg(test)]
 pub(crate) mod cards_harness; // Tier 2 card conformance (cards_conformance_tests.rs)
 
-/// A focused tile's title line. The deck's carries the amber ▶ only while OK on a Continue
-/// Watching card plays (`DeckPress::Play`): the triangle promises the press, so when OK opens the
-/// page there is none (`widgets::still_line`'s rule).
-fn deck_label(is_deck: bool, title: &str) -> ui_cards::TileLabel {
-    if is_deck && plx_media::route::deck_press().press_plays() {
-        ui_cards::TileLabel::played(title)
-    } else {
-        ui_cards::TileLabel::title(title)
-    }
-}
-
 /// The cards a landing removed, each under the element it had, in the order the shelf names them
 /// (`Shelf::ghost_keys`); a card the screen did not keep is `None` and is not drawn.
 struct GhostCards<'a> {
@@ -3853,10 +3875,8 @@ impl<H: HomeLike> CardSource<H> for HomeCards<'_> {
 
     fn label(&self, i: usize) -> ui_cards::TileLabel {
         let Some(item) = self.item(i) else { return ui_cards::TileLabel::default() };
-        let continue_watching = self.home.rows[self.row].identity == HomeHubIdentity::ContinueWatching;
-        let mut label = deck_label(continue_watching, &item.title);
-        label.caption = ui_cards::focused_caption(&tile_facts::of(item), continue_watching);
-        label
+        let deck = self.home.rows[self.row].identity == HomeHubIdentity::ContinueWatching;
+        crate::registry::captions::shelf_label(&crate::registry::captions::policy(), item, deck)
     }
 
     fn progress(&self, i: usize) -> Option<f32> {

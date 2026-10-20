@@ -42,14 +42,15 @@ impl GridBand {
 pub struct GridBands {
     focus: Option<usize>,
     slots: [Slot; MAX_GRID_BANDS],
-    /// What the focused caption band shows (CONTRACT FREEZE: P3 sizes the band from it). A pref
-    /// input, not motion: it is not in [`write`](Self::write).
-    caption_policy: crate::caption_policy::CaptionPolicy,
+    /// What the focused caption band shows (CONTRACT FREEZE: P3 sizes the band from it); `None`
+    /// keeps the legacy two-line band, as the grid that owns these bands does. A pref input, not
+    /// motion: it is not in [`write`](Self::write).
+    caption_policy: Option<crate::caption_policy::CaptionPolicy>,
 }
 
 /// One band: the row it opens under, the card of that row whose caption it carries (known once the
 /// row has held focus on a tick, so a band that closes behind a focus move still knows whose
-/// caption fades with it) and the spring that opens and closes it.
+/// caption leaves with it) and the spring that opens and closes it.
 #[derive(Clone, Copy)]
 struct Slot {
     row: Option<usize>,
@@ -66,22 +67,22 @@ impl GridBands {
         Self {
             focus: None,
             slots: [Slot::EMPTY; MAX_GRID_BANDS],
-            caption_policy: crate::caption_policy::CaptionPolicy::DEFAULT,
+            caption_policy: Some(crate::caption_policy::CaptionPolicy::DEFAULT),
         }
     }
 
-    pub fn set_caption_policy(&mut self, policy: crate::caption_policy::CaptionPolicy) {
+    pub fn set_caption_policy(&mut self, policy: Option<crate::caption_policy::CaptionPolicy>) {
         self.caption_policy = policy;
     }
 
-    pub fn caption_policy(&self) -> crate::caption_policy::CaptionPolicy {
+    pub fn caption_policy(&self) -> Option<crate::caption_policy::CaptionPolicy> {
         self.caption_policy
     }
 
     /// The focused band's height under this grid's caption policy (0 / 80 / 112), what
     /// [`growth_before_for`] and the other `_for` geometry take.
     pub fn band_h(&self) -> f32 {
-        crate::caption_policy::band_h(&self.caption_policy)
+        self.caption_policy.as_ref().map_or(card_row::LEGACY_BAND_H, crate::caption_policy::band_h)
     }
 
     /// The row whose band is open (or opening).
@@ -117,7 +118,8 @@ impl GridBands {
     }
 
     /// The bands closing behind a focus move, as `(row, card, expansion)`: each is the caption of
-    /// `card` (the one the row held focus on) at its band's own progress. The focused row's band is
+    /// `card` (the one the row held focus on) drawn by its band's own expansion
+    /// ([`card_row::line_reveal_for`] decides which of its lines the room still holds). The focused row's band is
     /// not among them; a band with no card noted (a row that never held a tick) or fully shut is not.
     pub fn closing(&self) -> impl Iterator<Item = (usize, usize, f32)> + '_ {
         self.slots.iter().filter_map(|s| {
@@ -614,18 +616,44 @@ mod tests {
         let closing = geometry.iter().find(|b| b.row == 0).unwrap().expansion;
         assert!(opened > 0.0 && opened < 1.0 && closing > 0.0 && closing < 1.0);
         assert!((opened + closing - 1.0).abs() < 0.0001);
-        assert!(
-            (card_row::band_fade(opened) + card_row::band_fade(closing) - 1.0).abs() < 0.0001,
-            "the two captions of a move are one hand-over, out = 1 - in"
-        );
         for _ in 0..120 { bands.tick(k, 1.0 / 60.0); }
         let (_, moving) = plx_machine::idle::scoped_motion(|| bands.tick(k, 1.0 / 60.0));
         assert!(!moving, "a settled grid lets idle suppression sleep");
         assert_eq!(bands.slots.iter().filter(|s| s.row.is_some()).count(), 1);
-        assert!(card_row::band_fade(bands.geometry().iter().find(|b| b.row == 1).unwrap().expansion) > 0.999);
+        let settled = bands.geometry().iter().find(|b| b.row == 1).unwrap().expansion;
+        let whole = card_row::TileLabel::titled("t", "d").revealed(112.0, settled, 0.0).lines();
+        assert!(whole.iter().flatten().all(|l| l.alpha > 0.999), "a settled band shows its whole caption");
         bands.focus(None, true);
         for _ in 0..120 { bands.tick(k, 1.0 / 60.0); }
         assert!(bands.slots.iter().all(|s| s.row.is_none()));
+    }
+
+    /// The alpha a one-line title is drawn with under a `band` px band at expansion `e`.
+    fn title_alpha(band: f32, e: f32) -> f32 {
+        card_row::TileLabel::title("t").revealed(band, e, 0.0).lines()[0].unwrap().alpha
+    }
+
+    /// **A focus move always has a title on screen at the 112 px band, and dims once at the 80 px
+    /// one.** The arriving row's title is drawn once the room under it holds its box and the
+    /// departing row's until the room that held it is gone ([`card_row::line_reveal_for`]); the two
+    /// bands of a move sum to 1 (`e` and `1 - e`). At 112 the two windows overlap (the title's box
+    /// is held from e = .28 on the way in and until e = .72 on the way out), so one of them is
+    /// always drawn. At 80 the room holds the box exactly at e = .5 for both rows: the departing
+    /// title is gone as the arriving one begins, so the crossing reads as a dip to nothing at that
+    /// frame (and a dim title for the few percent of the move either side), not as a title over
+    /// the row under it.
+    #[test]
+    fn a_focus_move_hands_the_title_over_without_a_blank_at_112_and_dips_once_at_80() {
+        let shown = |band: f32, e: f32| title_alpha(band, e).max(title_alpha(band, 1.0 - e));
+        for step in 0..=1000 {
+            let e = step as f32 / 1000.0;
+            assert!(shown(112.0, e) > 0.0, "112 px band: no title on screen at e {e}");
+        }
+        assert!(shown(80.0, 0.5) < 0.001, "80 px band: the crossing holds neither title");
+        let dim: Vec<u32> = (0..=1000).filter(|&k| shown(80.0, k as f32 / 1000.0) < 0.5).collect();
+        let (lo, hi) = (dim[0], *dim.last().unwrap());
+        assert!(dim.len() as u32 == hi - lo + 1 && hi - lo < 200,
+            "80 px band: the dim window is one short run around e = .5 ({lo}..{hi} of 1000)");
     }
 
     /// The bands' canon is the focused row, then a counted sequence of the open bands, each its row,

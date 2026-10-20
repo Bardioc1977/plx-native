@@ -81,7 +81,7 @@ pub mod page_regions; // the column NAV/HEADER/CONTENT/RAIL: one table for the p
 pub mod caption_policy; // "Under posters": what a focused poster's caption band shows and how tall it is (CONTRACT FREEZE: P3 fills)
 pub mod pill; // THE CAPSULE OUTLINE — three blended arcs per corner, solved; not a stadium
 pub(crate) mod poster_grid; // uniform six-column portrait geometry for collection-like pages
-pub mod scroll_chrome; // the chrome/capsule handoff state a page owns, plus the capsule text and predicate, shared by the Library (and its Collections page) and the Watchlist
+pub mod scroll_chrome; // the chrome/capsule handoff state a page owns, plus the capsule text and predicate, owned by the Library (and its Collections page) and the Watchlist; Home shares only its spatial clearance rule
 pub mod scroll_capsule; // the scroll capsule + top fade a tucked long page leaves (live nav-pill glass)
 pub mod popover_glass; // the popover panel's glass: gradient face, rim, highlight, shadow (DS6)
 pub mod popover_morph; // the morph open style (pill -> panel) beside the shared K_APPEAR fade+slide
@@ -347,6 +347,26 @@ pub mod draw_census {
         TEXT.with(|l| l.borrow_mut().take()).unwrap_or_default()
     }
 
+    thread_local! {
+        static MARKS: RefCell<Option<Vec<Rect>>> = const { RefCell::new(None) };
+    }
+    /// A recording painter was asked for the amber play mark that leads a caption line
+    /// (`card_row::draw_play_mark`): it paints no pixel, so this is how a test reads WHETHER the
+    /// mark was drawn and where.
+    pub fn note_play_mark(r: Rect) {
+        MARKS.with(|l| {
+            if let Some(v) = l.borrow_mut().as_mut() {
+                v.push(r);
+            }
+        });
+    }
+    /// Every play mark a recording painter is handed while `f` runs, as screen rects.
+    pub fn capture_play_marks(f: impl FnOnce()) -> Vec<Rect> {
+        MARKS.with(|l| *l.borrow_mut() = Some(Vec::new()));
+        f();
+        MARKS.with(|l| l.borrow_mut().take()).unwrap_or_default()
+    }
+
     /// A recorded text run with its STYLE: what a test needs to say "regular weight, 65% white".
     #[derive(Clone, Debug, PartialEq)]
     pub struct Run {
@@ -367,17 +387,50 @@ pub mod draw_census {
         /// The LEADING dissolve, the mirror of `fade`, as ABSOLUTE screen x `(from, to)`: glyph
         /// alpha 0 at `from`, 1 at `to`. `None` for a run with no leading band.
         pub lead: Option<(f32, f32)>,
+        /// Drawn inside a focused tile's label block (`card_row::draw_label_block`), whatever its
+        /// ink: stamped by [`note_run`] from [`label_scope`], so a test reads the block's lines
+        /// without a list of words to look for or a style to recognise them by.
+        pub label: bool,
     }
     thread_local! {
+        static LABEL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static RUNS: RefCell<Option<Vec<Run>>> = const { RefCell::new(None) };
         static CLIP: std::cell::Cell<Option<Rect>> = const { std::cell::Cell::new(None) };
     }
-    pub fn note_run(run: Run) {
+    pub fn note_run(mut run: Run) {
+        run.label = LABEL.with(|c| c.get());
         RUNS.with(|l| {
             if let Some(v) = l.borrow_mut().as_mut() {
                 v.push(run);
             }
         });
+    }
+    /// While this guard lives, every run noted is a label block's ([`Run::label`]).
+    pub struct LabelScope(bool);
+    pub fn label_scope() -> LabelScope {
+        LabelScope(LABEL.with(|c| c.replace(true)))
+    }
+    impl Drop for LabelScope {
+        fn drop(&mut self) {
+            LABEL.with(|c| c.set(self.0));
+        }
+    }
+    /// **The lines of the focused label block** in `runs`, top to bottom: the label block's own runs
+    /// whatever their ink (a shadowed Under posters caption AND a stray unshadowed legacy block alike),
+    /// each line once (a line's shadow sits a pixel below its ink, a gliding line's follower beside
+    /// it, both the same line), so two lines that read alike stay two lines.
+    pub fn label_lines(runs: &[Run]) -> Vec<String> {
+        let mut block: Vec<&Run> = runs.iter().filter(|run| run.label).collect();
+        block.sort_by(|a, b| a.at.y.total_cmp(&b.at.y).then(a.at.x.total_cmp(&b.at.x)));
+        let mut lines: Vec<(f32, &str)> = Vec::new();
+        for run in block {
+            // a line's shadow and follower stand within this many pixels of its ink; two lines of a block never do
+            if lines.last().is_some_and(|(y, text)| *text == run.text && (run.at.y - y).abs() < 3.0) {
+                continue;
+            }
+            lines.push((run.at.y, run.text.as_str()));
+        }
+        lines.into_iter().map(|(_, text)| text.to_owned()).collect()
     }
     /// A recording painter was handed a scissor window (`None`: it was released).
     pub fn note_clip(window: Option<Rect>) {
@@ -1673,10 +1726,15 @@ impl Painter {
             let (width,height)=declared_text_bounds(s,sz,bold);
             #[cfg(any(test, feature = "test-support"))]
             if !s.is_null() {
-                draw_census::note_text(
-                    unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned(),
-                    self.place(Rect::new(match align { 1 => x-width*0.5, 2 => x-width, _ => x },y,width,height)),
-                );
+                let text = unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned();
+                let at = self.place(Rect::new(match align { 1 => x-width*0.5, 2 => x-width, _ => x },y,width,height));
+                draw_census::note_text(text.clone(), at);
+                // The discovery walk is the one a whole page is drawn through on a host, so the
+                // run's ink (with the cascade's alpha folded in) is read here too.
+                draw_census::note_run(draw_census::Run {
+                    text, size: sz, ink: self.c(col), bold: bold != 0, align, at,
+                    clip: draw_census::clip(), fade: None, lead: None, label: false,
+                });
             }
             self.declare(Rect::new(match align { 1 => x-width*0.5, 2 => x-width, _ => x },y,width,height),100,|data| {
                 use frame::backdrop::Value;
@@ -1699,7 +1757,7 @@ impl Painter {
                 draw_census::note_run(draw_census::Run {
                     text: unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned(),
                     size: sz, ink: self.c(col), bold: bold != 0, align, at,
-                    clip: draw_census::clip(), fade: None, lead: None,
+                    clip: draw_census::clip(), fade: None, lead: None, label: false,
                 });
             }
             return w;
@@ -1779,6 +1837,19 @@ impl Painter {
     ) -> f32 {
         if frame::backdrop::discovering() {
             let (width,height)=declared_text_bounds(s,sz,bold);
+            // The discovery walk is the one a whole page is drawn through on a host, so a run that
+            // dissolves at its edges (a gliding caption) is read here too, as `text` does.
+            #[cfg(any(test, feature = "test-support"))]
+            if !s.is_null() {
+                let text = unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned();
+                let at = self.place(Rect::new(x, y, width, height));
+                draw_census::note_text(text.clone(), at);
+                let absolute = |b: Option<(f32, f32)>| b.map(|(from, to)| (at.x + from, at.x + to));
+                draw_census::note_run(draw_census::Run {
+                    text, size: sz, ink: self.c(col), bold: bold != 0, align: 0, at,
+                    clip: draw_census::clip(), fade: absolute(trail), lead: absolute(lead), label: false,
+                });
+            }
             self.declare(Rect::new(x,y,width,height),101,|data| {
                 use frame::backdrop::Value;
                 frame::backdrop::text_value(s,data);
@@ -1803,7 +1874,7 @@ impl Painter {
                     let absolute = |b: Option<(f32, f32)>| b.map(|(from, to)| (at.x + from, at.x + to));
                     draw_census::note_run(draw_census::Run {
                         text, size: sz, ink: self.c(col), bold: bold != 0, align: 0, at,
-                        clip: draw_census::clip(), fade: absolute(trail), lead: absolute(lead),
+                        clip: draw_census::clip(), fade: absolute(trail), lead: absolute(lead), label: false,
                     });
                 }
             }

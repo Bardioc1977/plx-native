@@ -48,12 +48,14 @@
 //!   [`Grid::dormant`]: nothing is lifted under the fade, and the first awake tick grows the focused
 //!   card from rest (a focus the engine restored meanwhile is adopted whole, as above). A grid keeps
 //!   its caption bands shut meanwhile and the waking tick opens the focused row's on the lift's own
-//!   frames: a caption is its band's content (alpha = the band's expansion), so it never stands at
-//!   full strength under a tile that has not lifted. An owner seating its page's ARRIVAL later (a
+//!   frames: a caption is its band's content (a line is drawn only as the band opens and the room
+//!   holds it, `card_row::line_reveal_for`), so it never stands at full strength under a tile that
+//!   has not lifted. An owner seating its page's ARRIVAL later (a
 //!   listing that answered after the dissolve lands its first poster) says so with
 //!   [`Grid::arrive`], and that one `FocusMoved` grows from rest like a deliberate move, band and all.
 //! - **One frame convention.** A [`SectionFrame`]'s `y` is screen space; the painter handed to
-//!   `draw` may carry any translate (see [`SectionFrame`]).
+//!   `draw` may carry any translate (see [`SectionFrame`]). It also says how far the heading under
+//!   the shelf is drawn above its place (`below_rise`), which a caption line stops short of.
 //! - **Press comes from the frame**, `cx.press` / `f.press` through `PressRead::dip_of()`, never the
 //!   thread-local. The dip lands on the card the press OWNS (`PressRead::owner`), focused or not:
 //!   an abandoned press springs back on the card that was pressed while its neighbour takes the
@@ -92,9 +94,9 @@ pub use avatars::AvatarRow;
 // Geometry and painters a screen's own layout reads (L0 `card_row` / `poster_grid`, re-exported so
 // those modules can stay `pub(crate)`).
 pub use crate::card_row::{
-    column_near_x, draw_credit_label, draw_heading, draw_label, focused_caption, heading_flow, heading_lift_max, label_band, paint_visible,
-    poster_label, resume_bar, reveal, scroll_into_view, settled_top, tile_rect, under_band, RowStyle, TileLabel,
-    BAND_OPEN, CREDIT_ROLE_LEADING, LABEL_BAND_COLLAPSED, LABEL_EDGE_FADE, LEGACY_BAND_H, MAX_ROW_ITEMS, ROW_PITCH_FIXED, UNDER_LABEL_H,
+    column_near_x, draw_credit_label, draw_heading, draw_label, cw_caption, heading_flow, heading_lift_max, label_band, paint_visible,
+    resume_bar, reveal, scroll_into_view, settled_top, settled_top_for, tile_rect, under_band, under_band_for, RowStyle, TileLabel,
+    band_open_for, BAND_OPEN, CREDIT_ROLE_LEADING, LABEL_BAND_COLLAPSED, LABEL_EDGE_FADE, LEGACY_BAND_H, MAX_ROW_ITEMS, ROW_PITCH_FIXED, UNDER_LABEL_H,
 };
 pub use crate::poster_grid::{
     growth_before as grid_growth_before, growth_before_for as grid_growth_before_for, rest_scroll as grid_rest_scroll, settled as grid_settled, GridBand, COLS as GRID_COLS, MAX_GRID_BANDS,
@@ -345,6 +347,21 @@ pub enum CardEvent<E> {
 pub struct SectionFrame {
     pub y: f32,
     pub clip: Rect,
+    /// How far what the layout owner puts directly below this shelf's caption band (the next
+    /// shelf's heading) is DRAWN above where the layout rests it, in px: the next shelf's
+    /// `heading_lift()`. A caption line is drawn only where that thing is not
+    /// (`card_row::line_reveal_for`). 0 for a shelf with nothing under it, or one whose neighbour
+    /// does not lift. A [`Stack`] reads it off the next section that takes room, so stacked shelves
+    /// are adjacent sections with the air under each as its [`StackPage::shelf_foot`], not a `Custom`
+    /// gap between two.
+    pub below_rise: f32,
+}
+
+impl SectionFrame {
+    /// A frame whose neighbour below does not lift (nothing under the shelf, or a resting block).
+    pub const fn new(y: f32, clip: Rect) -> Self {
+        Self { y, clip, below_rise: 0.0 }
+    }
 }
 
 /// What the `FocusMoved` events since a section's last tick told it about the card focus went to.

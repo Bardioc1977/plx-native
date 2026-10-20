@@ -2977,6 +2977,27 @@ fn cached_section_tops_match_the_stacking_walk() {
     clear();
 }
 
+/// **A shelf section is followed by exactly the shared air, whatever section comes next.** The caption
+/// rule counts the collapsed band and `UNDER_LABEL_AIR` under a card (`card_row::room_for`): Related,
+/// Extras and the collection's members keep that much between their tiles and the next section's top
+/// (their block's collapsed band and the gap after it); the cast row keeps more, because it draws a name
+/// under every headshot (`cast::block_h`).
+#[test]
+fn a_shelf_is_followed_by_the_shared_air() {
+    use plx_ui::consts::UNDER_LABEL_AIR;
+    let air = ui_cards::LABEL_BAND_COLLAPSED + UNDER_LABEL_AIR;
+    for above in [3, 4, 6, 7] {
+        for below in [3, 4, 5, 6, 7] {
+            assert_eq!(DetailScreen::section_gap(above, Some(below)), UNDER_LABEL_AIR, "section {above} above section {below}");
+        }
+        assert_eq!(DetailScreen::section_gap(above, None), UNDER_LABEL_AIR, "the last section's air is the same");
+    }
+    assert_eq!(related::block_h(0.0) - related::LABEL_H - ui_cards::RowStyle::HOME.h + UNDER_LABEL_AIR, air, "Related");
+    assert_eq!(collection::block_h(0.0), related::block_h(0.0), "the collection's members");
+    assert_eq!(extras::block_h(0.0) - extras::block_h(1.0), ui_cards::under_band(0.0) - ui_cards::under_band(1.0), "Extras collapses by the shared band");
+    assert!(cast::block_h() - cast::LABEL_H - ui_cards::RowStyle::CAST.h + UNDER_LABEL_AIR >= air, "the cast row keeps at least the rule's room");
+}
+
 #[test]
 fn a_replaced_episode_list_moves_the_cast_row() {
     let sid = ServerId::UNSET;
@@ -4702,7 +4723,7 @@ fn related_pending_cells(screen: &DetailScreen, measure: &plx_ui::fixture::Fixtu
     let (_, frame) = plx_ui::placeholder::capture_declared(|| {
         let mut f = DrawFrame::new(&context, plx_ui::Painter::root());
         let p = f.painter;
-        let at = SectionFrame { y: 600.0, clip: Rect::FULL };
+        let at = SectionFrame::new(600.0, Rect::FULL);
         screen.related.draw(&mut f, p, &screen.cards(cards::Which::Related, d), at);
     });
     frame.entries.iter().filter(|e| e.reason == plx_ui::placeholder::Reason::CardSkeleton && e.key.is_empty()).count()
