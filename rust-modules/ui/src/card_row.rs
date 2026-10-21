@@ -647,15 +647,91 @@ pub fn heading_flow(
     source: &str,
     mut run: impl FnMut(&str, f32, std::os::raw::c_int, std::os::raw::c_int, [f32; 4]) -> f32,
 ) -> f32 {
-    let mut dx = run(title, 0.0, theme::size::HEADLINE, 1, theme::TEXT_HEADING);
-    if source.is_empty() {
-        return dx; // one source: the heading is the title and nothing else
+    heading_parts(title, "", source, |s, dx, sz, bold, ink, _| run(s, dx, sz, bold, ink))
+}
+
+/// Which note of a heading a run belongs to: the title, the count after it, or the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeadingPart {
+    Title,
+    Count,
+    Source,
+}
+
+/// The text a heading flows over: `str` for the elided path, `CStr` for the callers whose strings
+/// are already NUL-terminated and so draw with no per-frame copy.
+pub trait HeadingText {
+    fn blank(&self) -> bool;
+    fn dot() -> &'static Self;
+}
+
+impl HeadingText for str {
+    fn blank(&self) -> bool {
+        self.is_empty()
     }
-    dx += HEADING_SOURCE_PAD;
-    dx += run("\u{b7}", dx, theme::size::BODY, 0, theme::TEXT_SEPARATOR);
-    dx += HEADING_SOURCE_PAD;
-    dx += run(source, dx, theme::size::BODY, 0, theme::TEXT_TERTIARY);
+    fn dot() -> &'static Self {
+        "\u{b7}"
+    }
+}
+
+impl HeadingText for std::ffi::CStr {
+    fn blank(&self) -> bool {
+        self.to_bytes().is_empty()
+    }
+    fn dot() -> &'static Self {
+        c"\u{b7}"
+    }
+}
+
+/// THE heading + count idiom: the title, then each quiet note that is present (the member count,
+/// then the source) as `HEADING_SOURCE_PAD`, a separator dot, `HEADING_SOURCE_PAD`, the note in
+/// the `BODY` rung and `TEXT_TERTIARY`. Search's result rows, a Person's shelves, a linked
+/// collection heading and an annotated shelf all flow through it, so a count can never sit at a
+/// different gap, size or ink on one screen than on the next. An empty note is ABSENT, as the
+/// source always was. `run` also learns which [`HeadingPart`] it is painting (Search fades the
+/// source when a row's owner appears).
+pub fn heading_parts<S: HeadingText + ?Sized + 'static>(
+    title: &S,
+    count: &S,
+    source: &S,
+    mut run: impl FnMut(&S, f32, std::os::raw::c_int, std::os::raw::c_int, [f32; 4], HeadingPart) -> f32,
+) -> f32 {
+    let mut dx = run(title, 0.0, theme::size::HEADLINE, 1, theme::TEXT_HEADING, HeadingPart::Title);
+    for (note, part) in [(count, HeadingPart::Count), (source, HeadingPart::Source)] {
+        if note.blank() {
+            continue; // absent, not empty: no gap, no dot, no run
+        }
+        dx += HEADING_SOURCE_PAD;
+        dx += run(S::dot(), dx, theme::size::BODY, 0, theme::TEXT_SEPARATOR, part);
+        dx += HEADING_SOURCE_PAD;
+        dx += run(note, dx, theme::size::BODY, 0, theme::TEXT_TERTIARY, part);
+    }
     dx
+}
+
+/// [`heading_parts`] painted with its title's cap top at `(x, y)`: every run on the TITLE's
+/// baseline, `source_alpha` multiplying the source's runs alone. The one painter of a
+/// NUL-terminated heading (Search's rows, a Person's shelves); [`draw_heading`] is the `&str` one.
+pub fn draw_heading_c(
+    p: Painter,
+    title: &std::ffi::CStr,
+    count: &std::ffi::CStr,
+    source: &std::ffi::CStr,
+    x: f32,
+    y: f32,
+    source_alpha: f32,
+    measure: &dyn plx_machine::machine::Measure,
+) {
+    let cap = measure.cap_h(theme::size::HEADLINE);
+    heading_parts(title, count, source, |s, dx, sz, bold, ink, part| {
+        let mut label = crate::label::Label::new(s.as_ptr(), sz, ink).v(crate::label::VAlign::Baseline);
+        if bold != 0 {
+            label = label.bold();
+        }
+        let p = if part == HeadingPart::Source { p.alpha(source_alpha.clamp(0.0, 1.0)) } else { p };
+        label.draw(p, Rect::new(x + dx, y, 0.0, cap));
+        measure.width(s, sz, bold != 0)
+    });
 }
 
 /// Draw [`heading_flow`] with its title's cap top at `(x, y)`. Every run rides the painter handed
@@ -677,7 +753,7 @@ pub fn draw_heading(
     max_w: f32,
     measure: &dyn plx_machine::machine::Measure,
 ) {
-    bounded_heading_flow(title, source, max_w, measure, |s, dx, sz, bold, ink| {
+    bounded_heading_flow(title, "", source, max_w, measure, |s, dx, sz, bold, ink| {
         // the CString must outlive the draw call, not the closure (`ui/CLAUDE.md`'s first gotcha)
         match std::ffi::CString::new(s) {
             Ok(cs) => p.text(
@@ -707,17 +783,30 @@ pub fn draw_heading(
 /// never entered for a heading nobody bounded.
 pub fn bounded_heading_flow(
     title: &str,
+    count: &str,
     source: &str,
     max_w: f32,
     measure: &dyn plx_machine::machine::Measure,
     mut run: impl FnMut(&str, f32, std::os::raw::c_int, std::os::raw::c_int, [f32; 4]) -> f32,
 ) -> f32 {
-    heading_flow(title, source, |s, dx, sz, bold, ink| {
+    // A note's dot is drawn only with its note: when the room the note WOULD have after the dot is
+    // under `MIN_HEADING_RUN` the dot is dropped, and so is the note that follows it.
+    let mut dot_dropped = false;
+    heading_parts(title, count, source, |s, dx, sz, bold, ink, _| {
         let room = max_w - dx;
         if max_w.is_finite() && room < MIN_HEADING_RUN {
             return 0.0; // no room left for this run at all — drop it rather than draw a stub
         }
         if max_w.is_finite() {
+            if s == <str as HeadingText>::dot() {
+                let note_room = room - measure.width_str(s, sz, bold != 0) - HEADING_SOURCE_PAD;
+                dot_dropped = note_room < MIN_HEADING_RUN;
+                if dot_dropped {
+                    return 0.0;
+                }
+            } else if std::mem::take(&mut dot_dropped) {
+                return 0.0; // the note of a dropped dot
+            }
             let owned =
                 plx_gfx::text::elide_by(s, room, false, |t| measure.width_str(t, sz, bold != 0));
             run(&owned, dx, sz, bold, ink)
@@ -1836,6 +1925,71 @@ mod tests {
         assert_eq!(plx_machine::machine::PressRead::<()>::default().dip(), 1.0);
         let moving = plx_machine::machine::PressRead::<()> { scale: 0.92, ..Default::default() };
         assert_eq!(moving.dip(), 0.92);
+    }
+
+    /// A bound that leaves a note less than `MIN_HEADING_RUN` drops the note AND its dot: a lone
+    /// separator dot trailing the title reads as damage.
+    #[test]
+    fn a_bound_that_drops_a_note_drops_its_dot_too() {
+        struct Fixed;
+        impl plx_machine::machine::Measure for Fixed {
+            fn width(&self, s: &std::ffi::CStr, sz: i32, _: bool) -> f32 {
+                s.to_bytes().len() as f32 * sz as f32 * 0.5
+            }
+            fn cap_h(&self, sz: i32) -> f32 { sz as f32 }
+            fn line_h(&self, sz: i32) -> f32 { sz as f32 }
+        }
+        let flow = |max_w: f32| {
+            let mut texts = Vec::new();
+            bounded_heading_flow("T", "12 results", "", max_w, &Fixed, |s, _, sz, _, _| {
+                texts.push(s.to_string());
+                s.len() as f32 * sz as f32 * 0.5
+            });
+            texts
+        };
+        let title_w = theme::size::HEADLINE as f32 * 0.5;
+        let dot_x = title_w + HEADING_SOURCE_PAD;
+        // the dot has room (>= MIN), the note after it does not
+        let tight = flow(dot_x + MIN_HEADING_RUN + 1.0);
+        assert_eq!(tight, ["T"], "no dot without its note: {tight:?}");
+        // ample room keeps all three
+        assert_eq!(flow(f32::INFINITY), ["T", "\u{b7}", "12 results"]);
+        assert_eq!(flow(10_000.0).len(), 3);
+    }
+
+    /// The runs `draw_heading_c` PAINTS for a title, a count and a source, left to right.
+    fn painted_heading(title: &std::ffi::CStr, count: &std::ffi::CStr, source: &std::ffi::CStr) -> Vec<crate::draw_census::Run> {
+        let mut runs = crate::draw_census::capture_runs(|| {
+            draw_heading_c(Painter::recording(), title, count, source, 100.0, 50.0, 1.0, &crate::widgets::LegacyMeasure);
+        });
+        runs.sort_by(|a, b| a.at.x.total_cmp(&b.at.x));
+        runs
+    }
+
+    /// Q4, painted: title -> dot -> count stand `HEADING_SOURCE_PAD` apart edge to edge, the count is
+    /// the quiet BODY note, and an absent count draws no dot, no gap and no run (Search and Person
+    /// both paint through this call).
+    #[test]
+    fn a_painted_heading_keeps_the_pad_between_title_dot_and_count() {
+        let _g = plx_base::testlock::serial();
+        let runs = painted_heading(c"Movies", c"12", c"");
+        let texts: Vec<_> = runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts, ["Movies", "\u{b7}", "12"]);
+        assert_eq!(runs[0].at.x, 100.0);
+        for pair in runs.windows(2) {
+            let gap = pair[1].at.x - (pair[0].at.x + pair[0].at.w);
+            assert!((gap - HEADING_SOURCE_PAD).abs() < 0.5, "{} -> {}: {gap}", pair[0].text, pair[1].text);
+        }
+        assert_eq!((runs[2].size, runs[2].ink), (theme::size::BODY, theme::TEXT_TERTIARY));
+        assert_eq!((runs[1].size, runs[1].ink), (theme::size::BODY, theme::TEXT_SEPARATOR));
+        // the source rides the same pad behind the count
+        let both = painted_heading(c"Movies", c"12", c"friend");
+        assert_eq!(both.len(), 5);
+        let gap = both[3].at.x - (both[2].at.x + both[2].at.w);
+        assert!((gap - HEADING_SOURCE_PAD).abs() < 0.5, "count -> second dot: {gap}");
+        // hidden count: the title alone
+        let bare = painted_heading(c"Movies", c"", c"");
+        assert_eq!(bare.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), ["Movies"]);
     }
 
     #[test]

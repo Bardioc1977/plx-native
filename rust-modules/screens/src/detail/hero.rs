@@ -65,6 +65,10 @@ const PEOPLE_SUMMARY: usize = 3;
 const PEOPLE_LABEL_INK: [f32; 4] = theme::TEXT_TERTIARY;
 const FACTS_SEP_PAD: f32 = theme::space::SM;
 
+/// The Alt pill's trailing mark: drawn by `Button::trailing_icon` and counted by [`alt_pill_w`], so
+/// the pill is sized to the very glyph it carries.
+pub const ALT_ICON: plx_ui::icons::Icon = plx_ui::icons::Icon::ChevronDown;
+
 pub fn alt_label() -> &'static CStr { plx_platform::i18n::msg::browse_detail_also_available_c() }
 
 fn mark_watched_label() -> &'static CStr { plx_platform::i18n::msg::browse_detail_mark_watched_c() }
@@ -364,13 +368,13 @@ pub fn hero_pill_w(measure: &dyn Measure, has_restart: bool) -> f32 {
         hero_pill_label(has_restart),
         theme::size::BODY,
         true,
-        false,
+        None,
     )
     .max(PW)
 }
 
 pub fn alt_pill_w(measure: &dyn Measure) -> f32 {
-    plx_appkit::hero_layout::pill_w(measure, alt_label(), theme::size::BODY, false, true)
+    plx_appkit::hero_layout::pill_w(measure, alt_label(), theme::size::BODY, false, Some(ALT_ICON))
 }
 
 /// The accumulation itself, PURE: the drawn frame of control `i` in `set`, given both pills'
@@ -551,19 +555,30 @@ enum Bit {
 const FACTS_BITS: usize = 8;
 
 fn play_mode_bits(d: &Detail, after: bool) -> ([Bit; FACTS_BITS], usize) {
+    match plx_media::route::playback_preview(d) {
+        Some(preview) => play_mode_bits_for(preview, d.hdr, item_subscription(d), after),
+        None => ([Bit::Air(0.0); FACTS_BITS], 0),
+    }
+}
+
+/// [`play_mode_bits`] once the item's route has been read: the line's play-mode clause, behind a
+/// separator of its own when something already stands in front of it (`after`).
+fn play_mode_bits_for(
+    preview: plx_media::route::Preview,
+    hdr: bool,
+    subscription: plx_plex::plex::serverinfo::Subscription,
+    after: bool,
+) -> ([Bit; FACTS_BITS], usize) {
     let mut bits = [Bit::Air(0.0); FACTS_BITS];
     let mut n = 0;
-    let Some(preview) = plx_media::route::playback_preview(d) else {
-        return (bits, 0);
-    };
     let mut push = |bit: Bit| {
         bits[n] = bit;
         n += 1;
     };
     if after {
-        push(Bit::Sep(theme::space::MD));
+        push(Bit::Sep(FACTS_SEP_PAD));
     }
-    match play_note(preview, d.hdr, item_subscription(d)) {
+    match play_note(preview, hdr, subscription) {
         PlayNote::Quiet => push(Bit::Word(
             match preview {
                 plx_media::route::Preview::DirectPlay => plx_platform::i18n::msg::browse_detail_direct_play_c(),
@@ -578,7 +593,7 @@ fn play_mode_bits(d: &Detail, after: bool) -> ([Bit; FACTS_BITS], usize) {
         )),
         PlayNote::Soft => {
             push(Bit::Word(converts_on_server_c(), plx_ui::detail_layout::FACTS_INK, 0));
-            push(Bit::Sep(theme::space::SM));
+            push(Bit::Sep(FACTS_SEP_PAD));
             push(Bit::Word(
                 plx_platform::i18n::msg::browse_detail_hardware_needs_c(),
                 theme::TEXT_SECONDARY,
@@ -591,7 +606,7 @@ fn play_mode_bits(d: &Detail, after: bool) -> ([Bit; FACTS_BITS], usize) {
             push(Bit::Glyph);
             push(Bit::Air(theme::space::SM));
             push(Bit::Word(c"HDR \u{2192} SDR", theme::TEXT_SECONDARY, 1));
-            push(Bit::Sep(theme::space::SM));
+            push(Bit::Sep(FACTS_SEP_PAD));
             push(Bit::Word(plx_platform::i18n::msg::browse_detail_tonemap_needs_c(), theme::TEXT_SECONDARY, 0));
             push(Bit::Air(theme::space::SM));
             push(Bit::Capsule);
@@ -623,11 +638,16 @@ fn draw_play_mode(
     after: bool,
     measure: &dyn plx_machine::machine::Measure,
 ) -> f32 {
+    let (bits, n) = play_mode_bits(d, after);
+    paint_bits(p, &bits[..n], x, y, measure)
+}
+
+/// Paint the play-mode clause's `bits` from `x` on the line whose text top is `y`; the width drawn.
+fn paint_bits(p: Painter, bits: &[Bit], x: f32, y: f32, measure: &dyn plx_machine::machine::Measure) -> f32 {
     let (top, baseline) = plx_gfx::text::text_cap_band(theme::size::CAPTION, 0);
     let cy = y + (top + baseline) * 0.5;
-    let (bits, n) = play_mode_bits(d, after);
     let mut bx = x;
-    for bit in &bits[..n] {
+    for bit in bits {
         match *bit {
             Bit::Word(text, color, bold) => {
                 bx += p.text(text.as_ptr(), bx, y, theme::size::CAPTION, color, 0, bold);
@@ -1170,6 +1190,49 @@ mod tests {
             },
         );
         assert_eq!(events.into_inner().last(), Some(&Event::Mode));
+    }
+
+    /// Q2, painted: the facts line is flowed and PAINTED through a recording painter, and every
+    /// dot on it, the one before the play-mode clause included, stands `FACTS_SEP_PAD` after the
+    /// run before it and `FACTS_SEP_PAD` before the run after it. With nothing in front of the
+    /// clause there is no dot.
+    #[test]
+    fn a_painted_facts_line_pads_the_play_mode_dot_like_every_other_dot() {
+        use plx_media::route::Preview;
+        use plx_plex::plex::serverinfo::Subscription;
+        let _g = plx_base::testlock::serial();
+        let measure = plx_ui::widgets::LegacyMeasure;
+        let paint = |parts: &[&str]| {
+            let mut runs = plx_ui::draw_census::capture_runs(|| {
+                let p = Painter::recording();
+                facts_flow(
+                    parts,
+                    "",
+                    |text, dx, size, color| {
+                        let text = CString::new(text).unwrap();
+                        p.text(text.as_ptr(), 100.0 + dx, 50.0, size, color, 0, 0)
+                    },
+                    |dx, after| {
+                        let (bits, n) = play_mode_bits_for(Preview::DirectPlay, false, Subscription::No, after);
+                        paint_bits(p, &bits[..n], 100.0 + dx, 50.0, &measure)
+                    },
+                );
+            });
+            runs.sort_by(|a, b| a.at.x.total_cmp(&b.at.x));
+            runs
+        };
+        let line = paint(&["2021", "1h 40m"]);
+        let dots: Vec<usize> = (0..line.len()).filter(|&i| line[i].text == "\u{b7}").collect();
+        assert_eq!(dots.len(), 2, "one dot between the facts and one before the clause: {line:?}");
+        for i in dots {
+            let (before, after) = (&line[i - 1], &line[i + 1]);
+            let lead = line[i].at.x - (before.at.x + before.at.w);
+            let trail = after.at.x - (line[i].at.x + line[i].at.w);
+            assert!((lead - FACTS_SEP_PAD).abs() < 0.5, "run {} -> dot: {lead}", i - 1);
+            assert!((trail - FACTS_SEP_PAD).abs() < 0.5, "dot -> run {}: {trail}", i + 1);
+        }
+        let bare = paint(&["", ""]);
+        assert!(bare.iter().all(|r| r.text != "\u{b7}"), "nothing in front of the clause, no dot: {bare:?}");
     }
 
     #[test]

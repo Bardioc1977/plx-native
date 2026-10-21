@@ -59,7 +59,7 @@ fn measured_status_action_uses_shared_button_width_height_and_reason_spacing() {
     assert!((shifted.y - action.y - (theme::space::SM + slot + explained.row_drop())).abs() < 1e-3);
     let bands = explained.bands_measured(&StatusMetrics);
     let drawn = explained.action_rect(
-        Button::pill_w_measured(c"Try again", STATUS_CAP_SZ, false, false, &StatusMetrics), &bands);
+        Button::pill_w_measured(c"Try again", STATUS_CAP_SZ, false, None, &StatusMetrics), &bands);
     assert_eq!((drawn.x, drawn.y, drawn.w, drawn.h), (shifted.x, shifted.y, shifted.w, shifted.h));
     // A Working read-out keeps its one-line CAPTION reason under a BODY verdict.
     let working = StatusOverlay::new(frame, c"Loading", StatusKind::Working).action(c"Try again");
@@ -312,11 +312,16 @@ fn measured_status_without_action_does_not_consult_metrics() {
 
 #[test]
 fn measured_button_preserves_both_accessory_slots() {
-    let plain = Button::pill_w_measured(c"Try again", STATUS_CAP_SZ, false, false, &StatusMetrics);
-    let slot = STATUS_CAP_SZ as f32 * BTN_ICON_RATIO + BTN_ICON_GAP;
-    for (leading, trailing) in [(true, false), (false, true), (true, true)] {
+    let plain = Button::pill_w_measured(c"Try again", STATUS_CAP_SZ, false, None, &StatusMetrics);
+    let box_w = STATUS_CAP_SZ as f32 * BTN_ICON_RATIO;
+    let chevron = crate::icons::Icon::ChevronDown;
+    let (l, r) = crate::icons::ink_x(chevron);
+    let leading_slot = box_w + BTN_ICON_GAP;
+    let trailing_slot = (r - l) * box_w + BTN_ICON_GAP; // the trailing mark counts as its INK
+    for (leading, trailing) in [(true, None), (false, Some(chevron)), (true, Some(chevron))] {
         let width = Button::pill_w_measured(c"Try again", STATUS_CAP_SZ, leading, trailing, &StatusMetrics);
-        assert!((width - plain - slot * (u8::from(leading) + u8::from(trailing)) as f32).abs() < 0.001);
+        let want = plain + if leading { leading_slot } else { 0.0 } + if trailing.is_some() { trailing_slot } else { 0.0 };
+        assert!((width - want).abs() < 0.001, "{leading} {trailing:?}: {width} vs {want}");
     }
 }
 
@@ -528,4 +533,31 @@ fn a_dotted_run_measures_parts_dots_and_pads_for_any_number_of_parts() {
     assert_eq!(run.width(&m, &["", ""]), 0.0);
     let many = ["a"; 9];
     assert_eq!(run.width(&m, &many), 9.0 * w("a") + 8.0 * (dot + 2.0 * pad));
+}
+
+/// Q6: a pill's trailing accessory is placed by INK. The pill is PAINTED through a recording painter,
+/// and the gap the eye reads from the label's end to the glyph's first ink (`icons::ink_x`) is
+/// `BTN_ICON_GAP`, for every accessory the bearing table knows; the label keeps its place.
+#[test]
+fn a_painted_trailing_accessory_stands_one_icon_gap_from_the_label_by_ink() {
+    let _g = plx_base::testlock::serial();
+    for icon in [crate::icons::Icon::ChevronDown, crate::icons::Icon::ChevronUp, crate::icons::Icon::Chevron] {
+        let pill_w = Button::pill_w_full(c"Alt".as_ptr(), theme::size::BODY, false, Some(icon));
+        let button = Button::new(c"Alt".as_ptr(), theme::size::BODY, Rect::new(100.0, 200.0, pill_w, 60.0)).trailing_icon(icon);
+        let mut runs = Vec::new();
+        let icons = crate::draw_census::capture_icons(|| {
+            runs = crate::draw_census::capture_runs(|| button.draw(&Env::inert(), Painter::recording()));
+        });
+        let label = runs.iter().find(|r| r.text == "Alt").expect("the label is painted");
+        let (bx, _) = icons.iter().find(|(i, _)| *i == icon).map(|(_, r)| (r.x, r.w)).expect("the accessory is painted");
+        let box_w = theme::size::BODY as f32 * BTN_ICON_RATIO;
+        let (l, _) = crate::icons::ink_x(icon);
+        let gap = (bx + l * box_w) - (label.at.x + label.at.w);
+        assert!((gap - BTN_ICON_GAP).abs() < 0.5, "{icon:?}: the painted label-to-ink gap is {gap}");
+        // ... and the pill's right pad is measured to that INK: half the air stands between the ink
+        // and the pill's edge, as it does between the pill's left edge and its first content
+        let (_, r) = crate::icons::ink_x(icon);
+        let right_pad = (100.0 + pill_w) - (bx + r * box_w);
+        assert!((right_pad - BTN_PILL_AIR * 0.5).abs() < 0.5, "{icon:?}: the ink-to-edge pad is {right_pad}");
+    }
 }
