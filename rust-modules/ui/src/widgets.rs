@@ -539,21 +539,21 @@ pub fn still_line(
         p.text(run.as_ptr(), x0, ly, lsz, theme::TEXT_PRIMARY, 0, 1);
     }
 
-    // …and the IDENTIFIER under it, with the action glyph at its head.
-    let mut lx = x0;
-    if let Some((icon, tint)) = still_glyph(mark, press_plays) {
+    // …and the IDENTIFIER under it, with the action glyph at its head. One flow: the glyph stands
+    // by its INK (so STILL_LINE_GAP is the gap the eye reads, not the gap to the asset's empty
+    // margin), and the sub line one gap after it. The sub's own width is not needed to place it.
+    let mut flow = crate::hstack::Flow::new(x0, STILL_LINE_GAP);
+    let glyph = still_glyph(mark, press_plays);
+    let glyph_span =
+        flow.push(glyph.map_or(crate::hstack::Item::absent(), |(icon, _)| crate::hstack::Item::glyph(icon, STILL_GLYPH_D)));
+    if let (Some((icon, tint)), Some(span)) = (glyph, glyph_span) {
         let cy = sy + (sct + scb) * 0.5;
-        crate::icons::draw(
-            p,
-            icon,
-            Rect::new(lx, cy - STILL_GLYPH_D * 0.5, STILL_GLYPH_D, STILL_GLYPH_D),
-            tint,
-        );
-        lx += STILL_GLYPH_D + STILL_LINE_GAP;
+        crate::icons::draw(p, icon, Rect::new(span.box_x, cy - STILL_GLYPH_D * 0.5, STILL_GLYPH_D, STILL_GLYPH_D), tint);
     }
     if sub.is_empty() {
         return;
     }
+    let lx = flow.push(crate::hstack::Item::new(0.0)).map_or(x0, |s| s.x);
     let run = measure.fit_line(sub, right - lx, ssz, false);
     p.text(run.as_ptr(), lx, sy, ssz, theme::TEXT_SECONDARY, 0, 0);
 }
@@ -8878,6 +8878,8 @@ const RATING_CAPTION_GAP: f32 = 12.0;
 /// Score → the next glyph in the SAME group (Rotten Tomatoes' critic → audience). Wider than
 /// [`RATING_GAP`] so the two pairs read as two readings rather than one run of four things.
 const RATING_PAIR_GAP: f32 = 14.0;
+/// One provider's group → the next provider's, on a row of groups (the Detail hero's ratings line).
+pub const RATING_GROUP_GAP: f32 = 32.0;
 
 /// One colour layer of a rating mark — a mask and the tint it is painted in. Marks are two-tone
 /// (body + calyx), and the rasterizer renders a MASK, so a mark is a slice rather than one icon.
@@ -8894,6 +8896,50 @@ pub struct RatingCell<'a> {
     pub suffix: &'a str,
 }
 
+/// One run of a rating group, as [`rating_walk`] hands it to whoever paints or sums it.
+enum RatingPart<'a> {
+    Caption,
+    Mark(&'a [MarkLayer]),
+    Value(&'a str),
+    Suffix(&'a str),
+}
+
+/// **The one layout of a provider group**, from `x`: the caption, then per cell its mark, score and
+/// suffix, as a [`Flow`](crate::hstack::Flow) whose gaps are the tokens above — caption to first
+/// score [`RATING_CAPTION_GAP`], mark to score [`RATING_GAP`], score to suffix none, a cell to the
+/// next [`RATING_PAIR_GAP`]. `each` sees every run with the span it draws; the return is the group's
+/// width. Each run is measured once here, and [`rating_group_w`] and [`rating_group`] both read this,
+/// so the width a row stops at is the width the group paints.
+fn rating_walk<'a>(
+    x: f32,
+    caption: &str,
+    cells: &'a [RatingCell<'a>],
+    measure: &dyn plx_machine::machine::Measure,
+    mut each: impl FnMut(RatingPart<'a>, crate::hstack::Span),
+) -> f32 {
+    use crate::hstack::{Flow, Item};
+    let mut flow = Flow::new(x, 0.0);
+    let item = |w: f32, after: f32| Item::new(w).after(after);
+    if let Some(span) = flow.push(item(measure.width_str(caption, theme::size::MICRO, true), RATING_CAPTION_GAP)) {
+        each(RatingPart::Caption, span);
+    }
+    for (i, cell) in cells.iter().enumerate() {
+        let next = if i + 1 < cells.len() { RATING_PAIR_GAP } else { 0.0 };
+        if !cell.mark.is_empty() {
+            if let Some(span) = flow.push(item(RATING_MARK_D, RATING_GAP)) {
+                each(RatingPart::Mark(cell.mark), span);
+            }
+        }
+        if let Some(span) = flow.push(item(measure.width_str(cell.value, theme::size::LABEL, true), 0.0)) {
+            each(RatingPart::Value(cell.value), span);
+        }
+        if let Some(span) = flow.push(item(measure.width_str(cell.suffix, theme::size::MICRO, true), next)) {
+            each(RatingPart::Suffix(cell.suffix), span);
+        }
+    }
+    flow.end() - x
+}
+
 /// Width [`rating_group`] will occupy. Measure before drawing so a row can stop at a margin
 /// instead of running a group off the panel (same contract as `badge`/`badge_w`).
 pub fn rating_group_w(
@@ -8904,22 +8950,7 @@ pub fn rating_group_w(
     if caption.contains('\0') {
         return 0.0;
     }
-    let mut w = measure.width_str(caption, theme::size::MICRO, true) + RATING_CAPTION_GAP;
-    for (i, cell) in cells.iter().enumerate() {
-        if i > 0 {
-            w += RATING_PAIR_GAP;
-        }
-        if !cell.mark.is_empty() {
-            w += RATING_MARK_D + RATING_GAP;
-        }
-        if !cell.value.contains('\0') {
-            w += measure.width_str(cell.value, theme::size::LABEL, true);
-        }
-        if !cell.suffix.contains('\0') {
-            w += measure.width_str(cell.suffix, theme::size::MICRO, true);
-        }
-    }
-    w
+    rating_walk(0.0, caption, cells, measure, |_, _| {})
 }
 
 /// Draw one provider's group with its LEFT edge at `x`, centred on `cy`; returns its width.
@@ -8931,10 +8962,9 @@ pub fn rating_group(
     cells: &[RatingCell],
     measure: &dyn plx_machine::machine::Measure,
 ) -> f32 {
-    let Ok(cap) = std::ffi::CString::new(caption) else {
+    if caption.contains('\0') {
         return 0.0;
-    };
-    let mut bx = x;
+    }
     // The caption sits on the SCORE's baseline, not on its own centre: the design aligns the row
     // by baseline (`align-items:baseline`), so a MICRO caption beside a LABEL number must share
     // the number's baseline or it floats. `text::baseline_y` is that rule, shared.
@@ -8945,59 +8975,30 @@ pub fn rating_group(
         1,
         plx_gfx::text::text_vcenter_y(theme::size::LABEL, 1, cy),
     );
-    p.text(
-        cap.as_ptr(),
-        bx,
-        base,
-        theme::size::MICRO,
-        theme::TEXT_TERTIARY,
-        0,
-        1,
-    );
-    bx += measure.width(&cap, theme::size::MICRO, true) + RATING_CAPTION_GAP;
-
-    for (i, cell) in cells.iter().enumerate() {
-        if i > 0 {
-            bx += RATING_PAIR_GAP;
+    let text = |s: &str, x: f32, y: f32, sz, ink, bold| {
+        if let Ok(c) = std::ffi::CString::new(s) {
+            p.text(c.as_ptr(), x, y, sz, ink, 0, bold);
         }
-        if !cell.mark.is_empty() {
+    };
+    // Every advance comes from the walk, which used the supplied metric source: the extent it
+    // returns is the drawn width, not a second measurement (the host test compares it with
+    // rating_group_w).
+    rating_walk(x, caption, cells, measure, |part, span| match part {
+        RatingPart::Caption => text(caption, span.x, base, theme::size::MICRO, theme::TEXT_TERTIARY, 1),
+        RatingPart::Mark(layers) => {
             // every layer rides the SAME rect, so all of them rasterize at one size from one
             // viewBox and register exactly — see `ui/icons.rs`'s note on the layered marks
-            let r = Rect::new(bx, cy - RATING_MARK_D * 0.5, RATING_MARK_D, RATING_MARK_D);
-            for (mask, tint) in cell.mark.iter() {
+            let r = Rect::new(span.x, cy - RATING_MARK_D * 0.5, RATING_MARK_D, RATING_MARK_D);
+            for (mask, tint) in layers.iter() {
                 crate::icons::draw(p, *mask, r, *tint);
             }
-            bx += RATING_MARK_D + RATING_GAP;
         }
-        if let Ok(v) = std::ffi::CString::new(cell.value) {
+        RatingPart::Value(v) => {
             let ty = plx_gfx::text::text_vcenter_y(theme::size::LABEL, 1, cy);
-            p.text(
-                v.as_ptr(),
-                bx,
-                ty,
-                theme::size::LABEL,
-                theme::TEXT_PRIMARY,
-                0,
-                1,
-            );
-            bx += measure.width(&v, theme::size::LABEL, true);
+            text(v, span.x, ty, theme::size::LABEL, theme::TEXT_PRIMARY, 1);
         }
-        if let Ok(s) = std::ffi::CString::new(cell.suffix) {
-            p.text(
-                s.as_ptr(),
-                bx,
-                base,
-                theme::size::MICRO,
-                theme::TEXT_TERTIARY,
-                0,
-                1,
-            );
-            bx += measure.width(&s, theme::size::MICRO, true);
-        }
-    }
-    // Every advance above already used the supplied metric source. Return that extent rather
-    // than measuring every run a second time; the host test compares it with rating_group_w.
-    bx - x
+        RatingPart::Suffix(s) => text(s, span.x, base, theme::size::MICRO, theme::TEXT_TERTIARY, 1),
+    })
 }
 
 #[cfg(test)]
@@ -9079,3 +9080,56 @@ mod hero_scrim_tests;
 #[cfg(test)]
 #[path = "widgets_art_crop_tests.rs"]
 mod art_crop_tests;
+
+#[cfg(test)]
+#[test]
+fn a_painted_rating_group_keeps_each_token_gap_between_its_runs() {
+    let _serial = plx_base::testlock::serial();
+    let m = LegacyMeasure;
+    let mark: &[MarkLayer] = &[(crate::icons::Icon::Check, theme::TEXT_PRIMARY)];
+    let cells = [
+        RatingCell { mark, value: "88%", suffix: "" },
+        RatingCell { mark: &[], value: "8.1", suffix: "/10" },
+    ];
+    let mut icons = Vec::new();
+    let mut runs = crate::draw_census::capture_runs(|| {
+        icons = crate::draw_census::capture_icons(|| {
+            rating_group(Painter::recording(), 64.0, 100.0, "Provider", &cells, &m);
+        });
+    });
+    runs.retain(|r| !r.text.is_empty());
+    runs.sort_by(|a, b| a.at.x.total_cmp(&b.at.x));
+    let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(texts, ["Provider", "88%", "8.1", "/10"]);
+    let gap = |a: &crate::draw_census::Run, b: &crate::draw_census::Run| b.at.x - (a.at.x + a.at.w);
+    assert!((icons[0].1.x - (runs[0].at.x + runs[0].at.w) - RATING_CAPTION_GAP).abs() < 0.5, "caption -> mark");
+    assert!((runs[1].at.x - (icons[0].1.x + icons[0].1.w) - RATING_GAP).abs() < 0.5, "mark -> score");
+    assert!((gap(&runs[1], &runs[2]) - RATING_PAIR_GAP).abs() < 0.5, "score -> next pair");
+    assert!(gap(&runs[2], &runs[3]).abs() < 0.5, "score -> its suffix is one run");
+    let w = rating_group_w("Provider", &cells, &m);
+    assert!((runs[3].at.x + runs[3].at.w - 64.0 - w).abs() < 0.5, "the extent is the last run's trailing edge");
+}
+
+#[cfg(test)]
+#[test]
+fn a_painted_still_line_stands_its_sub_line_one_gap_from_the_glyphs_ink() {
+    let _serial = plx_base::testlock::serial();
+    let m = LegacyMeasure;
+    let card = Rect::new(100.0, 100.0, 300.0, 170.0);
+    let mut icons = Vec::new();
+    let runs = crate::draw_census::capture_runs(|| {
+        icons = crate::draw_census::capture_icons(|| {
+            still_line(Painter::recording(), card, PosterMark::None, "Show", "S1 E2", true, false, &m);
+        });
+    });
+    let sub = runs.iter().find(|r| r.text == "S1 E2").expect("the sub line");
+    let (icon, boxr) = icons[0];
+    let (l, r) = crate::icons::ink_x(icon);
+    assert!(((boxr.x + l * boxr.w) - (card.x + STILL_LINE_INSET)).abs() < 0.01, "the ink, not the box, stands at the inset");
+    assert!((sub.at.x - (boxr.x + r * boxr.w) - STILL_LINE_GAP).abs() < 0.5, "ink -> sub line is the token");
+    // no glyph, no gap: the sub line stands at the inset
+    let bare = crate::draw_census::capture_runs(|| {
+        still_line(Painter::recording(), card, PosterMark::None, "Show", "S1 E2", false, false, &m);
+    });
+    assert_eq!(bare.iter().find(|r| r.text == "S1 E2").unwrap().at.x, card.x + STILL_LINE_INSET);
+}

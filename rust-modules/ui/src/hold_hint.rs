@@ -113,6 +113,7 @@ use std::ffi::CString;
 use plx_machine::machine::Measure;
 use plx_machine::present::PresentEvent;
 
+use crate::hstack::{Align, HStack, Item};
 use crate::widgets::{self, CapFace, CapLook, CapMetrics};
 use crate::{theme, Painter, Rect, Spring};
 
@@ -573,14 +574,13 @@ impl HoldHint {
         let cy = r.cy();
         let sz = theme::size::CAPTION;
         let ty = plx_gfx::text::text_vcenter_y(sz, 0, cy);
-        let mut x = r.x + PAD_X;
+        let x = r.x + PAD_X;
         if !lay.pre.is_empty() {
             p.text(lay.pre.as_ptr(), x, ty, sz, theme::TEXT_SECONDARY, 0, 0);
-            x += lay.pre_w + RUN_GAP;
         }
         widgets::key_cap_with(
             p,
-            x,
+            x + lay.cap_x,
             cy,
             CapFace::Label(KEY),
             CapLook {
@@ -591,10 +591,8 @@ impl HoldHint {
             },
             measure,
         );
-        x += lay.cap_w;
         if !lay.post.is_empty() {
-            x += lay.post_gap;
-            p.text(lay.post.as_ptr(), x, ty, sz, theme::TEXT_SECONDARY, 0, 0);
+            p.text(lay.post.as_ptr(), x + lay.post_x, ty, sz, theme::TEXT_SECONDARY, 0, 0);
         }
     }
 
@@ -635,6 +633,9 @@ struct Layout {
     /// Space between the cap and the post run: the design's run gap, except none before closing
     /// punctuation, which belongs to the cap's word ("{key}, каб адкрыць меню").
     post_gap: f32,
+    /// Where the cap and the post run stand, from the capsule's inner left edge (the `HStack` placement).
+    cap_x: f32,
+    post_x: f32,
     width: f32,
 }
 
@@ -683,8 +684,16 @@ impl Layout {
             None | Some(b',' | b'.' | b';' | b':' | b'!' | b'?') => 0.0,
             Some(_) => RUN_GAP,
         };
-        let pre_gap = if pre.is_empty() { 0.0 } else { RUN_GAP };
-        Self { pre, post, pre_w, cap_w, post_gap, width: 2.0 * PAD_X + pre_w + pre_gap + cap_w + post_gap + post_w }
+        // One stack of the three runs: an empty run is absent (no room, no gap), and the gap after
+        // the cap is the post run's own (none before closing punctuation).
+        let items = [
+            if pre.is_empty() { Item::absent() } else { Item::new(pre_w) },
+            Item::new(cap_w).after(post_gap),
+            if post.is_empty() { Item::absent() } else { Item::new(post_w) },
+        ];
+        let run = HStack::new(&items, RUN_GAP, Align::Leading(0.0));
+        let at = |i: usize| run.span(i).map_or(0.0, |s| s.0);
+        Self { pre, post, pre_w, cap_w, post_gap, cap_x: at(1), post_x: at(2), width: 2.0 * PAD_X + run.width() }
     }
 
     /// The capsule's rect, `lift` px below its resting place.
@@ -1376,6 +1385,22 @@ mod tests {
         let sum = 2.0 * PAD_X + lay.pre_w + lay.cap_w + 2.0 * RUN_GAP
             + FixtureMeasure.width(c"for options", theme::size::CAPTION, false);
         assert!((lay.width - sum).abs() < 1e-3);
+    }
+
+    /// The three runs stand one `RUN_GAP` apart (none before closing punctuation), and an empty
+    /// run is absent: no room and no gap, so the cap leads a sentence that has no words before it.
+    #[test]
+    fn the_runs_stand_one_gap_apart_and_an_empty_run_leaves_no_gap() {
+        let m = &FixtureMeasure;
+        let words = Layout::resolve(m, "Hold \u{fffc} for options");
+        assert_eq!(words.cap_x, words.pre_w + RUN_GAP);
+        assert_eq!(words.post_x, words.cap_x + words.cap_w + RUN_GAP);
+        let tight = Layout::resolve(m, "Hold \u{fffc}, to open the menu");
+        assert_eq!(tight.post_x, tight.cap_x + tight.cap_w, "none before closing punctuation");
+        let lead = Layout::resolve(m, "\u{fffc} for options");
+        assert_eq!((lead.cap_x, lead.post_x), (0.0, lead.cap_w + RUN_GAP), "no pre run: no leading gap");
+        let alone = Layout::resolve(m, "\u{fffc}");
+        assert_eq!(alone.width, 2.0 * PAD_X + alone.cap_w);
     }
 
     /// **The capsule's layout is resolved once, not once per visible frame**, and again when the

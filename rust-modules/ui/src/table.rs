@@ -8,6 +8,7 @@
 //! same widget serves the in-player track menu and the Settings, Privacy and Legal surfaces.
 #![allow(dead_code)]
 use crate::fit;
+use crate::hstack::{Flow, Item, Span};
 use crate::label::{HAlign, Label, VAlign};
 use crate::theme;
 use crate::{Painter, Rect, Spring};
@@ -488,6 +489,25 @@ const ACCESSORY_ICON_W: f32 = 26.0;
 fn ticon_slot_w(icon: crate::icons::Icon) -> f32 {
     let (l, r) = crate::icons::ink_x(icon);
     (r - l) * ACCESSORY_ICON_W + ACCESSORY_GAP
+}
+
+/// The badges of a row's trailing run, [`BADGE_GAP`] apart from `x` on: each with the span it
+/// draws. The ONE place the run is laid out — its width ([`badge_run_w`]) and where each chip is
+/// painted are both read off it, so they cannot disagree.
+fn badge_spans<'a>(
+    badges: &'a [Badge],
+    x: f32,
+    measure: &'a dyn plx_machine::machine::Measure,
+) -> impl Iterator<Item = (&'a Badge, Span)> + 'a {
+    let mut flow = Flow::new(x, BADGE_GAP);
+    badges.iter().filter_map(move |b| {
+        flow.push(Item::new(crate::widgets::badge_w(b.text(), None, measure))).map(|span| (b, span))
+    })
+}
+
+/// The badge run's width: the last chip's trailing edge when it starts at 0 (0 for no badges).
+fn badge_run_w(badges: &[Badge], measure: &dyn plx_machine::machine::Measure) -> f32 {
+    badge_spans(badges, 0.0, measure).last().map_or(0.0, |(_, s)| s.x + s.w)
 }
 
 /// Where the trailing icon's box starts, as an offset from the content edge (<= 0): the box is
@@ -1053,8 +1073,7 @@ impl TableView {
     fn value_right_edge(&self, row: &Row, frame_w: f32) -> f32 {
         let mut trailing = row.ticon.map_or(0.0, ticon_slot_w);
         if !row.badges.is_empty() {
-            trailing += row.badges.iter().map(|b| crate::widgets::badge_w(b.text(), None, &plx_base::fontcov::advances::ShippedMeasure)).sum::<f32>()
-                + BADGE_GAP * (row.badges.len() - 1) as f32 + ACCESSORY_GAP;
+            trailing += badge_run_w(&row.badges, &plx_base::fontcov::advances::ShippedMeasure) + ACCESSORY_GAP;
         }
         frame_w - SIDE - CONTENT_PAD - trailing
     }
@@ -1086,8 +1105,7 @@ impl TableView {
     fn trailing_width(&self, row: &Row, measure: &dyn plx_machine::machine::Measure) -> f32 {
         let mut width = row.ticon.map_or(0.0, ticon_slot_w);
         if !row.badges.is_empty() {
-            width += row.badges.iter().map(|badge| crate::widgets::badge_w(badge.text(), None, measure)).sum::<f32>()
-                + BADGE_GAP * (row.badges.len() - 1) as f32 + ACCESSORY_GAP;
+            width += badge_run_w(&row.badges, measure) + ACCESSORY_GAP;
         }
         if let Some(value) = row.readout() {
             width += measure.width_str(value, theme::size::LABEL, VALUE_BOLD != 0) + ACCESSORY_GAP;
@@ -1676,14 +1694,12 @@ impl TableView {
             // the whole label block, so on a two-line row it sits level with the pair rather than
             // ~16px high, level with the first line.
             if !row.badges.is_empty() {
-                let run: f32 = row
-                    .badges
-                    .iter()
-                    .map(|b| crate::widgets::badge_w(b.text(), None, measure))
-                    .sum::<f32>()
-                    + BADGE_GAP * (row.badges.len() - 1) as f32;
-                let mut bx = text_right - trailing - run;
-                for b in row.badges.iter() {
+                // one measuring pass: laid out from 0, the last chip's trailing edge IS the run's
+                // width, and each chip is then drawn at `start + its offset`
+                let laid: Vec<(&Badge, Span)> = badge_spans(&row.badges, 0.0, measure).collect();
+                let run = laid.last().map_or(0.0, |(_, s)| s.x + s.w);
+                let start = text_right - trailing - run;
+                for (b, span) in laid {
                     // the shared chip leaf in this row's contextual colours: the row's own ink for
                     // the label, the design's keyline for the ring (the pill's near-black ink over
                     // a focused row, where a 55%-white stroke would vanish), the row's ground
@@ -1693,7 +1709,7 @@ impl TableView {
                         border: on_pill(theme::OVERLAY_BORDER, ink),
                         bg: row_bg,
                     };
-                    bx += crate::widgets::badge(p, bx, cyc, b.text(), None, sty, measure) + BADGE_GAP;
+                    crate::widgets::badge(p, start + span.x, cyc, b.text(), None, sty, measure);
                 }
                 trailing += run + ACCESSORY_GAP;
             }
@@ -2628,5 +2644,54 @@ mod tests {
         assert_eq!(TableView::top_edge_alpha(40.0, 100.0), 0.0, "and so is ink above it");
         assert!(FIRST_HEADER_CAP_OFFSET >= TOP_FADE_H);
         assert!(TOP_PAD + ROW_INK_PAD >= TOP_FADE_H);
+    }
+
+    /// A row's badges stand `BADGE_GAP` apart edge to edge, and the run's width is the last chip's
+    /// trailing edge: the one layout the width, the elision budget and the paint all read.
+    #[test]
+    fn a_rows_badge_run_stands_one_gap_apart() {
+        let badges = [Badge::Forced, Badge::Sdh, Badge::Ad];
+        let m = &plx_base::fontcov::advances::ShippedMeasure;
+        let spans: Vec<Span> = badge_spans(&badges, 40.0, m).map(|(_, s)| s).collect();
+        assert_eq!(spans.len(), 3);
+        for pair in spans.windows(2) {
+            assert!((pair[1].x - (pair[0].x + pair[0].w) - BADGE_GAP).abs() < 0.01);
+        }
+        assert_eq!(spans[0].x, 40.0);
+        let last = spans[2];
+        assert!((badge_run_w(&badges, m) - (last.x + last.w - 40.0)).abs() < 0.01);
+        assert_eq!(badge_run_w(&[], m), 0.0);
+    }
+
+    /// **The badge run is PAINTED flush right, `BADGE_GAP` apart.** Reads the drawn chip labels
+    /// (not `badge_spans` against itself): each chip's left edge is its label's drawn x less the
+    /// chip's side padding, and the last chip's right edge lands on `text_right - trailing`.
+    #[test]
+    fn a_rows_painted_badges_stand_a_gap_apart_and_end_at_the_trailing_edge() {
+        let _serial = plx_base::testlock::serial();
+        use plx_machine::machine::Measure;
+        let m = &plx_base::fontcov::advances::ShippedMeasure;
+        let frame = Rect::new(0.0, 0.0, 900.0, 300.0);
+        let badges = [Badge::Forced, Badge::Sdh, Badge::Ad];
+        let mut t = TableView::new();
+        let row = Row::new("a").badge(Badge::Forced).badge(Badge::Sdh).badge(Badge::Ad);
+        t.set_sections(vec![Section::new("S").row(row)], 0, false);
+        let runs = crate::draw_census::capture_runs(|| t.draw(crate::Painter::recording(), frame, m));
+        let text_right = frame.x + frame.w - SIDE - CONTENT_PAD;
+        let mut chips: Vec<(f32, f32)> = Vec::new(); // (left, right) of each painted chip, in draw order
+        for b in &badges {
+            let r = runs
+                .iter()
+                .find(|r| r.text == b.text() && r.size == theme::size::CAPTION && r.bold)
+                .unwrap_or_else(|| panic!("chip {:?} not painted: {runs:?}", b.text()));
+            let w = crate::widgets::badge_w(b.text(), None, m);
+            let tw = m.width_str(b.text(), theme::size::CAPTION, true);
+            let left = r.at.x - (w - tw) * 0.5;
+            chips.push((left, left + w));
+        }
+        for pair in chips.windows(2) {
+            assert!((pair[1].0 - pair[0].1 - BADGE_GAP).abs() < 0.5, "chips a gap apart: {chips:?}");
+        }
+        assert!((chips[2].1 - text_right).abs() < 0.5, "last chip ends at the trailing edge {text_right}: {chips:?}");
     }
 }
