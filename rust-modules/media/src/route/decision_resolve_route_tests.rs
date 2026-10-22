@@ -2718,3 +2718,25 @@ fn uncopyable_video_keeps_its_stand_in() {
     assert!(plan.url.contains("/library/parts/36013/"), "{}", plan.url);
     assert!(request_with(&requests, "hasMDE=1").iter().all(|l| query_param(l, "audioStreamID") == Some("3")), "{requests:?}");
 }
+
+/// Force Direct Play with a PMS-spelled `dca` track on a set whose table has no DTS row: refused
+/// with `ForcedFailure::Audio` and no part URL to Load, not a Load the pipeline cannot decode
+/// (#584's endless spinner). The test-process caps are `Caps::assumed()`, which lists no DTS.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn forced_direct_play_refuses_dca_without_a_dts_row() {
+    let (plan, _) = cold_audio_resolve(
+        "cold-forced-dca-no-row",
+        2,
+        MDE_DIRECTPLAY,
+        vec![cold_track(1, "dca", "eng", true, "")],
+        Vec::new(),
+        "dca",
+        |env, _| { env.direct_play_mode = DirectPlayMode::Forced; },
+    );
+    let Some(PlayVerdict::Forced(ForcedFailure::Audio { codec })) = &plan.verdict else {
+        panic!("{:?}", plan.verdict);
+    };
+    assert_eq!(codec, "DTS");
+    assert!(!plan.url.contains("/library/parts/"), "no part URL may reach the Load: {}", plan.url);
+}
