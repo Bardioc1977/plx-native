@@ -125,7 +125,7 @@ pub(crate) unsafe fn run(app: &mut App) {
         let mut fr = Frame::begin(&app.player.session, app.bridge.metadata_view());
         let first_controlled_frame = app.boot_initial.is_some() && app.prev == 0;
         let fr = &mut fr;
-        app.instr.mark(plx_base::diag::heartbeat::Phase::Top);
+        app.instr.mark(plx_base::diag::heartbeat::Phase::Top); // also starts the visit's hang interval
         // The frame index the LANDING SCHEDULE stamps against (§3.3 step 3, `plx_machine::landgate`),
         // published at the TOP because a landing site is reachable from the dev scenarios below
         // as well as from `land_results` and the dispatcher's own frame. One relaxed atomic load
@@ -632,6 +632,8 @@ unsafe fn present_and_swap(
         // …and a ground probe's queued copy is read back here, between frames, if it is done.
         plx_gfx::gfx::ground_probes_frame_end();
         plx_machine::idle::note_present(fr.now);
+        // The swap has returned: this frame's interval, for the visit's slow and frozen counts.
+        app.instr.frame_presented();
         // The poster-gate scenes' frame counter, at the same post-swap seam as the present count
         // above. It was called from inside `note_present`; `plx_machine::idle` is the machine layer and
         // no longer names `ui`'s metrics.
@@ -845,6 +847,13 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         app.running = false;
     } else if et == 0x103 || et == 0x104 {
         // WILL/DID ENTER BACKGROUND
+        // The visit ends here: nothing is measured in the background, and the app may never come
+        // back (the system kills it). The event is only QUEUED to the spool on disk (see
+        // `diag::event_for_impl`), so it is sent by the next flush, this process's or the next
+        // launch's. The second edge (`DID`) finds an empty visit and emits nothing; the return to
+        // the foreground starts a fresh visit of the same screen.
+        end_route_visit(app, false);
+        app.instr.set_suspended(true);
         log(&format!(
             "LIFECYCLE: background (playing={})",
             matches!(app.route(), AppArg::Player) as i32
@@ -941,6 +950,7 @@ unsafe fn ingest_sdl_event_with_window(app: &mut App, fr: &mut Frame,
         }
     } else if et == 0x105 || et == 0x106 {
         // WILL/DID ENTER FOREGROUND
+        app.instr.set_suspended(false);
         log(&format!(
             "LIFECYCLE: foreground (wasPlaying={})",
             app.player.lifecycle.awaiting_load() as i32
@@ -2899,6 +2909,35 @@ pub(crate) unsafe fn draw(app: &mut App, fr: &mut Frame) -> (i32, i32, i32, i32)
     (vx, vy, vw, vh)
 }
 
+/// **A screen visit ended: report how the app felt on it (`route.left`) and start the next one
+/// from nothing.** The frame side is `Instruments`' (`heartbeat::health`, every build), the
+/// repeated-key side the dispatcher's (`Dispatcher::take_dead_presses`); both are read and reset
+/// here, together, so a visit's counts never leak into the next screen's. The first call, from
+/// the empty route before the first screen, reports nothing and clears the boot's warm-up.
+///
+/// `transition` is a route change seen in `report()`, AFTER this iteration's `present_and_swap`:
+/// the frame just presented is the first of the screen being opened (its route was committed
+/// before it was drawn) and this iteration's stall is added at the next iteration, after the
+/// visit reset, to the new visit. So the frame moves to the new visit too, and the cost of
+/// opening a screen is never split across two. A visit that ends for the background or quit has
+/// no new screen: `transition` is false. The dispatcher's repeated-key run is dropped with the
+/// visit either way.
+pub(crate) fn end_route_visit(app: &mut App, transition: bool) {
+    let dead = app.pages.end_visit_dead_presses();
+    let health = if transition { app.instr.finish_visit_at_transition(dead) } else { app.instr.finish_visit(dead) };
+    let Some(health) = health else { return };
+    if app.last_route_reported.is_empty() {
+        return;
+    }
+    plx_telemetry::diag::event(plx_telemetry::diag::schema::DiagEvent::RouteLeft {
+        screen: app.last_route_reported,
+        slow_frames: health.slow_frames,
+        frozen_frames: health.frozen_frames,
+        hang: health.hang,
+        dead_presses: health.dead_presses,
+    });
+}
+
 /// The iteration's report: the route word (on change), the lab route note, the focus probe
 /// and the FRAMEDROP line.
 pub(crate) unsafe fn report(app: &mut App, fr: &mut Frame) {
@@ -2918,6 +2957,8 @@ pub(crate) unsafe fn report(app: &mut App, fr: &mut Frame) {
         // transition count. `&'static str` from the table above, so nothing runtime-built can
         // reach the wire — see `diag::schema`.
         if fr.rn != app.last_route_reported {
+            // The visit that just ended reports first, so the stream reads left-then-entered.
+            end_route_visit(app, true);
             app.last_route_reported = fr.rn;
             plx_telemetry::diag::event(plx_telemetry::diag::schema::DiagEvent::RouteEntered { screen: fr.rn });
         }

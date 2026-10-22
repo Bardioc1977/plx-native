@@ -16,7 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HANG_THRESHOLD_MS: u64 = 250;
+/// A loop iteration over this long is a main-thread hang (also `heartbeat::health`'s stall edge).
+pub const HANG_THRESHOLD_MS: u64 = 250;
 const POLL_MS: u64 = 100;
 /// A late observer cannot tell a stopped process, a system suspend, a debugger stop or its own
 /// scheduling starvation from a main-thread stall, so an interval longer than this is discarded.
