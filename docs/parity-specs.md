@@ -12,7 +12,7 @@ Priority is by what the owner's library actually exercises (multi-version files,
 | 1 | Version selection for multi-version media | `docs/version-selection-spec.md` | proposed |
 | 2 | Video playlists: browse, play, shuffle | `docs/playlists-spec.md` | proposed |
 | 3 | Library filter facets from the server's `Meta.Type.Filter[]` | `docs/library-filters-spec.md` | proposed |
-| 4 | Companion: be a cast/remote-control target (`/player/*`, GDM) | not written | |
+| 4 | Companion: be a cast/remote-control target (`/player/*`, GDM) | `docs/companion-spec.md` | proposed, wire format unverified |
 | 5 | User ratings: read and write (`/:/rate`), reviews | not written | |
 
 Not planned here: Plex Discover browse, friends/social, Live TV, music, photos (out of scope by
