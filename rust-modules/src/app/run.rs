@@ -3056,6 +3056,7 @@ pub(crate) unsafe fn report(app: &mut App, fr: &mut Frame) {
                 | AppArg::ItemMenu(_)
                 | AppArg::PlayerOverlay(_)
                 | AppArg::AltSources(_)
+                | AppArg::VersionsPanel(_)
                 | AppArg::TracksPanel(_)
                 | AppArg::AboutPanel
                 | AppArg::PersonBio
@@ -4353,7 +4354,8 @@ mod lifecycle_regression_tests {
                 "h264",
                 "aac",
                 "First",
-                ""
+                "",
+                None,
             ));
             self.entered.recv_timeout(Duration::from_secs(3)).unwrap();
         }
@@ -4585,7 +4587,8 @@ mod lifecycle_regression_tests {
                 "hevc",
                 "eac3",
                 "Episode 1",
-                ""
+                "",
+                None,
             ));
             self.entered.recv_timeout(Duration::from_secs(3)).unwrap();
             self.resolve();
@@ -5813,7 +5816,8 @@ mod lifecycle_regression_tests {
             "h264",
             "aac",
             "Replacement",
-            ""
+            "",
+            None,
         ));
         rig.accept_start();
         assert!(plx_media::route::play_pending());
