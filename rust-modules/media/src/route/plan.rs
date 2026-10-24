@@ -1226,8 +1226,9 @@ pub struct ResolveEnv {
     pub forced_lang: String,
     /// the loaded detail's streams when it IS this item — saves the worker a GET
     pub cached_item: Option<plx_data::metadata::PlayingItem>,
-    /// The version the viewer picked (Play Version); `None` plays the default. A picked version
-    /// never uses `cached_item`, which describes the default.
+    /// The version this play is bound to (the viewer's pick or the one the profile remembered, both
+    /// settled on the request); `None` plays the default. A picked version never uses
+    /// `cached_item`, which describes the default.
     pub version: Option<plx_plex::plex::MediaId>,
     /// The user's pick off the quality ladder, captured at the press like everything else here.
     /// The worker must not call [`quality`] itself for the reason this struct exists: it reads a
@@ -1357,6 +1358,35 @@ pub(super) fn resolve_src_kbps(
 }
 
 
+/// **What a playable landing owes the version memory**, decided by the resolve from what the
+/// server's item said about the version the request named (`plx_data::metadata::VersionLookup`).
+///
+/// The Default is the `Media` at WIRE index 0, never "the first row": picking it forgets, because a
+/// bare Play takes it anyway and a remembered other would win over it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VersionSettle {
+    /// Nothing was named, or the item could not be read: the memory stays as it is.
+    #[default]
+    Untouched,
+    /// A version other than the Default played: remember it.
+    Remember(plx_plex::plex::MediaId),
+    /// The Default played, or the named version is gone from the item: forget what was remembered.
+    Forget,
+}
+
+/// **The one rule of what a landing owes the version memory**, keyed on the WIRE index of the version
+/// that played and never on a row's place in a list: a version other than `Media[0]` is remembered,
+/// `Media[0]` (the Default) and a version the item no longer lists are forgotten, and nothing is
+/// known about a version of an item that could not be read.
+pub fn version_settle(lookup: &plx_data::metadata::VersionLookup) -> VersionSettle {
+    use plx_data::metadata::VersionLookup;
+    match lookup {
+        VersionLookup::Default | VersionLookup::Unanswered => VersionSettle::Untouched,
+        VersionLookup::Picked(v) if v.index != 0 => VersionSettle::Remember(v.id),
+        VersionLookup::Picked(_) | VersionLookup::Gone => VersionSettle::Forget,
+    }
+}
+
 /// Everything `resolve` DECIDES, as owned data. No `static mut`, no `SHARED`, no ACB/Starfish —
 /// so it is `Send` and the resolve can run on a worker. `apply_plan` (main thread) is the ONLY
 /// code that installs it. Adding a field here is how you add a resolve output; writing a static
@@ -1384,6 +1414,9 @@ pub struct Plan {
     /// 0 = unknown, and always 0 for a default play (the page judged that resume against its own
     /// item). Set only when a picked version landed.
     pub played_dur_ms: i64,
+    /// What a playable landing of this plan owes the version memory (`pump_play` settles it for a
+    /// fresh play of a film or episode only).
+    pub version_settle: VersionSettle,
     pub pq_id: String,
     pub pq_item_id: String,
     pub machine_id: String, // "" = leave the cached one alone
@@ -1605,21 +1638,33 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     // the playing item's OWN track lists (menu + audio pick + esInfo fps read them) — the
     // loaded detail can be a different item (show page / straight-from-Home play)
     // detail already had this item's streams — no GET
-    let (playing, played) = match env.version {
+    let (playing, lookup) = match env.version {
         None => (
             env.cached_item
                 .clone()
                 .or_else(|| plx_data::metadata::fetch_playing_item(client, env.sid, rk, None).map(|(item, _)| item)),
-            None,
+            plx_data::metadata::VersionLookup::Default,
         ),
         Some(want) => match plx_data::metadata::fetch_playing_item(client, env.sid, rk, Some(want)) {
-            Some((item, played)) => (Some(item), played),
-            None => (None, None),
+            Some((item, lookup)) => (Some(item), lookup),
+            None => (None, plx_data::metadata::VersionLookup::Unanswered),
         },
     };
-    if let (Some(want), None) = (env.version, played.as_ref()) {
-        crate::player::log(&format!("route: version {} is gone from the item; playing the default", want.0));
+    if let Some(want) = env.version {
+        match &lookup {
+            plx_data::metadata::VersionLookup::Gone => crate::player::log(&format!(
+                "route: version {} is gone from the item; playing the default",
+                want.0
+            )),
+            plx_data::metadata::VersionLookup::Unanswered => crate::player::log(&format!(
+                "route: the item could not be read for version {}; playing the default",
+                want.0
+            )),
+            _ => {}
+        }
     }
+    plan.version_settle = version_settle(&lookup);
+    let played = lookup.picked().cloned();
     // The picked version's part, codecs and `mediaIndex` replace the caller's (the default's)
     // together, so nothing below can pair one version's part with another's streams.
     let (part, vcodec, acodec) = match played.as_ref() {

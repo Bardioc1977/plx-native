@@ -2711,22 +2711,48 @@ fn cached_playing(state: &MetadataState, sid: plx_plex::plex::ServerId, rk: &str
 /// server is CURRENT, and a ratingKey that also exists there would come back with a different
 /// film's stream list. `sid` rides along for the identity the parsed rows carry.
 ///
-/// `want` is the version the viewer picked (`None`: the default). The store is built from THAT
-/// version's part, and the [`PlayedVersion`] beside it names the part key, codecs and
-/// `mediaIndex` the route must use with it, so no reader mixes version 0's part with version N's
-/// streams. A picked version the answer no longer lists falls back to the default with no
-/// `PlayedVersion`, and the caller logs it.
+/// `want` is the version the request names (`None`: the default). The store is built from THAT
+/// version's part, and the [`VersionLookup`] beside it says what was found: the part key, codecs and
+/// `mediaIndex` the route must use with it ([`VersionLookup::Picked`]), or that the item no longer
+/// lists it ([`VersionLookup::Gone`], the default plays) or could not be read at all
+/// ([`VersionLookup::Unanswered`], which says nothing about the version).
 pub fn fetch_playing_item(
     client: &'static plx_plex::plex::Client,
     sid: plx_plex::plex::ServerId,
     rk: &str,
     want: Option<plx_plex::plex::MediaId>,
-) -> Option<(PlayingItem, Option<PlayedVersion>)> {
+) -> Option<(PlayingItem, VersionLookup)> {
     if rk.is_empty() {
         return None;
     }
     let it = client.metadata(rk);
     Some(playing_version_from(sid, rk, it.as_ref(), want))
+}
+
+/// **What the item said about the version a request named.** The memory settles on it
+/// (`route::VersionSettle`), so the four answers stay apart: "no longer listed" forgets a pick, "could
+/// not be asked" must not, or a network blip would erase it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VersionLookup {
+    /// No version was named: the default plays.
+    Default,
+    /// The item lists the named version and it has a Part to play.
+    Picked(PlayedVersion),
+    /// The item was read and does not list the named version, or lists it with no playable Part: the
+    /// default plays.
+    Gone,
+    /// The item could not be read, so nothing is known about the named version.
+    Unanswered,
+}
+
+impl VersionLookup {
+    /// The picked version, when there is one.
+    pub fn picked(&self) -> Option<&PlayedVersion> {
+        match self {
+            VersionLookup::Picked(v) => Some(v),
+            _ => None,
+        }
+    }
 }
 
 /// The version a play resolved to: its position in `Media[]` (the transcoder's `mediaIndex`), its
@@ -2774,22 +2800,27 @@ pub fn playing_version_from(
     rk: &str,
     it: Option<&plx_plex::plex::Metadata>,
     want: Option<plx_plex::plex::MediaId>,
-) -> (PlayingItem, Option<PlayedVersion>) {
+) -> (PlayingItem, VersionLookup) {
     // a version the item lists but cannot play (no `Part` key) is as good as a lost one
     let picked = want
         .and_then(|id| it.and_then(|it| it.media_version(Some(id))))
         .filter(|(_, m)| crate::pms::is_playable(m));
     let media = picked.map(|(_, m)| m).or_else(|| it.and_then(|it| it.media_version(None)).map(|(_, m)| m));
-    let played = picked.map(|(index, m)| PlayedVersion {
-        index,
-        id: m.id,
-        part: m.part.first().map(|p| p.key.clone()).unwrap_or_default(),
-        vcodec: m.video_codec.clone(),
-        acodec: m.audio_codec.clone(),
-        video_kbps: source_video_kbps(media_video_kbps(m), m.bitrate),
-        dur_ms: m.duration,
-    });
-    (playing_item_of(sid, rk, it, media), played)
+    let lookup = match (want, picked) {
+        (None, _) => VersionLookup::Default,
+        (Some(_), Some((index, m))) => VersionLookup::Picked(PlayedVersion {
+            index,
+            id: m.id,
+            part: m.part.first().map(|p| p.key.clone()).unwrap_or_default(),
+            vcodec: m.video_codec.clone(),
+            acodec: m.audio_codec.clone(),
+            video_kbps: source_video_kbps(media_video_kbps(m), m.bitrate),
+            dur_ms: m.duration,
+        }),
+        (Some(_), None) if it.is_none() => VersionLookup::Unanswered,
+        (Some(_), None) => VersionLookup::Gone,
+    };
+    (playing_item_of(sid, rk, it, media), lookup)
 }
 
 /// The first video stream's own bitrate of a version's first Part, in kbps (0 when it has none or

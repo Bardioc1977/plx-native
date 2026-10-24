@@ -375,16 +375,32 @@ fn two_versions() -> plx_plex::plex::Metadata {
 #[test]
 fn a_picked_version_is_the_whole_playing_item() {
     let it = two_versions();
-    let (item, played) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(3082)));
-    let played = played.expect("the version is listed");
+    let (item, lookup) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(3082)));
+    let played = lookup.picked().cloned().expect("the version is listed");
     assert_eq!((played.index, played.part.as_str(), played.vcodec.as_str()), (1, "/p/3130", "hevc"));
     assert_eq!((item.width, item.audio[0].id, item.hdr), (3840, 3, true));
-    let (item, played) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(9)));
-    assert!(played.is_none());
+    let (item, lookup) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(9)));
+    assert_eq!(lookup, VersionLookup::Gone, "the item was read and no longer lists it");
     assert_eq!((item.width, item.audio[0].id), (1920, 1));
-    let (item, played) = playing_version_from(SRV_A, "42", Some(&it), None);
-    assert!(played.is_none(), "the default needs no override");
+    let (item, lookup) = playing_version_from(SRV_A, "42", Some(&it), None);
+    assert_eq!(lookup, VersionLookup::Default, "the default needs no override");
     assert_eq!(item.width, 1920);
+}
+
+/// **What the item said about the version a request named has four answers**, and the memory settles
+/// on them: a network blip (`Unanswered`) must not erase a pick, a version the item no longer lists
+/// (`Gone`) must be forgotten, and no named version (`Default`) is nothing to settle.
+#[test]
+fn the_lookup_tells_a_lost_version_from_an_item_that_could_not_be_read() {
+    let it = two_versions();
+    let id = |n: i64| Some(plx_plex::plex::MediaId(n));
+    assert_eq!(playing_version_from(SRV_A, "42", Some(&it), None).1, VersionLookup::Default);
+    assert_eq!(playing_version_from(SRV_A, "42", None, None).1, VersionLookup::Default, "nothing asked, nothing lost");
+    assert!(matches!(playing_version_from(SRV_A, "42", Some(&it), id(3082)).1, VersionLookup::Picked(v) if v.index == 1));
+    assert_eq!(playing_version_from(SRV_A, "42", Some(&it), id(9)).1, VersionLookup::Gone);
+    assert_eq!(playing_version_from(SRV_A, "42", None, id(3082)).1, VersionLookup::Unanswered, "no answer is not an empty list");
+    let none: plx_plex::plex::Metadata = serde_json::from_value(serde_json::json!({ "type": "movie" })).unwrap();
+    assert_eq!(playing_version_from(SRV_A, "42", Some(&none), id(3082)).1, VersionLookup::Gone, "an item with no Media lists nothing");
 }
 
 /// The rate a quality ceiling is judged against for a picked version is its own video stream's,
@@ -406,6 +422,7 @@ fn a_picked_versions_video_rate_is_its_own_stream_else_the_whole_file() {
     let rate = |id: i64| {
         playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(id)))
             .1
+            .picked()
             .map(|v| v.video_kbps)
     };
     assert_eq!(rate(2), Some(8_000), "the video stream, not the 9000 kbps file");
@@ -493,13 +510,13 @@ fn a_list_is_offered_for_two_playable_versions_or_one_that_is_not_the_default() 
 #[test]
 fn a_listed_version_without_a_part_is_not_a_playable_pick() {
     let it = partless_default();
-    let (item, played) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(10)));
-    assert!(played.is_none(), "Media 10 has no Part: no played version, not one with `part: \"\"`");
+    let (item, lookup) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(10)));
+    assert_eq!(lookup, VersionLookup::Gone, "Media 10 has no Part: no played version, not one with `part: \"\"`");
     let (_, empty_key) = playing_version_from(SRV_A, "42", Some(&media_of(&["/p/a", "empty"])),
         Some(plx_plex::plex::MediaId(101)));
-    assert!(empty_key.is_none(), "an empty Part key is unplayable too");
-    let (_, played) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(11)));
-    let played = played.expect("a playable Media[1]");
+    assert_eq!(empty_key, VersionLookup::Gone, "an empty Part key is unplayable too");
+    let (_, lookup) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(11)));
+    let played = lookup.picked().cloned().expect("a playable Media[1]");
     assert_eq!((played.index, played.part.as_str()), (1, "/p/11"));
     let _ = item;
 }
@@ -542,7 +559,7 @@ fn a_picked_version_carries_its_own_length() {
         { "id": 2, "duration": "5400000", "Part": [{ "key": "/p/2" }] },
         { "id": 3, "Part": [{ "key": "/p/3" }] }] })).unwrap();
     let dur = |id: i64| {
-        playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(id))).1.map(|v| v.dur_ms)
+        playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(id))).1.picked().map(|v| v.dur_ms)
     };
     assert_eq!((dur(1), dur(2), dur(3), dur(9)), (Some(6_000_000), Some(5_400_000), Some(0), None));
 }

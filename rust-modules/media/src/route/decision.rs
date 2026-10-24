@@ -38,7 +38,10 @@ pub use memory::{
 #[cfg(any(test, feature = "test-support"))]
 pub use memory::{park_write_back_for_test, write_back_parked};
 pub(super) use memory::ParkedWriteBack;
-use memory::{follow_audio_with_forced_only, parked_write_back, recalled_track_memory, remembered_subtitle_offset, settle_landing_selection};
+use memory::{
+    follow_audio_with_forced_only, parked_write_back, recalled_track_memory, remembered_subtitle_offset, settle_landing_selection,
+    settle_version,
+};
 
 // ---- ONE playback session, as ONE value -----------------------------------------------------
 
@@ -61,8 +64,10 @@ struct PlaybackRequest {
     /// Background hero preview. No PlayQueue, no timeline, no scrobble, resume at 0, and the
     /// caller must not push the player route.
     preview: bool,
-    /// The version the viewer picked (Play Version), `None` for the default. Kept on the request,
-    /// so a retry or quality change of this playback resolves the same version.
+    /// The version this play is bound to: the viewer's pick (Play Version), else the profile's
+    /// remembered one (`request_play_inner` recalls it ONCE onto a fresh play of a film or episode),
+    /// `None` for the default. Kept on the request, so a retry, a quality change or a contract
+    /// re-resolve of this playback resolves the same version without consulting the memory again.
     version: Option<plx_plex::plex::MediaId>,
 }
 
@@ -7706,6 +7711,19 @@ struct PlayLanding {
     contract_revision: u64,
     plan: Plan,
     rk: String,
+    /// Whether this landing settles the version memory: a viewer's fresh play of a film or episode
+    /// (and the resolve that continues one after a contract change), never a retry, an extra, a
+    /// trailer or a preview.
+    settles: bool,
+}
+
+/// The attempt a resolve CONTINUES when `pump_play` discards a landing and resolves again because the
+/// desired contract moved: the funnel generation it was minted under, and whether the discarded
+/// landing was one that settles the version memory.
+#[derive(Clone, Copy)]
+struct Continued {
+    trace_generation: u32,
+    settles: bool,
 }
 static PLAY_SLOT: Mutex<Option<PlayLanding>> = Mutex::new(None);
 /// The start point a landing hands the player. Only a point that came from the card or page (the
@@ -7933,9 +7951,9 @@ fn request_env(
 fn request_play_inner(
     ps: &mut PlaybackSession,
     meta: &mut plx_data::stores::metadata::MetadataStore,
-    request: PlaybackRequest,
+    mut request: PlaybackRequest,
     retry: Option<RetryContext>,
-    trace_generation: Option<u32>,
+    continued: Option<Continued>,
     drain_previous: bool,
     origin: crate::player::report::AttemptOrigin,
 ) -> bool {
@@ -7964,8 +7982,22 @@ fn request_play_inner(
         crate::player::report::preview_requested();
         0
     } else {
-        trace_generation.unwrap_or_else(|| crate::player::report::requested(ps, sid, origin))
+        continued.map(|c| c.trace_generation).unwrap_or_else(|| crate::player::report::requested(ps, sid, origin))
     };
+    // **The version memory is read HERE, once, onto the request.** From then on `ps.request` carries
+    // the identity, so both re-entries of the resolve (`pump_play`'s contract change and
+    // `retry_current_play`) re-send it without consulting the memory again, and a pick forgotten in
+    // between cannot change which file a retry plays. Only a fresh play of a film or an episode
+    // recalls: a retry's request already has it, and a trailer, an extra or a preview is not the
+    // feature the viewer picked a version of. An explicit pick never consults the memory.
+    let fresh_feature = retry.is_none() && !request.preview && !plx_data::metadata::context_omits_queue_continuous(ctx);
+    if fresh_feature && request.version.is_none() {
+        request.version = recalled_version(sid, rk);
+        if let Some(id) = request.version {
+            crate::player::log(&format!("route: playing remembered version {}", id.0));
+        }
+    }
+    let settles = continued.map_or(fresh_feature, |c| c.settles);
     // The fields a play REQUEST owns, as against the ones only a landing may install: the HUD
     // strings (published now, so the pre-roll has a title through the whole resolve) and the five
     // the OUTGOING item leaves behind. Everything else — url, session ids, codecs — stays as it is
@@ -8049,6 +8081,7 @@ fn request_play_inner(
             contract_revision,
             plan,
             rk,
+            settles,
         };
         let abandoned = {
             let mut slot = PLAY_SLOT.lock().unwrap_or_else(|e| e.into_inner());
@@ -8361,6 +8394,7 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
         contract_revision,
         plan,
         rk,
+        settles,
     }) = taken
     else {
         return None;
@@ -8394,7 +8428,7 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
                 meta,
                 request,
                 Some(retry),
-                Some(trace_generation),
+                Some(Continued { trace_generation, settles }),
                 false,
                 // Unused: the attempt is already minted and this resolve continues it.
                 crate::player::report::AttemptOrigin::Fresh,
@@ -8415,6 +8449,7 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
     // 0's, so a shorter picked version can leave it past its own end (0 = a default play or an
     // unknown length: the point stands).
     let played_dur_ms = plan.played_dur_ms;
+    let version_settle = plan.version_settle;
     let resume_ns = {
         let mut resume = PLAY_RESUME.lock().unwrap_or_else(|e| e.into_inner());
         take_resume_for(&mut resume, gen)
@@ -8427,6 +8462,11 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
         ACTIVE_TRACE_GENERATION.store(trace_generation, Ordering::SeqCst);
     }
     let _start = apply_plan(ps, meta, plan, &rk);
+    // The version memory settles at a PLAYABLE landing of a fresh play, never at the press, and a
+    // refusal writes nothing: a pick that cannot play is not remembered.
+    if ok && settles {
+        settle_version(ps, version_settle);
+    }
     if let Some(resources) = refused_resources {
         retire_plan_resources(resources);
     }

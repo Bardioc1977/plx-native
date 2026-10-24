@@ -252,8 +252,8 @@ fn the_playing_item_is_read_through_the_callers_client() {
     let _serial = plx_base::testlock::serial();
     let rig = Rig::new();
     rig.repoint();
-    let (item, played) = fetch_playing_item(rig.client, rig.sid, "movie-1", None).expect("an item for a key");
-    assert!(played.is_none(), "no version was picked");
+    let (item, lookup) = fetch_playing_item(rig.client, rig.sid, "movie-1", None).expect("an item for a key");
+    assert_eq!(lookup, VersionLookup::Default, "no version was picked");
     assert_eq!(item.rk, "movie-1");
     assert_eq!(rig.a.paths(), paths(&["/library/metadata/movie-1"]));
     assert_eq!(rig.b.paths(), Vec::<String>::new());

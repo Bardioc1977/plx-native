@@ -361,6 +361,7 @@ fn quality_changed_during_resolve_cannot_land_the_old_contract() {
             ..Default::default()
         },
         rk: "rk-old-contract".into(),
+        settles: false,
     });
 
     // This is the reducer half of a quality edit after ResolveEnv was snapshotted.
@@ -1307,6 +1308,7 @@ fn abandoned_resolves_retire_the_streaming_resources_they_created() {
             ..Default::default()
         },
         rk: "abandoned-rk".into(),
+        settles: false,
     });
 
     assert_eq!(
@@ -1327,6 +1329,7 @@ fn abandoned_resolves_retire_the_streaming_resources_they_created() {
             ..Default::default()
         },
         rk: "refused-rk".into(),
+        settles: false,
     });
     assert_eq!(pump_play(&mut ps, &mut plx_data::stores::metadata::MetadataStore::default()), None, "a refusal has no playable URL");
     assert!(

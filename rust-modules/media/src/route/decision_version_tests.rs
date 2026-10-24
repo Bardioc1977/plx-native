@@ -8,7 +8,7 @@ use super::test_support::*;
 
 /// An episode with two versions, listed default-first: a 1080p h264/aac file and a 4K hevc/eac3
 /// one, each with its own part and its own audio stream ids.
-const TWO_VERSIONS: &[u8] = br#"{"MediaContainer":{"Metadata":[{"ratingKey":"rk-v","type":"episode","Media":[
+pub(super) const TWO_VERSIONS: &[u8] = br#"{"MediaContainer":{"Metadata":[{"ratingKey":"rk-v","type":"episode","Media":[
   {"id":3086,"bitrate":2372,"width":1920,"height":1080,"videoResolution":"1080","videoCodec":"h264","audioCodec":"aac","container":"mkv",
    "Part":[{"id":3134,"key":"/library/parts/3134/1/file.mkv","container":"mkv","Stream":[
      {"id":31341,"streamType":1,"codec":"h264","index":0},
@@ -18,23 +18,23 @@ const TWO_VERSIONS: &[u8] = br#"{"MediaContainer":{"Metadata":[{"ratingKey":"rk-
      {"id":31301,"streamType":1,"codec":"hevc","index":0},
      {"id":31302,"streamType":2,"codec":"eac3","channels":6,"index":1,"languageCode":"eng","default":true,"selected":true}]}]}]}]}}"#;
 
-const RK: &str = "rk-v";
+pub(super) const RK: &str = "rk-v";
 /// The Part key a menu hands the play: version 0's, whatever version the viewer picked.
-const DEFAULT_PART: &str = "/library/parts/3134/1/file.mkv";
-const PICKED: plx_plex::plex::MediaId = plx_plex::plex::MediaId(3082);
+pub(super) const DEFAULT_PART: &str = "/library/parts/3134/1/file.mkv";
+pub(super) const PICKED: plx_plex::plex::MediaId = plx_plex::plex::MediaId(3082);
 
-struct PmsState {
+pub(super) struct PmsState {
     requests: Vec<String>,
     mde: &'static [u8],
-    item: Vec<u8>,
+    pub(super) item: Vec<u8>,
 }
 
 /// A loopback PMS that serves the fixture item for `rk-v`, `mde` for every `/decision`, every
 /// `PUT` accepted and an empty container for the rest, and records every request line until it
 /// is dropped.
-struct VersionPms {
+pub(super) struct VersionPms {
     port: i32,
-    state: std::sync::Arc<std::sync::Mutex<PmsState>>,
+    pub(super) state: std::sync::Arc<std::sync::Mutex<PmsState>>,
     _alive: std::sync::mpsc::Sender<()>,
 }
 
@@ -77,13 +77,13 @@ impl VersionPms {
         VersionPms { port, state, _alive: stop }
     }
 
-    fn requests(&self) -> Vec<String> {
+    pub(super) fn requests(&self) -> Vec<String> {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).requests.clone()
     }
 
     /// The `/decision` request lines the server saw from request number `from` on, waiting up to
     /// ten seconds for `n` of them.
-    fn decisions_since(&self, from: usize, n: usize) -> Vec<String> {
+    pub(super) fn decisions_since(&self, from: usize, n: usize) -> Vec<String> {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let seen: Vec<String> =
@@ -98,14 +98,14 @@ impl VersionPms {
 
 /// One registered loopback server and an idle session, torn down (workers drained, registry
 /// emptied) when it goes out of scope.
-struct World {
-    ps: crate::route::PlaybackSession,
-    pms: VersionPms,
-    sid: ServerId,
+pub(super) struct World {
+    pub(super) ps: crate::route::PlaybackSession,
+    pub(super) pms: VersionPms,
+    pub(super) sid: ServerId,
     _serial: plx_base::testlock::Serial,
 }
 
-fn world(item: &[u8], mde: &'static [u8]) -> World {
+pub(super) fn world(item: &[u8], mde: &'static [u8]) -> World {
     let mut ps = crate::route::PlaybackSession::IDLE;
     let serial = fresh_registry(&mut ps);
     let pms = VersionPms::start(item, mde);
@@ -124,7 +124,7 @@ impl Drop for World {
 
 impl World {
     /// The environment a play of `RK` resolves under, the pick being `version`.
-    fn env(&self, version: Option<plx_plex::plex::MediaId>) -> ResolveEnv {
+    pub(super) fn env(&self, version: Option<plx_plex::plex::MediaId>) -> ResolveEnv {
         let mut env = ResolveEnv::snapshot(
             &self.ps,
             plx_data::stores::metadata::MetadataStore::default().view(),
@@ -136,16 +136,16 @@ impl World {
     }
 
     /// `build_stream` for the item, the arguments being what a menu holds (version 0's).
-    fn resolve(&self, env: &ResolveEnv) -> Plan {
+    pub(super) fn resolve(&self, env: &ResolveEnv) -> Plan {
         build_stream(&plx_base::task::OffFrame::for_test(), RK, DEFAULT_PART, "h264", "aac", env)
     }
 
     /// The request a menu's play makes, through the real entry point.
-    fn request_play(&mut self, meta: &mut plx_data::stores::metadata::MetadataStore, version: Option<plx_plex::plex::MediaId>) -> bool {
+    pub(super) fn request_play(&mut self, meta: &mut plx_data::stores::metadata::MetadataStore, version: Option<plx_plex::plex::MediaId>) -> bool {
         request_play(&mut self.ps, meta, self.sid, RK, DEFAULT_PART, "h264", "aac", "Episode", "", version)
     }
 
-    fn finish(&mut self) {
+    pub(super) fn finish(&mut self) {
         cancel_play(&mut self.ps);
         assert!(wait_resolve_workers_for_test(std::time::Duration::from_secs(10)), "a resolve worker is still running");
     }
@@ -235,7 +235,7 @@ fn the_picked_version_rides_the_request_and_the_landing() {
 // ---- the pick survives every re-entry of the resolve ---------------------------------------------
 
 /// The `mediaIndex` an MDE ask or transcode decision line carries.
-fn media_index(line: &str) -> Option<&str> {
+pub(super) fn media_index(line: &str) -> Option<&str> {
     query_param(line, "mediaIndex")
 }
 

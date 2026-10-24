@@ -79,6 +79,26 @@ pub fn remember_version(sid: ServerId, rk: &str, media_id: Option<plx_plex::plex
     remember::<VersionMemoryEntry>(&user, (machine_id, rk.to_string()), move |_| entry.clone())
 }
 
+/// **Settle the version memory at a playable landing of a fresh play** (`pump_play`): remember the
+/// version that played when it is not the Default, forget when the Default played or the named
+/// version is gone from the item, and touch nothing when the item could not be read. MAIN THREAD.
+///
+/// The door is called only when the stored value would CHANGE (each call queues a storage write), so a
+/// recalled pick that lands again costs nothing.
+pub(super) fn settle_version(ps: &PlaybackSession, settle: VersionSettle) {
+    let wanted = match settle {
+        VersionSettle::Untouched => return,
+        VersionSettle::Remember(id) => Some(id),
+        VersionSettle::Forget => None,
+    };
+    let Some(request) = ps.request.as_ref() else {
+        return;
+    };
+    if recalled_version(request.sid, &request.rk) != wanted {
+        remember_version(request.sid, &request.rk, wanted);
+    }
+}
+
 /// This profile's remembered subtitle sync-timing correction for `rk` on `sid`'s server, if this
 /// television has ever tuned one — the read half of [`persist_subtitle_offset`], through the memory
 /// door's mirror ([`recall`]), so a correction made a moment ago is found whether or not its file
