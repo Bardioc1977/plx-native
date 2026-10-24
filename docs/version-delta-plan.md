@@ -493,7 +493,7 @@ point down (`ci/module-layers.ini`); nothing new outside `[port webos]` names `w
 | S10 | **N2** media door, then **N3** recall + settle + `VersionLookup` (two commits; N3 needs S4) | `C=plx_media`, `make test-hostsim C=plx_media`, `make test-fast`, `ci/check-deps.sh` |
 | S11 | **N4** `plays` tick + `MarkPlaysVersion` + the menu captures, then **N5** clear arm | `C=plx_data`, `C=plx_appkit`, `C=plx_screens`, `make test-fast`, `make test-hostsim`, `python3 tests/test_harness.py`, `ci/check-deps.sh` |
 | S12 | **N6** mock reconciliation | `python3 tests/test_mock_pms_library.py`, `python3 tests/mock_pms.py --selftest`, `python3 tests/test_harness.py` |
-| S13 | docs: README bullet, doc-claim-auditor pass over the targets below, `docs/parity-gaps.md` | `make check` |
+| S13 | docs: README bullet, doc-claim-auditor pass over the targets below, `docs/parity-gaps.md`; `grep -rn 'version-delta' docs rust-modules ci tests` must be empty outside the `docs/version-delta-*.md` files (repoint to the spec, whose section 10 list is inlined, not "see plan section 7") | `make check` |
 | S14 | the merged-tree gate: `make check` (if it is red, the only expected cause is `ci/test_disk_preflight.py`, a free-space assertion about this machine's disk, not a code failure; report it as such), `make test-hostsim`, `make test-hostsim C=plx_media`, `make check-nodef` | the `test result:` lines |
 | S15 | verification: simulator (below), device legs under `tv-lock` against the mock | which-tier, tv-lock |
 | S16 | **conditional**: if (and only if) a step moved a screen `SHAPE`, `SCREEN_SHAPES_PIN` was bumped in that same commit and the three anchors are re-recorded once, here, with the procedure in `tests/fixtures/replay/README.md` (`tools/plxnative-rec rerecord`, never by hand), then `make check-replay` | `make check-replay`, `make check` |
@@ -686,3 +686,81 @@ Deviations and findings, appended to as each step lands.
   `ci/test_disk_preflight.py` (free-space assertion about this machine), which also stops its cargo branch, hence
   the halves. The new test names contain no `MAX_*` constant and no new cap, so `ci/list-caps.ini` is unchanged.
   Open for later steps: the new doc citations of this plan (S0 note) and the replay/screen shapes (no shape touched).
+
+## Implementation notes, batch 2 (S6-S8)
+
+Commits: S6 `207e95fb`, S7 `8ce31007`, S8a (U5) `3d99aa68`, S8b (U4) `c6cebebd`. Each regression test was
+written first and observed red at the old behaviour; the literal assertions follow.
+
+- **S6 (U3).** The tree names the request `Work` (not `Job` as on our old branch), so
+  `Work::Download { key, part_id }` and `Work::Refresh { part_id }` carry the scope. `subtitle_rows` splits
+  into the pure `stream_rows(item, part_id)`: it scopes only when `part_id != 0` AND the fetched item lists
+  more than one `Media` (a one-version item, stacked or not, keeps the all-Parts read). The scope value is
+  `plx_media::route::cur_part_id(ps)` read in `overlay.rs` (no `PlayingItem` change, as designed). Red,
+  observed on stubs that kept the old behaviour: `stream_rows_are_scoped_to_the_playing_part`: `assertion
+  left == right failed: only the playing version's streams  left: [1, 2]  right: [1]`;
+  `a_same_item_open_with_another_part_moves_the_scope_and_keeps_the_answer`: `left: 0  right: 36099`;
+  `the_player_reopens_for_another_item_or_another_part_of_this_one`: panic `same item played as another
+  version`. The overlay re-sends `Open` through `SubSearchView::wants_open` and a re-open of the item
+  already searched carries `view.lang()`, so it only moves the scope. No ledger or cap entry changed.
+- **S7 (U6, U8, U7).** *Choice for the challenger's round-2 remark 3:* a list is offered by the single
+  predicate `plx_data::pms::offers_versions` (two or more playable rows, **or exactly one playable row whose
+  wire `index` is not 0**; a lone Default or nothing playable is no list). `versions_of` applies it too, and
+  the three surfaces (card menu row, episode menu row, hero disc) call it, so a Part-less `Media[0]` plus
+  exactly one playable other still gets a one-row list and that version stays reachable (the reach loss
+  recorded in `docs/known-issues.md` at S0 is replaced by this behaviour; the spec is updated).
+  `MediaVersion.index` is the wire position before any drop; `pms::is_playable` (`Part[0].key` non-empty) is
+  the one rule for the list and for a pick. `playing_version_from` answers a listed-but-Part-less pick like a
+  lost one (`played == None`, the default's item); the `Gone` enum arm arrives with `VersionLookup` in S10.
+  Red: `an_unplayable_version_is_not_a_row_and_each_survivor_keeps_its_wire_index`: `left: [(10, 0), (11, 0),
+  (12, 0)]  right: [(11, 1), (12, 2)]`; `a_list_is_offered_for_two_playable_versions_or_one_that_is_not_the_default`:
+  `left: (true, 3)  right: (true, 2)`; `a_lone_version_that_is_not_the_default_is_offered` (card, episode) and
+  `..._gets_the_disc` (hero) red on the old `len() >= 2` gates. U8 red:
+  `friendly_codec("dca-ma")`: `left: "DCA-MA"  right: "DTS-HD MA"`. **U7 was red** on the first run of
+  the worst-row fit test: `de versions worst: measured_width 853 > MENU_MAX_W 650` and `Detail "MPEG2VIDEO HDR
+  . Dolby Digital Plus 5.1 . MPEGTS . 987,0 GB" is 726px in a 527px column` (even the realistic
+  `HEVC HDR . Dolby Digital Plus Stereo . MKV . 100,0 GB` is 626px; the dots are middle dots). The fix is the
+  planned token-priority cut inside `version_list::labels`, with one deviation: the budget is an *estimated
+  width* (`weight`: capitals and digits 4 units, thin letters and punctuation 2, other letters 3, a unit about
+  4.1 px; `DETAIL_UNITS` 125) rather than a character count, because a plain count was measured to pass a
+  41-capital row at 546 px while dropping size from ordinary mixed-case rows. Dropping is uniform across the
+  rows (size, then container, then audio, then video; the rate/resolution label never). The constant name
+  carries no cap word, so `ci/list-caps.ini` is unchanged (`check-list-caps.py` green). The fixtures
+  `worst_case()` and `edge_case()` (test-support) are graded in appkit, in the item menu's page and in the
+  hero panel across `i18n::SHIPPED`; the edge list (all-capital rows right at the budget) is what pins the
+  number. The agreement of the Track information descriptor and the list on `dca-ma` is one test in
+  `track_menu.rs`. No new string, and no screen shape moved (`the_screen_shape_inventory_is_pinned` green),
+  so S16 stays conditional.
+- **S8a (U5).** As designed: `Media.duration` (`de_i64`, ms), `PlayedVersion.dur_ms`, `Plan.played_dur_ms` (set
+  only when a picked version landed), `plx_data::metadata::resume_ns_for(at_ns, played_dur_ms)` (the 95% rule
+  of `resume_ns` on a nanosecond point; `<= 0` leaves it), read in `pump_play` before `apply_plan` consumes
+  the plan and also written back to `requested_resume_ns`. Red
+  (`a_resume_point_past_the_end_of_the_picked_version_starts_over`, `make test-hostsim C=plx_media`): `past the
+  picked version's end: from the start  left: (Some(5700000000000), 5700000000000)  right: (Some(0), 0)`. A
+  default play, an inside-the-version point and a pick the item lost keep the point. `Detail.dur_ms`, the UI's
+  own `play_resume_ns` and the Info card runtime stay version 0's.
+- **S8b (U4, separate commit).** Index-only door as designed: `MediaContainer::narrow_to_media_index(index) ->
+  Narrowed {Kept, Mismatch{listed}}` (pure, in `models.rs`; a mismatch also clears the three container-level
+  codes and both sentences) called by `narrowed_decision` in `transcoder.rs` from `mde_decision_with_profile`,
+  `transcode_decision` and `transcode_decision_until`, **only for `media_index != 0`**; the log line is
+  `decision: wanted media index <i>, server listed <n>` (counts only). The fixtures carry no `Media.id` and
+  cover the four modes `chosen`, `all`, `all-unflagged`, `ignore`. Red (against the unchanged tree):
+  `a_decision_about_another_version_is_never_judged_as_the_picks`: `all-unflagged: the pick is a remux, not
+  version 0's direct play: http://127.0.0.1:52205/library/parts/3130/1/file.mkv?...` (version 0's `directplay`
+  verdict took the pick's part); `a_refusal_in_a_body_about_another_version_does_not_refuse_the_pick`: `the
+  pick is not refused on another file's verdict`. A default play is unchanged: with a flag on another entry it
+  still follows the flag, as upstream does (`a_default_play_reads_the_decision_body_exactly_as_before` pins
+  it). The transcoder door tests are `devtriggers`-gated and run under `make test-crate C=plx_plex`;
+  `make test-hostsim C=plx_plex` alone has no `devtriggers` (the imports of those tests are gated too, so it
+  still compiles). Everything here is **mock-modelled; PMS's real answer is unverified** (known-issues).
+- **Gates (committed trees, `git status --short` empty before and after).** S6: `plx_data` 1213, `plx_screens`
+  1704 passed; S7: `plx_data` 1217, `plx_appkit` 349, `plx_screens` 1708, `plx_media` 1743 passed; S8a:
+  `plx_plex` 731, `plx_data` 1219, `plx_media` 1744, `test-hostsim C=plx_media` 1906 passed; S8b: `plx_plex`
+  735, `plx_data` 1219, `plx_media` 1747, `test-hostsim C=plx_media` 1909 passed. Each step also ran
+  `make lint`, `make check-nodef`, `ci/check-deps.sh` (ledgers untouched, 16/78/58/11) and, from S7,
+  `ci/check-list-caps.py` and `ci/check-module-layers.py`, all green. The S8a commit was amended once
+  (a wrong boundary in its own data test).
+- **Open for later steps.** The hero panel and the item menu still open the cursor on the first row, which
+  with a Part-less `Media[0]` is not the Default (N4 owns the cursor and the tick). `labels` drops facts for
+  every row alike, so one very long row costs the others their size; the estimate is the only coupling to the
+  glyph widths. Citations of this plan from docs and comments are S13's to repoint.
