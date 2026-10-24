@@ -122,8 +122,9 @@ worker. Its three ledger lines are gone and the shape is the one the other `data
 The Collection page's request is the second: its worker start and its three `client_for` reads are
 gone from `data/src/collection.rs`. The Person page's requests are the third: its two worker starts
 and its one `client_for` read are gone from `data/src/person.rs`, but unlike the two before it the
-Person step is not pure (the last bullet lists what it still reads). Person has up to six requests
-out at once, so a pump emits several jobs, one per fetch slot, in ascending slot order.
+Person step is not pure (the bullet headed "What the Person step still reads" lists what it still
+reads). Person has up to six requests out at once, so a pump emits several jobs, one per fetch slot,
+in ascending slot order.
 
 - **The shape.** `plx_machine::job` holds `Job<R>` (an `Addr` and a request that carries everything
   the worker needs), `Port<T>` (where the one answer goes: exactly one `done` or `refused` per job)
@@ -197,3 +198,27 @@ out at once, so a pump emits several jobs, one per fetch slot, in ascending slot
   `server_ids()` (the source roster) and `server_roster_gen()`. Its
   two fetch bodies, `fetch_profile` and `fetch_credits`, stay in `data/person.rs`, so their `forks`
   ledger lines stay. A source whose server holds no key backs off in the step and emits no job.
+- **A refusal the step can observe.** The runner may decline to start a job: the thread ceiling, a
+  registry that moved on between the step and the launch (the client the job names is no longer the
+  one the slot holds), or a `Held` runner whose client is gone. It then calls the port's `refused`,
+  so every job gets exactly one answer, a refusal included. A refusal that only released the claim
+  would have the next pump send the same request at once, every frame, so the step has to see it. A store whose claim is a `Fetch` (subtitle search)
+  reads `Fetch::take_refused(gen)` at the head of its next pump: the port's
+  `Fetch::refuse_for(gen)` frees that generation's claim and remembers the refusal for
+  `take_refused` to answer once, and a refusal for a superseded generation (one whose claim a newer
+  request or a supersede has replaced) frees nothing and records nothing. A store whose claim is a mailbox of landings
+  (the view-state read-back) has its port post a store-local `NotStarted` landing, and the next pump
+  puts the flight's items back and waits. A refusal never goes into a recorded mailbox (a recorded
+  take would write it as an async result and change the bytes). It reaches the step one pump after
+  the launch; no fixture holds a refused start, so no recorded byte moves.
+- **Subtitle search and the view-state read-back** are the next two stores on the lane. The worker
+  start and the `client_for` read are gone from `data/src/subsearch.rs` and
+  `data/src/stores/viewreconcile.rs`, and their four ledger lines are deleted. Each step reads
+  `plx_plex::plex::ClientKeys` as an argument and emits a `StoreJob`
+  (`plx_data::subsearch::{SubSearchReq, SubSearchPort}` and
+  `plx_data::stores::viewreconcile::{ReconcileReq, ReconcilePort}`); the runner starts the job
+  only if `client_for` still answers the key the step decided on. `Bridge::subsearch_pump` and
+  `Bridge::reconcile_pump` refill the keys, step, then run `Bridge::start_store_jobs_of` for their
+  own store in the same call; `Bridge::subsearch_run` only drains, because the command step takes no
+  keys and emits nothing. Neither kind is on the tape, so the runner makes no admission record for
+  them and a replay launches them live.
