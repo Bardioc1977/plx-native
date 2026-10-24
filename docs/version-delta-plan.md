@@ -645,3 +645,11 @@ Deviations and findings, appended to as each step lands.
 - **S2.** Done, by `git cherry-pick -n ac28dfd7` (one conflict: the `mod` line in `decision.rs`) plus the
   new `media_index` argument at the two `mde_decision*` calls in the transcoder goldens. No golden bytes
   changed, i.e. upstream's `media_index` plumbing left the default transcript identical to our branch's.
+- **S3.** Test-only, in `decision_version_tests.rs`: the loopback PMS became a persistent recording
+  `VersionPms` plus a `World` (the one-shot `versions_pms`/`resolve` pair they replace is a wrapper now), and
+  four characterisation tests were added: `a_pick_survives_the_contract_changed_in_flight_re_resolve`,
+  `a_retry_after_a_refused_first_plan_keeps_the_pick`, `a_retranscode_uses_the_picked_files_codecs_in_every_fallback`
+  (inputs are the claim inputs `src_vcodec/src_acodec/media_index` and `retranscode_fallback_codecs`) and
+  `a_remembered_audio_track_matches_in_every_version_of_the_episode`. All pass on `origin/main` behaviour by
+  design (they pin what upstream gets right). Non-vacuity was checked by mutation: with `request_env` forgetting
+  `request.version`, the two re-entry tests and `the_picked_version_rides_the_request_and_the_landing` go red.

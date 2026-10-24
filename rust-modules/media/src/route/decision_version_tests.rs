@@ -18,63 +18,145 @@ const TWO_VERSIONS: &[u8] = br#"{"MediaContainer":{"Metadata":[{"ratingKey":"rk-
      {"id":31301,"streamType":1,"codec":"hevc","index":0},
      {"id":31302,"streamType":2,"codec":"eac3","channels":6,"index":1,"languageCode":"eng","default":true,"selected":true}]}]}]}]}}"#;
 
-/// A loopback PMS that serves [`TWO_VERSIONS`] for the item, `mde` for every `/decision`, a
-/// bounded body for `start.mkv`, and records every request line until it is told to stop.
-fn versions_pms(mde: &'static [u8]) -> (i32, std::sync::mpsc::Sender<()>, std::thread::JoinHandle<Vec<String>>) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port() as i32;
-    listener.set_nonblocking(true).unwrap();
-    let (done, stop) = std::sync::mpsc::channel();
-    let handle = std::thread::spawn(move || {
-        let mut requests = Vec::new();
-        loop {
+const RK: &str = "rk-v";
+/// The Part key a menu hands the play: version 0's, whatever version the viewer picked.
+const DEFAULT_PART: &str = "/library/parts/3134/1/file.mkv";
+const PICKED: plx_plex::plex::MediaId = plx_plex::plex::MediaId(3082);
+
+struct PmsState {
+    requests: Vec<String>,
+    mde: &'static [u8],
+    item: Vec<u8>,
+}
+
+/// A loopback PMS that serves the fixture item for `rk-v`, `mde` for every `/decision`, every
+/// `PUT` accepted and an empty container for the rest, and records every request line until it
+/// is dropped.
+struct VersionPms {
+    port: i32,
+    state: std::sync::Arc<std::sync::Mutex<PmsState>>,
+    _alive: std::sync::mpsc::Sender<()>,
+}
+
+impl VersionPms {
+    fn start(item: &[u8], mde: &'static [u8]) -> VersionPms {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port() as i32;
+        listener.set_nonblocking(true).unwrap();
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(PmsState { requests: Vec::new(), mde, item: item.to_vec() }));
+        let served = state.clone();
+        std::thread::spawn(move || loop {
             match plx_base::testnet::accept(&listener) {
                 Ok((mut socket, _)) => {
                     let line = drain_http(&mut socket);
-                    let body: &[u8] = if line.starts_with("GET /library/metadata/rk-v") {
-                        TWO_VERSIONS
-                    } else if line.contains("/decision?") {
-                        mde
-                    } else {
-                        EMPTY_MC
+                    let (mde, item) = {
+                        let mut s = served.lock().unwrap_or_else(|e| e.into_inner());
+                        s.requests.push(line.clone());
+                        (s.mde, s.item.clone())
                     };
-                    write_json(&mut socket, body);
-                    requests.push(line);
+                    if line.starts_with("PUT ") {
+                        write_status(&mut socket, 200);
+                    } else if line.starts_with("GET /library/metadata/rk-v") {
+                        write_json(&mut socket, &item);
+                    } else if line.contains("/decision?") {
+                        write_json(&mut socket, mde);
+                    } else {
+                        write_json(&mut socket, EMPTY_MC);
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if stop.try_recv().is_ok() {
+                    if !matches!(stopped.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
                         break;
                     }
-                    std::thread::yield_now();
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                 }
                 Err(e) => panic!("fixture accept: {e}"),
             }
+        });
+        VersionPms { port, state, _alive: stop }
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).requests.clone()
+    }
+
+    /// The `/decision` request lines the server saw from request number `from` on, waiting up to
+    /// ten seconds for `n` of them.
+    fn decisions_since(&self, from: usize, n: usize) -> Vec<String> {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let seen: Vec<String> =
+                self.requests().into_iter().skip(from).filter(|l| l.contains("/decision?")).collect();
+            if seen.len() >= n || std::time::Instant::now() > end {
+                return seen;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        requests
-    });
-    (port, done, handle)
+    }
+}
+
+/// One registered loopback server and an idle session, torn down (workers drained, registry
+/// emptied) when it goes out of scope.
+struct World {
+    ps: crate::route::PlaybackSession,
+    pms: VersionPms,
+    sid: ServerId,
+    _serial: plx_base::testlock::Serial,
+}
+
+fn world(item: &[u8], mde: &'static [u8]) -> World {
+    let mut ps = crate::route::PlaybackSession::IDLE;
+    let serial = fresh_registry(&mut ps);
+    let pms = VersionPms::start(item, mde);
+    let sid = plx_plex::plex::register_for_test("versions", "127.0.0.1", pms.port, "token", "versions-client");
+    World { ps, pms, sid, _serial: serial }
+}
+
+impl Drop for World {
+    fn drop(&mut self) {
+        let _ = wait_resolve_workers_for_test(std::time::Duration::from_secs(10));
+        plx_plex::plex::reset_servers_for_test();
+        reset_player_control_for_test(&self.ps);
+        reset_session(&mut self.ps);
+    }
+}
+
+impl World {
+    /// The environment a play of `RK` resolves under, the pick being `version`.
+    fn env(&self, version: Option<plx_plex::plex::MediaId>) -> ResolveEnv {
+        let mut env = ResolveEnv::snapshot(
+            &self.ps,
+            plx_data::stores::metadata::MetadataStore::default().view(),
+            self.sid,
+            RK,
+        );
+        env.version = version;
+        env
+    }
+
+    /// `build_stream` for the item, the arguments being what a menu holds (version 0's).
+    fn resolve(&self, env: &ResolveEnv) -> Plan {
+        build_stream(&plx_base::task::OffFrame::for_test(), RK, DEFAULT_PART, "h264", "aac", env)
+    }
+
+    /// The request a menu's play makes, through the real entry point.
+    fn request_play(&mut self, meta: &mut plx_data::stores::metadata::MetadataStore, version: Option<plx_plex::plex::MediaId>) -> bool {
+        request_play(&mut self.ps, meta, self.sid, RK, DEFAULT_PART, "h264", "aac", "Episode", "", version)
+    }
+
+    fn finish(&mut self) {
+        cancel_play(&mut self.ps);
+        assert!(wait_resolve_workers_for_test(std::time::Duration::from_secs(10)), "a resolve worker is still running");
+    }
 }
 
 /// Resolve `rk-v` as the request a menu's play makes: the default's part and codecs (what the
 /// listing row carries), plus the version the viewer picked.
 fn resolve(mde: &'static [u8], version: Option<plx_plex::plex::MediaId>) -> (Plan, Vec<String>) {
-    let mut ps = crate::route::PlaybackSession::IDLE;
-    let _g = fresh_registry(&mut ps);
-    let (port, done, server) = versions_pms(mde);
-    let sid = plx_plex::plex::register_for_test("versions", "127.0.0.1", port, "token", "versions-client");
-    let mut env = ResolveEnv::snapshot(&ps, plx_data::stores::metadata::MetadataStore::default().view(), sid, "rk-v");
-    env.version = version;
-    let plan = build_stream(
-        &plx_base::task::OffFrame::for_test(),
-        "rk-v",
-        "/library/parts/3134/1/file.mkv",
-        "h264",
-        "aac",
-        &env,
-    );
-    done.send(()).unwrap();
-    let requests = server.join().unwrap();
-    plx_plex::plex::reset_servers_for_test();
+    let w = world(TWO_VERSIONS, mde);
+    let plan = w.resolve(&w.env(version));
+    let requests = w.pms.requests();
     (plan, requests)
 }
 
@@ -148,4 +230,145 @@ fn the_picked_version_rides_the_request_and_the_landing() {
     cancel_play(&mut ps);
     test_support::apply_plan(&mut ps, Plan { media_index: 1, ..Default::default() }, "rk-v");
     assert_eq!(cur_media_index(&ps), 1);
+}
+
+// ---- the pick survives every re-entry of the resolve ---------------------------------------------
+
+/// The `mediaIndex` an MDE ask or transcode decision line carries.
+fn media_index(line: &str) -> Option<&str> {
+    query_param(line, "mediaIndex")
+}
+
+/// `pump_play`'s "desired contract changed in flight" discards the landed plan and resolves again
+/// from `ps.request`. The pick rides that request, so the second resolve asks about the same
+/// version. (Characterisation: it holds at `origin/main`; the delta's memory must keep it holding.)
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_pick_survives_the_contract_changed_in_flight_re_resolve() {
+    let mut w = world(TWO_VERSIONS, MDE_DIRECTPLAY);
+    let mut meta = plx_data::stores::metadata::MetadataStore::default();
+    assert!(w.request_play(&mut meta, Some(PICKED)));
+    assert!(wait_resolve_workers_for_test(std::time::Duration::from_secs(10)));
+    let first = w.pms.decisions_since(0, 1);
+    assert!(!first.is_empty() && first.iter().all(|d| media_index(d) == Some("1")), "{first:?}");
+    let seen = w.pms.requests().len();
+
+    // the desired contract moves while the plan sits in the mailbox
+    let edit = begin_user_contract_boundary();
+    assert_eq!(pump_play(&mut w.ps, &mut meta), None, "the stale plan is not installed");
+    assert!(wait_resolve_workers_for_test(std::time::Duration::from_secs(10)));
+    let second = w.pms.decisions_since(seen, 1);
+    assert!(!second.is_empty(), "the re-resolve asked the server");
+    assert!(second.iter().all(|d| media_index(d) == Some("1")), "the second resolve is the pick's too: {second:?}");
+    assert_eq!(w.ps.request.as_ref().and_then(|r| r.version), Some(PICKED));
+    drop(edit);
+    w.finish();
+}
+
+/// A refused first plan lands as a default `Plan` (no URL, media index 0). The retry that follows
+/// re-sends `ps.request`, which still names the version, so it resolves the pick again.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_retry_after_a_refused_first_plan_keeps_the_pick() {
+    let mut w = world(TWO_VERSIONS, MDE_DIRECTPLAY);
+    let mut meta = plx_data::stores::metadata::MetadataStore::default();
+    assert!(w.request_play(&mut meta, Some(PICKED)));
+    assert!(wait_resolve_workers_for_test(std::time::Duration::from_secs(10)));
+
+    // the landing is a refused (or panicked) resolve: a default plan with no URL
+    {
+        let mut slot = PLAY_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        let landing = slot.as_mut().expect("the first resolve landed");
+        landing.plan = Plan { direct_play_mode: DirectPlayMode::Auto, ..Default::default() };
+    }
+    assert_eq!(pump_play(&mut w.ps, &mut meta), None, "a plan with no URL starts nothing");
+    assert_eq!(cur_media_index(&w.ps), 0, "the refused landing carries no version");
+    assert_eq!(w.ps.request.as_ref().and_then(|r| r.version), Some(PICKED), "but the request still names it");
+    let seen = w.pms.requests().len();
+
+    assert!(retry_current_play(&mut w.ps, &mut meta, 0, None, crate::player::report::AttemptOrigin::UserRetry));
+    assert!(wait_resolve_workers_for_test(std::time::Duration::from_secs(10)));
+    let again = w.pms.decisions_since(seen, 1);
+    assert!(!again.is_empty() && again.iter().all(|d| media_index(d) == Some("1")), "{again:?}");
+    w.finish();
+}
+
+// ---- the file that plays is the file every later reader describes ---------------------------------
+
+/// A retranscode of a picked version names the PICKED file's codecs, also in the fallback it takes
+/// when the server's `/decision` cannot be read: `Plan.src_vcodec/src_acodec` are the played
+/// file's, `apply_plan` installs them, and the claim inputs copy them from the session.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_retranscode_uses_the_picked_files_codecs_in_every_fallback() {
+    let mut w = world(TWO_VERSIONS, MDE_DIRECTPLAY);
+    let plan = w.resolve(&w.env(Some(PICKED)));
+    assert_eq!((plan.src_vcodec.as_str(), plan.src_acodec.as_str()), ("hevc", "eac3"), "the plan names the played file");
+    test_support::apply_plan(&mut w.ps, plan, RK);
+    assert_eq!((w.ps.src_vcodec.as_str(), w.ps.src_acodec.as_str()), ("hevc", "eac3"), "the session says it too");
+    assert_eq!(cur_media_index(&w.ps), 1);
+
+    let ticket = worker_ticket();
+    let inputs = prepare_retranscode_inputs(&w.ps, &ticket, 0).expect("a transcode-capable route");
+    assert_eq!((inputs.src_vcodec.as_str(), inputs.src_acodec.as_str()), ("hevc", "eac3"));
+    assert_eq!(inputs.media_index, 1, "and the spec it builds names version 1");
+    let remux = enhanced_remux_contract(plx_plex::plex::AudioEnhancements::NONE, false);
+    let (video, audio) = retranscode_fallback_codecs(&inputs, &remux);
+    assert_eq!(video, "hevc", "the fallback copies the picked file's video");
+    assert_eq!(audio, remux_output_acodec(false, inputs.carried_audio.as_ref(), "eac3"));
+    assert_ne!(audio, "aac", "never version 0's audio");
+}
+
+// ---- track memory is matched by descriptor, so it follows an episode across versions ----------------
+
+/// An episode with two versions whose audio tracks are the SAME two tracks (English and Japanese
+/// E-AC3 5.1) under different `Stream.id`s.
+fn episode_with_two_versions() -> Vec<u8> {
+    let media = |id: i64, part: i64| {
+        serde_json::json!({
+            "id": id, "videoCodec": "h264", "audioCodec": "eac3", "width": 1920, "height": 1080,
+            "bitrate": 8_000, "duration": 3_600_000, "container": "mkv",
+            "Part": [{ "id": part, "key": format!("/library/parts/{part}/1/file.mkv"), "container": "mkv", "Stream": [
+                { "id": part * 10 + 1, "streamType": 1, "codec": "h264", "frameRate": 24.0, "bitrate": 6_500 },
+                { "id": part * 10 + 2, "streamType": 2, "index": 1, "codec": "eac3", "channels": 6,
+                  "languageCode": "eng", "selected": 1 },
+                { "id": part * 10 + 3, "streamType": 2, "index": 2, "codec": "eac3", "channels": 6,
+                  "languageCode": "jpn" },
+            ] }],
+        })
+    };
+    serde_json::to_vec(&serde_json::json!({"MediaContainer": {"Metadata": [{
+        "ratingKey": RK, "type": "episode", "grandparentRatingKey": "4242", "duration": 3_600_000,
+        "Media": [media(301, 37_001), media(302, 37_002)],
+    }]}}))
+    .unwrap()
+}
+
+/// A remembered Japanese audio pick for the show matches the Japanese track of WHICHEVER version
+/// plays: the memory is keyed on the track's descriptor (language, codec, channels), never on a
+/// `Stream.id`, which differs between the versions of one item.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_remembered_audio_track_matches_in_every_version_of_the_episode() {
+    use plx_plex::plex::session::prefs::{AudioMemo, TrackMemoryEntry};
+    let w = world(&episode_with_two_versions(), MDE_DIRECTPLAY);
+    let memory = vec![TrackMemoryEntry::new(
+        "versions",
+        "4242",
+        Some(AudioMemo { lang: "jpn".into(), codec: "eac3".into(), channels: 6, ..Default::default() }),
+        None,
+    )];
+    let audio_of = |version: Option<plx_plex::plex::MediaId>| {
+        let mut env = w.env(version);
+        env.memory = memory.clone();
+        env.fresh_play = true;
+        let plan = build_stream(&plx_base::task::OffFrame::for_test(), RK, "/library/parts/37001/1/file.mkv", "h264", "eac3", &env);
+        (plan.audio.as_ref().map(|a| a.sid), plan.part_id)
+    };
+    assert_eq!(audio_of(None), (Some(370_013), 37_001), "version 0: its own Japanese track");
+    assert_eq!(
+        audio_of(Some(plx_plex::plex::MediaId(302))),
+        (Some(370_023), 37_002),
+        "version 1: ITS Japanese track, same memory"
+    );
 }
