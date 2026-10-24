@@ -721,6 +721,92 @@ fn a_list_is_shed_oldest_first_from_the_largest_record(key: &str, field: &str) {
     }
 }
 
+/// `version_memory` for the first `users` Home users, `per_user` worst-case entries each.
+fn add_version_memory(session: &mut Session, users: usize, per_user: usize) {
+    use super::version_memory::VersionMemoryEntry;
+    use super::{MemoryEntry, ProfileMemory};
+    for n in 0..per_user {
+        for u in 0..users {
+            let entry = VersionMemoryEntry::worst_case((u * 1000 + n) as u32);
+            assert!(session.prefs.version_memory.upsert_with(&uuid(u), STAMP, &entry.key(), |_| Some(entry.clone())));
+        }
+    }
+}
+
+/// How many entries each of the FOUR sheddable lists holds, in shed order.
+fn lists4(preferences: &Value) -> [usize; 4] {
+    ["track_memory", "subtitle_offsets", "library_sorts", "version_memory"].map(|key| count(preferences, key))
+}
+
+/// **`version_memory` is shed LAST**, after `track_memory`, `subtitle_offsets` and `library_sorts`:
+/// losing a version pick silently plays a different file, where losing a sort order costs one menu.
+/// With all four lists present, a document over the cap by a small delta loses only `track_memory`
+/// entries; by exactly the first three lists' size it loses those three and nothing of
+/// `version_memory`; by one byte more it starts on `version_memory`; and at no delta does
+/// `version_memory` lose an entry while another list still holds one.
+#[test]
+fn the_guard_sheds_version_memory_last() {
+    let (mut session, _) = (household(4, 1), ());
+    fill_memory(&mut session, 4, Fill { track: 5, offsets: 6, views: 6 });
+    add_version_memory(&mut session, 4, 8);
+    let (public, _) = split_canonical(&session).expect("a splittable session");
+    let base = canonical(&public, 2_000);
+    let size = |public: &state::PublicPayload| {
+        let mut padded = public.clone();
+        padded.preferences["future_pad"] = json!("");
+        persistence::projected_size(&base, &padded, persistence::DocumentWrite::Update, "").unwrap() as i64
+    };
+    let full_size = size(&public);
+    let take = |keys: &[&str]| full_size - size(&without(&public, keys));
+    let first_three = take(&["track_memory", "subtitle_offsets", "library_sorts"]);
+    let all_four = take(&["track_memory", "subtitle_offsets", "library_sorts", "version_memory"]);
+    let full = lists4(&public.preferences);
+    assert!(full.iter().all(|&n| n > 8), "{full:?}");
+    assert!(0 < first_three && first_three < all_four);
+
+    let shed_at = |delta: i64| {
+        let mut next = over_by(&base, public.clone(), delta);
+        let shed = persistence::fit_document(&base, &mut next, persistence::DocumentWrite::Update, "");
+        let names: Vec<&str> = shed.iter().map(|(name, _)| *name).collect();
+        (names, lists4(&next.preferences))
+    };
+
+    // a small delta: only the cheapest to lose
+    let (names, after) = shed_at(1);
+    assert_eq!(names, ["track_memory"]);
+    assert_eq!(after[3], full[3], "version_memory is untouched by a small overshoot");
+
+    // nearly the first three lists' size (the guard does not count the key a list frees when it
+    // empties, so "exactly" would ask for a little more than it frees): the first three go,
+    // version_memory is not touched
+    let (names, after) = shed_at(first_three - 100);
+    assert_eq!(names, ["track_memory", "subtitle_offsets", "library_sorts"]);
+    assert_eq!(&after[..2], &[0, 0], "track_memory and subtitle_offsets are gone");
+    assert!(after[2] < full[2], "library_sorts was shed too");
+    assert_eq!(after[3], full[3], "version_memory survives while the other lists could cover the overshoot");
+
+    // past the first three lists: only now does version_memory lose its oldest entry
+    let (names, after) = shed_at(first_three + 1);
+    assert_eq!(names, ["track_memory", "subtitle_offsets", "library_sorts", "version_memory"]);
+    assert_eq!(&after[..3], &[0, 0, 0]);
+    assert!(after[3] < full[3] && after[3] > 0, "{after:?}");
+
+    // every list gone, and then there is nothing left to take
+    let (names, after) = shed_at(all_four);
+    assert_eq!(names, ["track_memory", "subtitle_offsets", "library_sorts", "version_memory"]);
+    assert_eq!(after, [0, 0, 0, 0]);
+
+    // the invariant, over a sweep: version_memory never loses an entry while another list holds one
+    let steps = 24;
+    for i in 0..=steps {
+        let delta = 1 + (all_four - 1) * i / steps;
+        let (_, after) = shed_at(delta);
+        if after[3] < full[3] {
+            assert_eq!(&after[..3], &[0, 0, 0], "delta {delta}: version_memory was shed while another list held entries: {after:?}");
+        }
+    }
+}
+
 /// A payload whose lists do not parse as this build's types is left alone, not rewritten: shedding
 /// is for data this build wrote.
 #[test]
@@ -955,9 +1041,10 @@ fn an_acl_credential_write_that_fits_evicts_nothing() {
 
 /// **The worst-case household's document fits.** Sixteen Home users, each holding the credentials of
 /// sixteen servers (the roster's largest; nothing caps a profile's sources), every per-profile list at
-/// its cap with every string at its bound (`track_memory` at the 32 KiB budget), sixteen servers' pins
+/// its cap with every string at its bound (`track_memory` at the 32 KiB budget, `version_memory` at its
+/// 24 KiB one), sixteen servers' pins
 /// and consent, four recent searches each. Together that is far more than 256 KiB, and it is written
-/// through the production coordinator on the ACL-only tier (webOS 4.x): the guard sheds the three
+/// through the production coordinator on the ACL-only tier (webOS 4.x): the guard sheds the four
 /// memory lists in order until the document passes the platform's own validation, the credentials
 /// and every unsheddable preference are untouched, and an unrelated quality write afterwards lands.
 ///
@@ -976,6 +1063,8 @@ fn worst_case_household_document_fits() {
     plx_base::eventlog::with_private_log(|| {
         let mut worst_case = with_server_lists(household(USERS, SOURCES), USERS);
         fill_memory(&mut worst_case, USERS, FULL);
+        // the fourth memory list, every profile at its cap with every string at its bound
+        add_version_memory(&mut worst_case, USERS, super::version_memory::CAP);
 
         // every list is at its cap, strings at their bounds
         assert_eq!(worst_case.prefs.subtitle_offsets.iter().map(|r| r.items.len()).collect::<Vec<_>>(), [SubtitleOffsets::CAP; USERS]);
@@ -989,14 +1078,21 @@ fn worst_case_household_document_fits() {
             "track memory fills its household budget: {budget_used} of {BUDGET_BYTES}"
         );
 
+        let version_used = super::list_size(&worst_case.prefs.version_memory);
+        assert!(
+            version_used > super::version_memory::BUDGET_BYTES / 2,
+            "version memory is at its household size, whatever the budget keeps: {version_used}"
+        );
+
         let (public, protected) = split_canonical(&worst_case).unwrap();
-        let memory = ["track_memory", "subtitle_offsets", "library_sorts"].map(|k| logical_size(&public.preferences[k]));
+        let memory = ["track_memory", "subtitle_offsets", "library_sorts", "version_memory"]
+            .map(|k| logical_size(&public.preferences[k]));
         let unguarded = logical_size(&serde_json::to_value(&public).unwrap()) + protected.len();
         assert!(unguarded > MAX_LOGICAL_BYTES, "the fixture is worst case: {unguarded} bytes before any shedding");
 
         // THE FIGURES THE GUARD STANDS ON: everything that is not per-profile memory, with the
         // envelope the helper seals this credential bundle into (either way), plus a full ledger.
-        let without_memory = without(&public, &["track_memory", "subtitle_offsets", "library_sorts"]);
+        let without_memory = without(&public, &["track_memory", "subtitle_offsets", "library_sorts", "version_memory"]);
         let remainder = |seal| {
             let envelope = persistence::sealed_envelope_estimate(&canonical(&without_memory, 0), &protected, seal);
             let mut remainder = canonical(&without_memory, envelope);
@@ -1058,6 +1154,7 @@ fn worst_case_household_document_fits() {
         at_rest.auth_envelope = Some("e".repeat(keymanager_envelope));
         persistence::fit_document(&at_rest, &mut bare, persistence::DocumentWrite::Staged, &protected);
         assert_eq!(lists(&bare.preferences), (0, 0, 0), "everything sheddable went");
+        assert_eq!(count(&bare.preferences, "version_memory"), 0, "the fourth list too");
         let staged = persistence::projected_size(&at_rest, &bare, persistence::DocumentWrite::Staged, &protected).unwrap();
         assert!(staged > MAX_LOGICAL_BYTES, "a staged write at this size is {staged} bytes with nothing sheddable left");
 
@@ -1207,17 +1304,18 @@ fn sign_out_drops_the_track_memory() {
         assert!(put(&mut session.prefs.track_memory, &uuid(0), typical(n)));
     }
     session.set_subtitle_offset_for(&uuid(0), &machine(0), "rk-1", Some(1_500));
+    add_version_memory(&mut session, 1, 3);
     let session = with_server_lists(session, 2);
     commit(&mut store, &session, SaveAuthority::FreshReauthentication);
     let before = stored_preferences(&mut store);
-    for key in ["track_memory", "subtitle_offsets", "server_key_pins", "plaintext_consent"] {
+    for key in ["track_memory", "subtitle_offsets", "version_memory", "server_key_pins", "plaintext_consent"] {
         assert!(before.get(key).is_some(), "control: `{key}` is stored before sign-out");
     }
 
     let mut transport = |request: Request| Ok(store.dispatch(request));
     assert!(matches!(persistence::commit_clear_with(&mut transport), persistence::CanonicalCommit::Durable { .. }));
     let after = stored_preferences(&mut store);
-    for key in ["track_memory", "subtitle_offsets", "server_key_pins", "plaintext_consent"] {
+    for key in ["track_memory", "subtitle_offsets", "version_memory", "server_key_pins", "plaintext_consent"] {
         assert!(after.get(key).is_none(), "`{key}` does not survive sign-out: {after}");
     }
 }
@@ -1271,4 +1369,48 @@ fn tier1_the_real_track_memory_shape_rides_through_the_previous_build() {
     assert_eq!(serde_json::to_value(&old).unwrap()["track_memory"], real);
     let back: Session = serde_json::from_value(file).unwrap();
     assert_eq!(back.prefs.track_memory, session.prefs.track_memory);
+}
+
+/// **The real shape of `version_memory`, through the previous build.** Same walk as the track
+/// memory's: the array of stamped profile records this build writes goes through the platform codec
+/// and the PREVIOUS build's frozen parse, which carries the new key opaque and rewrites it byte for
+/// byte, keeps the credentials and today's keys intact; this build then reads back what it wrote.
+#[test]
+fn tier1_the_real_version_memory_shape_rides_through_the_previous_build() {
+    let mut session = household(2, 1);
+    add_version_memory(&mut session, 2, 3);
+    session.prefs.skip_interval = SkipInterval::Seconds30;
+    let (public, protected) = split_canonical(&session).unwrap();
+    let real = public.preferences["version_memory"].clone();
+    assert_eq!(real.as_array().map(Vec::len), Some(2), "{real}");
+    assert_eq!(real[0]["account"], json!(STAMP));
+    assert_eq!(real[0]["items"][0]["machine_id"].as_str().map(str::len), Some(64));
+    assert!(real[0]["items"][0]["media_id"].is_i64(), "the id is a JSON number: {real}");
+
+    let bytes = canonical(&public, 2_000).encode().expect("encode validates");
+    let decoded = state::CanonicalState::decode(&bytes, state::Flavor::Stable).expect("decode validates");
+    assert_eq!(decoded.public.preferences, public.preferences, "the codec keeps it byte for byte");
+
+    // the previous build
+    let old = v0::CanonicalSessionPreferences::parse(&decoded.public.preferences);
+    assert_eq!(old.extensions.keys().collect::<Vec<_>>(), ["version_memory"], "exactly the new key is opaque");
+    assert_eq!(old.extensions.get("version_memory"), Some(&real));
+    assert_eq!(old.skip_interval, SkipInterval::Seconds30);
+    assert_eq!(serde_json::to_value(&old).unwrap()["version_memory"], real, "its own rewrite keeps the value");
+
+    // this build
+    let joined = super::super::join_canonical(&decoded.public, &protected).expect("the credentials still open");
+    assert_eq!(joined.prefs.version_memory, session.prefs.version_memory);
+    assert_eq!(joined.account_token, session.account_token);
+    assert_eq!(joined.profiles.len(), 2);
+
+    // the legacy file
+    let file = serde_json::to_value(&session).unwrap();
+    assert_eq!(file["version_memory"], real);
+    let old: v0::Session = serde_json::from_value(file.clone()).expect("the previous build still reads the file");
+    assert_eq!(old.extensions.0.get("version_memory"), Some(&real));
+    assert_eq!(old.account_token, session.account_token);
+    assert_eq!(serde_json::to_value(&old).unwrap()["version_memory"], real);
+    let back: Session = serde_json::from_value(file).unwrap();
+    assert_eq!(back.prefs.version_memory, session.prefs.version_memory);
 }

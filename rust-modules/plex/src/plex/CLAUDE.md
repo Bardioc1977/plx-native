@@ -113,7 +113,7 @@ conservative choice) learn nothing. It lives in `Preferences::server_key_pins`, 
 `ProfileCreds`, which are cloned per profile), soft-parsed and skipped while empty.
 **It is in the PUBLIC preferences, so sign-out forgets it by an explicit rule, not with the
 credentials:** `Mutation::ClearTenure` retains `public.preferences` whole except the keys in
-`storage::state::ACCOUNT_BOUND_PREFERENCES` (the account's own lists, `server_key_pins` and `plaintext_consent`, issue #385, and every profile's remembered browsing and playback memory: `track_memory`, `subtitle_offsets`, `library_sorts` and `last_library`; read the constant for the current set), so sign-out — and "Delete all
+`storage::state::ACCOUNT_BOUND_PREFERENCES` (the account's own lists, `server_key_pins` and `plaintext_consent`, issue #385, and every profile's remembered browsing and playback memory: `track_memory`, `subtitle_offsets`, `version_memory`, `library_sorts` and `last_library`; read the constant for the current set), so sign-out — and "Delete all
 local data", which runs it first — leaves the stored record with no learned key, and the next account to sign in opens with none
 (`migration_tests::helper_signout_forgets_the_learned_server_keys_and_the_next_account_inherits_none`;
 for the answers, `helper_signout_forgets_the_plaintext_answers_and_signing_back_in_asks_again`).
@@ -494,7 +494,7 @@ a dead source is **absent** from Home and states itself in its own library secti
   at sign-out like every `ACCOUNT_BOUND = true` row in `prefs::DESCRIPTORS`, but their records carry no
   account stamp, so the one login that is not a sign-out, a stored session that could not be activated
   in `app/boot.rs`, would leave them to the next account: `replace_after_reauthentication_guarded_with_outcome`
-  clears both, and the Home pins and recent searches, when the login's owner identity (`owner_identity`, the roster admin's plex.tv id; never the token, which every sign-in mints anew) differs from the stored one or either is unknown), and the two memory-door lists `track_memory` and `subtitle_offsets`), flattened (`#[serde(flatten)] prefs`) into BOTH on-disk
+  clears both, and the Home pins and recent searches, when the login's owner identity (`owner_identity`, the roster admin's plex.tv id; never the token, which every sign-in mints anew) differs from the stored one or either is unknown), and the three memory-door lists `track_memory`, `subtitle_offsets` and `version_memory`), flattened (`#[serde(flatten)] prefs`) into BOTH on-disk
   forms — the legacy file's `Session` and the canonical preference record — declared before each
   form's own `extensions`, so the flatten takes its keys first and the unknown-key map still sees
   only keys nobody models. A new key of that kind is a `Preferences` field (its serde attributes
@@ -526,8 +526,9 @@ a dead source is **absent** from Home and states itself in its own library secti
   the table to the struct (T-fields), to platform's `ACCOUNT_BOUND_PREFERENCES` (T-account) and to
   each row's parse policy (T-parse), both ways; a field with no row, or a row with no field, fails
   there.
-  The two memory-door lists (`track_memory`: each profile's remembered audio and subtitle picks per
-  show, `prefs/track_memory.rs`; `subtitle_offsets`) have no `Copy` value and no whole-list accessor:
+  The three memory-door lists (`track_memory`: each profile's remembered audio and subtitle picks per
+  show, `prefs/track_memory.rs`; `subtitle_offsets`; `version_memory`: which `Media[]` version of an
+  item a profile chose, below) have no `Copy` value and no whole-list accessor:
   their markers implement `Row` only (not `ListRow`), and they are written only through
   `ProfileMemory::upsert_with`. `track_memory` is account-bound (no stamp, no write; a write prunes
   every other account's record), its entry strings are bounded (an over-long one reads as absent, a
@@ -569,6 +570,14 @@ a dead source is **absent** from Home and states itself in its own library secti
   replaces a sidecar on screen, and compares with what the landing SHOWS (read from the session after
   the sidecar restore, `settle_landing_selection`), not with the plan, which names no sidecar. Leaving
   Forced only is a remembered change even onto the very track it drew.
+  `version_memory` (`prefs/version_memory.rs`; `docs/version-selection-spec.md` section 4.3) is keyed
+  `(machine_id, ratingKey)` with the version's `Media.id` as the value (never its position: a scan can
+  reorder `Media[]`), is account-bound like `track_memory` (stamped, a stale stamp reads as nothing,
+  a write without one is refused), is capped at 128 entries a profile and 24 KiB a household by
+  eviction, shares `track_memory`'s key-string bounds through the one `drop_if_longer`, and
+  `forgets()` an entry whose id is not positive: picking the default version needs no record. It is
+  the document guard's LAST list to shed. It is read by `route::recalled_version` and written by
+  `route::remember_version` (the media door's `VERSION_MEMORY` mirror), never directly.
   `subtitle_offsets` is account-bound as well (since SO) under different rules: a record without a
   stamp is read as the signed-in account's own and is stamped at the list's next write
   (`MemoryEntry::ADOPTS_UNSTAMPED`), at the plex list a write with no account token is still
@@ -623,7 +632,8 @@ a dead source is **absent** from Home and states itself in its own library secti
   helper starts from; the sealed credentials are sized as the helper will seal them, `Seal`: ACL-only,
   keymanager, or whichever of the two is larger when a fallback is permitted) and, if it
   would not fit, sheds from the payload `track_memory`, then `subtitle_offsets`, then
-  `library_sorts` (`prefs::shed_memory`; the same oldest-from-the-largest-record rule as the
+  `library_sorts`, then `version_memory` (`prefs::shed_memory`; last, because losing a version pick
+  silently plays a different file; the same oldest-from-the-largest-record rule as the
   household budget), only as far as it needs, and logs `prefs: evicted <n> <list> entries to fit
   the 256 KiB document`. The live session keeps what the payload lost until the next load. It never
   refuses a write: with nothing sheddable left the platform still does, as before. The file backend

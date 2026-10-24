@@ -174,7 +174,7 @@ fn truncate_at_boundary(s: &mut String, max: usize) {
 }
 
 /// An over-long string is not stored at all: it reads as absent.
-fn drop_if_longer(s: &mut String, max: usize) {
+pub(super) fn drop_if_longer(s: &mut String, max: usize) {
     if s.len() > max {
         s.clear();
     }

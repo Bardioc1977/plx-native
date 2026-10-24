@@ -181,6 +181,10 @@ pub struct AuthContext {
 /// one item, naming a `machineIdentifier` and a ratingKey), `library_sorts` (how each library was
 /// last browsed) and `last_library` (the library each top tab opened in), the last two naming a
 /// server and a section.
+///
+/// `version_memory` is each profile's chosen version of an item (`plex::session::prefs::
+/// VersionMemoryEntry`: a `machineIdentifier`, a ratingKey and a `Media.id`), remembered per
+/// profile like `track_memory` and forgotten with the account that chose it.
 pub const ACCOUNT_BOUND_PREFERENCES: &[&str] = &[
     "server_key_pins",
     "plaintext_consent",
@@ -189,6 +193,7 @@ pub const ACCOUNT_BOUND_PREFERENCES: &[&str] = &[
     "subtitle_offsets",
     "library_sorts",
     "last_library",
+    "version_memory",
 ];
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1858,6 +1863,7 @@ mod tests {
     #[test]
     fn clear_tenure_forgets_the_track_memory() {
         assert!(ACCOUNT_BOUND_PREFERENCES.contains(&"track_memory"));
+        assert!(ACCOUNT_BOUND_PREFERENCES.contains(&"version_memory"));
         let state = initial();
         let setting = Mutation::UpdatePreferences {
             public: PublicPayload {
@@ -1865,6 +1871,8 @@ mod tests {
                     "language": "be", "auto_sign_in": true,
                     "track_memory": [{"user": "", "account": "0011223344556677", "items": [
                         {"machine_id": "m", "show_rk": "42", "audio": {"lang": "eng"}}]}],
+                    "version_memory": [{"user": "", "account": "0011223344556677", "items": [
+                        {"machine_id": "m", "rating_key": "42", "media_id": 7000001}]}],
                 }),
                 ..PublicPayload::default()
             },
@@ -1900,7 +1908,7 @@ mod tests {
     /// The install-wide keys beside them stay.
     #[test]
     fn clear_tenure_removes_offsets_library_views_and_last_library() {
-        for key in ["subtitle_offsets", "library_sorts", "last_library"] {
+        for key in ["subtitle_offsets", "library_sorts", "last_library", "version_memory"] {
             assert!(ACCOUNT_BOUND_PREFERENCES.contains(&key), "{key} is account-bound");
         }
         let state = initial();
@@ -1912,6 +1920,8 @@ mod tests {
                         {"machine_id": "m", "rating_key": "9", "offset_ms": -250}]}],
                     "library_sorts": [{"user": "", "libs": [{"machine_id": "m", "key": 3, "sort": "plays"}]}],
                     "last_library": [{"user": "", "libs": [{"kind": "movie", "machine_id": "m", "key": 3}]}],
+                    "version_memory": [{"user": "", "account": "0011223344556677", "items": [
+                        {"machine_id": "m", "rating_key": "9", "media_id": 7000001}]}],
                 }),
                 ..PublicPayload::default()
             },

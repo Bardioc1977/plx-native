@@ -664,8 +664,9 @@ pub(super) fn projected_document(
 /// projected document is measured with the platform's own counting rule (`state::logical_size`;
 /// the loaded envelope, ledger and any pending refresh are in hand, and future preference keys
 /// preserved above count), and if it would not fit, per-profile memory is shed from the payload —
-/// `track_memory`, then `subtitle_offsets`, then `library_sorts`, each oldest-first from the record
-/// holding the most entries (`prefs::shed_memory`) — only as far as the document needs.
+/// `track_memory`, then `subtitle_offsets`, then `library_sorts`, then `version_memory` (last: losing a
+/// version pick silently plays a different file), each oldest-first from the record holding the
+/// most entries (`prefs::shed_memory`) — only as far as the document needs.
 ///
 /// Returns the lists that lost entries and how many. Nothing is ever refused here: if everything
 /// sheddable is gone and the document still does not fit, the write goes out as it would have and
@@ -689,13 +690,18 @@ pub(super) fn fit_document(
 }
 
 /// The one line that reports what a write is about to put in DB8: the whole projected document
-/// and the share `track_memory` holds of it, both in the platform's logical bytes, against the
-/// cap. It is what the device check reads to see how close memory sits to the budget; the write's
-/// own latency is the line `session.rs` logs after the helper answers.
+/// and the share each memory list the guard may shed holds of it (`track_memory` first, then the
+/// others in shed order), all in the platform's logical bytes, against the cap. It is what the
+/// device check reads to see how close memory sits to the budget; the write's own latency is the
+/// line `session.rs` logs after the helper answers.
 pub(super) fn document_size_line(total: usize, preferences: &serde_json::Value) -> String {
-    let track_memory = preferences.get("track_memory").map_or(0, state::logical_size);
+    let share = |key: &str| preferences.get(key).map_or(0, state::logical_size);
     format!(
-        "session: db8 document bytes={total} track_memory={track_memory} cap={}",
+        "session: db8 document bytes={total} track_memory={} subtitle_offsets={} library_sorts={} version_memory={} cap={}",
+        share("track_memory"),
+        share("subtitle_offsets"),
+        share("library_sorts"),
+        share("version_memory"),
         state::MAX_LOGICAL_BYTES
     )
 }
@@ -1856,17 +1862,23 @@ mod document_size_line_tests {
     use super::*;
 
     #[test]
-    fn the_line_names_the_document_the_track_memory_share_and_the_cap() {
-        let memory = serde_json::json!([{"show": "x", "audio": "eng"}]);
-        let preferences = serde_json::json!({ "track_memory": memory, "quality": "original" });
+    fn the_line_names_the_document_every_memory_share_and_the_cap() {
+        let shares = [
+            ("track_memory", serde_json::json!([{"show": "x", "audio": "eng"}])),
+            ("subtitle_offsets", serde_json::json!([{"user": "u", "items": [1, 2, 3]}])),
+            ("library_sorts", serde_json::json!([{"lib": "movie"}])),
+            ("version_memory", serde_json::json!([{"user": "u", "items": [{"media_id": 7}]}])),
+        ];
+        let mut preferences = serde_json::json!({ "quality": "original" });
+        for (key, value) in &shares {
+            preferences[*key] = value.clone();
+        }
         let line = document_size_line(12_345, &preferences);
+        let sizes: Vec<String> =
+            shares.iter().map(|(key, value)| format!("{key}={}", state::logical_size(value))).collect();
         assert_eq!(
             line,
-            format!(
-                "session: db8 document bytes=12345 track_memory={} cap={}",
-                state::logical_size(&memory),
-                state::MAX_LOGICAL_BYTES
-            )
+            format!("session: db8 document bytes=12345 {} cap={}", sizes.join(" "), state::MAX_LOGICAL_BYTES)
         );
         assert!(!line.contains("eng") && !line.contains("original"), "sizes only, never content");
     }
@@ -1874,7 +1886,9 @@ mod document_size_line_tests {
     #[test]
     fn a_document_without_memory_reports_zero_rather_than_omitting_the_field() {
         let line = document_size_line(900, &serde_json::json!({}));
-        assert!(line.contains("track_memory=0"), "{line}");
+        for key in ["track_memory=0", "subtitle_offsets=0", "library_sorts=0", "version_memory=0"] {
+            assert!(line.contains(key), "{key}: {line}");
+        }
     }
 }
 

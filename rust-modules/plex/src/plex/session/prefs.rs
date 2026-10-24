@@ -5,8 +5,8 @@
 //! falling back to the frozen install-wide key beside it, see [`profile_prefs`]), and since A5
 //! every other preference key of the
 //! session (`auto_sign_in`, `last_hero_blur`, `ui_resolution`, `hold_hint_taught`, the two Account-scope lists, the
-//! two per-profile library lists and the two memory-door lists, `track_memory` and
-//! `subtitle_offsets`), that used to be spelled, field for field, in
+//! two per-profile library lists and the three memory-door lists, `track_memory`,
+//! `subtitle_offsets` and `version_memory`), that used to be spelled, field for field, in
 //! [`Session`] AND in the canonical (DB8) preference record: the struct field, the manual
 //! `Default`, the copy in and out of the canonical form, the getter and a `with_<x>` builder, ten
 //! sites per setting. The one key that remains outside it is `language` (its two forms differ on
@@ -33,8 +33,9 @@
 //! remembered audio and subtitle picks per show ([`TrackMemoryEntry`], in the memory door below).
 //! It is a [`Row`] only, so it has no whole-list `items_mut`: its writes go through
 //! [`ProfileMemory::upsert_with`], which merges, prunes and budgets, never through a `Vec`
-//! assignment. `subtitle_offsets` is the other tenant of the door and is declared the same way
-//! ([`SubtitleOffsetsPref`]).
+//! assignment. `subtitle_offsets` and `version_memory` (which version of an item a profile chose
+//! to play, by `Media.id`) are the other tenants of the door and are declared the same way
+//! ([`SubtitleOffsetsPref`], [`VersionMemoryPref`]).
 use super::{
     DeckPress, DirectPlayMode, HdrOverlayBrightness, LastLibrary, LibraryViews, NextEpisodeMode, OpaqueExtensions, PlaintextConsent,
     HoldHintTaught, PlaybackQuality, ServerKeyPin, Session, SkipInterval, SubtitleOffsetEntry, SubtitleOffsets, SubtitlePosition,
@@ -51,6 +52,9 @@ mod track_memory;
 mod track_memory_document_tests;
 #[cfg(test)]
 mod track_memory_tests;
+mod version_memory;
+#[cfg(test)]
+mod version_memory_tests;
 pub use profile_prefs::{
     effective, own_prefs, persist_profile_pref, put_own, stored_effective, ProfilePrefs, ProfilePrefsPref,
     ProfilePrefsRecord, ProfileSetting, ProfileWrite,
@@ -58,6 +62,7 @@ pub use profile_prefs::{
 pub use track_memory::{
     AudioMemo, SubtitleMemo, SubtitleTrackMemo, TrackMemoryEntry, TrackMemoryPref, CAP as TRACK_MEMORY_CAP,
 };
+pub use version_memory::{VersionMemoryEntry, VersionMemoryPref, CAP as VERSION_MEMORY_CAP};
 
 /// Every preference key but `language`, flattened into [`Session`] and into
 /// the canonical preference record. Defaults are each type's own `Default`, which A0 pins as equal
@@ -334,6 +339,16 @@ pub struct Preferences {
     /// that never tuned a subtitle's timing serializes exactly as it did before the field existed.
     #[serde(default, deserialize_with = "super::de_soft_vec", skip_serializing_if = "Vec::is_empty")]
     pub subtitle_offsets: Vec<SubtitleOffsets>,
+    /// **Which version of an item each profile chose to play**, per profile, keyed by (machine id,
+    /// ratingKey) with the version's `Media.id` as the value — see [`VersionMemoryEntry`]. A
+    /// [`ProfileList`] per profile, soft-parsed per element so one junk record or entry costs only
+    /// itself, and skipped while empty so a session that never chose a version serializes exactly
+    /// as it did before the field existed. Account-bound like `track_memory`: the record carries the
+    /// account stamp, a stamp that is not the signed-in account's reads as nothing, and sign-out
+    /// drops the whole key (`storage::state::ACCOUNT_BOUND_PREFERENCES`). Written only through
+    /// [`ProfileMemory::upsert_with`]. The document guard sheds it LAST (`prefs::shed_memory`).
+    #[serde(default, deserialize_with = "super::de_soft_vec", skip_serializing_if = "Vec::is_empty")]
+    pub version_memory: Vec<ProfileList<VersionMemoryEntry>>,
     // ---- per-profile player settings ----
     /// **Each profile's own value of the ten player settings and of hero trailer autoplay** — see [`ProfilePrefsRecord`] and the
     /// module doc of `profile_prefs`. A record per (profile, account stamp), soft-parsed per element so one junk
@@ -349,8 +364,8 @@ pub struct Preferences {
 /// `hold_hint_taught` and `last_hero_blur` are `Install`; the two lists sign-out clears are `Account`; the ten player
 /// scalars, the hero trailer autoplay switch (each with its install-wide key as the [`Fallback`]) and
 /// the library lists are `Profile`;
-/// `track_memory` is `PerShow` and `subtitle_offsets` is `PerItem`. Sign-out clears every row that
-/// is account-bound, whatever its scope.
+/// `track_memory` is `PerShow`; `subtitle_offsets` and `version_memory` are `PerItem`. Sign-out
+/// clears every row that is account-bound, whatever its scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     /// The television: shared by every profile, kept across sign-out, never account-bound.
@@ -623,6 +638,7 @@ pub const DESCRIPTORS: &[Descriptor] = &[
     // The memory-door tenants (lists with no value API).
     Descriptor::of::<TrackMemoryPref>(),
     Descriptor::of::<SubtitleOffsetsPref>(),
+    Descriptor::of::<VersionMemoryPref>(),
 ];
 
 impl Session {
@@ -642,13 +658,14 @@ impl Session {
 // ---- the memory door: per-profile, per-item lists ---------------------------------------------
 
 /// **One profile's remembered entries of one kind**, oldest first: the record shape a per-profile
-/// list shares (`subtitle_offsets` and `track_memory`). `{user, items, extensions}` is
-/// exactly what `subtitle_offsets` was on disk before the door, so a file is read and written
+/// list shares (`subtitle_offsets`, `track_memory` and `version_memory`). `{user, items, extensions}`
+/// is exactly what `subtitle_offsets` was on disk before the door, so a file is read and written
 /// byte for byte as before; `account` is the stamp of an account-bound list and is skipped while
-/// empty. `subtitle_offsets` and `track_memory` are the two tenants, and both are account-bound, so
-/// every record they write carries the stamp. A `subtitle_offsets` file written before it was bound
-/// holds records with none, which the list adopts ([`MemoryEntry::ADOPTS_UNSTAMPED`]) and so stamps
-/// at its next write; a `track_memory` record without one is nobody's.
+/// empty. `subtitle_offsets`, `track_memory` and `version_memory` are the three tenants, and all are
+/// account-bound, so every record they write carries the stamp. A `subtitle_offsets` file written
+/// before it was bound holds records with none, which the list adopts
+/// ([`MemoryEntry::ADOPTS_UNSTAMPED`]) and so stamps at its next write; a `track_memory` or
+/// `version_memory` record without one is nobody's.
 ///
 /// The list as a whole is a `Vec<ProfileList<E>>` held in a [`Session`] field and soft-parsed per
 /// element, so one bad profile record drops only that record; [`ProfileMemory`] is the operations
@@ -1063,6 +1080,11 @@ pub(super) fn shed_memory(
         shed_list::<ProfileList<SubtitleOffsetEntry>>(object, "subtitle_offsets", freed_total.get(), &mut still_over),
     );
     note("library_sorts", shed_list::<super::LibraryViews>(object, "library_sorts", freed_total.get(), &mut still_over));
+    // Last: a lost version pick silently plays a different file, where a lost sort costs one menu.
+    note(
+        "version_memory",
+        shed_list::<ProfileList<VersionMemoryEntry>>(object, "version_memory", freed_total.get(), &mut still_over),
+    );
     shed
 }
 
