@@ -860,13 +860,19 @@ impl<H: crate::registry::PlayerLike + crate::registry::MetadataLike> Machine<H> 
                             // the menu never puts a query to the server's subtitle agent. `Open` is
                             // idempotent for the same item, so re-sending it until the store's view
                             // catches up is harmless.
-                            let ours = view.item().is_some_and(|item| plx_plex::plex::same_item(item, (sid, &rk)));
-                            if p.wants_search() && !ours {
-                                let lang = search_default_lang(ps, H::metadata(cx));
+                            // The search outlives a playback, so the gate also asks whether it is
+                            // scoped to the PLAYING Part: the same item played as another version
+                            // must move the scope (the install poll reads that Part only).
+                            let part_id = plx_media::route::cur_part_id(ps);
+                            if p.wants_search() && view.wants_open(sid, &rk, part_id) {
+                                // a re-open of the item we already search keeps the language the
+                                // viewer is on; only a first open takes the default
+                                let ours = view.item().is_some_and(|item| plx_plex::plex::same_item(item, (sid, &rk)));
+                                let lang = if ours { view.lang().to_owned() } else { search_default_lang(ps, H::metadata(cx)) };
                                 fx.push(Fx::App(AppFx::Store(
                                     plx_data::stores::StoreId::SubtitleSearch,
                                     plx_data::stores::StoreCmd::SubtitleSearch(
-                                        plx_data::subsearch::SubSearchCmd::Open { sid, rk: rk.clone(), lang },
+                                        plx_data::subsearch::SubSearchCmd::Open { sid, rk: rk.clone(), lang, part_id },
                                     ),
                                 )));
                             }

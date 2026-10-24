@@ -132,8 +132,11 @@ impl DownloadPhase {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubSearchCmd {
     /// Open (or keep) the search for one item. Idempotent for the same item and language, so the
-    /// menu re-opening shows the answer already paid for instead of searching again.
-    Open { sid: ServerId, rk: String, lang: String },
+    /// menu re-opening shows the answer already paid for instead of searching again. `part_id` is
+    /// the PLAYING `Part` (the player's `cur_part_id`; 0 = unknown): on an item with several
+    /// versions the reads that tell a freshly installed stream from the old ones are scoped to it,
+    /// so another version's stream can never be adopted as the one this download created.
+    Open { sid: ServerId, rk: String, lang: String, part_id: i64 },
     /// Search again in another language. Refused while a download is busy.
     SetLanguage(String),
     /// Install hit `hit` of the result set published under generation `gen`. Refused when that set
@@ -150,6 +153,8 @@ pub enum SubSearchCmd {
 struct Open {
     sid: ServerId,
     rk: String,
+    /// The Part the install poll reads on a multi-version item (0 = every Part).
+    part_id: i64,
     /// The folded 2-letter code; empty only when the fold failed.
     lang: String,
     status: SearchStatus,
@@ -159,8 +164,8 @@ struct Open {
 }
 
 impl Open {
-    fn new(sid: ServerId, rk: String, lang: &str) -> Self {
-        let mut open = Open { sid, rk, lang: String::new(), status: SearchStatus::Searching,
+    fn new(sid: ServerId, rk: String, part_id: i64, lang: &str) -> Self {
+        let mut open = Open { sid, rk, part_id, lang: String::new(), status: SearchStatus::Searching,
             failure: None, hits: Vec::new(), download: DownloadPhase::None };
         open.search_for(lang);
         open
@@ -223,6 +228,19 @@ impl<'a> SubSearchView<'a> {
     pub fn lang(self) -> &'a str { self.open.map_or("", |o| &o.lang) }
     pub fn download(self) -> Option<&'a DownloadPhase> { self.open.map(|o| &o.download) }
     pub fn item(self) -> Option<(ServerId, &'a str)> { self.open.map(|o| (o.sid, o.rk.as_str())) }
+    /// The Part the install poll reads (0 = every Part); 0 when nothing is open.
+    pub fn part_id(self) -> i64 { self.open.map_or(0, |o| o.part_id) }
+
+    /// **Must the player send [`SubSearchCmd::Open`] for the item now playing?**
+    ///
+    /// Yes when the open search is for another item, and also when it is for this item but scoped
+    /// to another Part: the search outlives a playback (nothing closes it), so playing the same
+    /// item as another version leaves the old version's Part standing, and the download's
+    /// before/after reads would then hit the wrong Part. `Open` for the same item keeps the answer
+    /// already paid for.
+    pub fn wants_open(self, sid: ServerId, rk: &str, part_id: i64) -> bool {
+        !self.item().is_some_and(|item| plx_plex::plex::same_item(item, (sid, rk))) || self.part_id() != part_id
+    }
     /// The generation a [`SubSearchCmd::Download`] must quote.
     pub fn gen(self) -> u32 { self.gen }
 
@@ -290,15 +308,18 @@ impl SubSearchState {
 
     pub fn run(&mut self, adapter: &SubSearchAdapter, cmd: SubSearchCmd) -> bool {
         match cmd {
-            SubSearchCmd::Open { sid, rk, lang } => {
-                if let Some(open) = self.open.as_ref()
+            SubSearchCmd::Open { sid, rk, lang, part_id } => {
+                if let Some(open) = self.open.as_mut()
                     .filter(|o| plx_plex::plex::same_item((o.sid, &o.rk), (sid, &rk))) {
-                    // the same item: keep the answer unless the language really changed
+                    // the same item: keep the answer unless the language really changed (the
+                    // candidates belong to the item, so a different playing Part keeps them; only
+                    // the install poll's scope follows it)
+                    open.part_id = part_id;
                     if fold_language(&lang).unwrap_or_default() == open.lang { return false; }
                     return self.run(adapter, SubSearchCmd::SetLanguage(lang));
                 }
                 self.supersede(adapter);
-                self.open = Some(Open::new(sid, rk, &lang));
+                self.open = Some(Open::new(sid, rk, part_id, &lang));
                 true
             }
             SubSearchCmd::SetLanguage(lang) => {
@@ -362,8 +383,10 @@ impl SubSearchState {
             return Some(Work::Search { lang: open.lang.clone() });
         }
         match &open.download {
-            DownloadPhase::Sending { hit } => Some(Work::Download { key: open.hits[*hit].key.clone() }),
-            DownloadPhase::Waiting { .. } => Some(Work::Refresh),
+            DownloadPhase::Sending { hit } => {
+                Some(Work::Download { key: open.hits[*hit].key.clone(), part_id: open.part_id })
+            }
+            DownloadPhase::Waiting { .. } => Some(Work::Refresh { part_id: open.part_id }),
             _ => None,
         }
     }
@@ -483,8 +506,10 @@ pub fn identify(rows: &[StreamRow], before: &[i64], picked_title: &str) -> Optio
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Work {
     Search { lang: String },
-    Download { key: String },
-    Refresh,
+    /// `part_id` scopes the before-read (see [`SubSearchCmd::Open`]).
+    Download { key: String, part_id: i64 },
+    /// `part_id` scopes the re-read (see [`SubSearchCmd::Open`]).
+    Refresh { part_id: i64 },
 }
 
 impl Work {
@@ -493,7 +518,7 @@ impl Work {
         match self {
             Work::Search { .. } => Landing::Search(Err(SearchFailure::Transport)),
             Work::Download { .. } => Landing::Download(Err(false)),
-            Work::Refresh => Landing::Streams(None),
+            Work::Refresh { .. } => Landing::Streams(None),
         }
     }
 }
@@ -594,9 +619,9 @@ fn run_job(client: &'static Client, rk: &str, work: Work) -> Landing {
                 SubtitleSearchOutcome::Transport => Err(SearchFailure::Transport),
             })
         }
-        Work::Download { key } => {
+        Work::Download { key, part_id } => {
             // the BEFORE read: without it a new stream could never be told from an old one
-            let Some(before) = subtitle_rows(client, rk) else { return Landing::Download(Err(false)) };
+            let Some(before) = subtitle_rows(client, rk, part_id) else { return Landing::Download(Err(false)) };
             let before = before.iter().map(|r| r.id).collect();
             Landing::Download(match client.add_subtitle(rk, &key) {
                 SubtitleAddOutcome::Ok => Ok(before),
@@ -605,18 +630,31 @@ fn run_job(client: &'static Client, rk: &str, work: Work) -> Landing {
                 | SubtitleAddOutcome::Transport => Err(false),
             })
         }
-        Work::Refresh => Landing::Streams(subtitle_rows(client, rk)),
+        Work::Refresh { part_id } => Landing::Streams(subtitle_rows(client, rk, part_id)),
     }
 }
 
-/// The item's subtitle streams across every Media/Part, or `None` when the read failed.
-fn subtitle_rows(client: &Client, rk: &str) -> Option<Vec<StreamRow>> {
+/// The item's subtitle streams, or `None` when the read failed. See [`stream_rows`] for `part_id`.
+fn subtitle_rows(client: &Client, rk: &str, part_id: i64) -> Option<Vec<StreamRow>> {
     let item = client.metadata(rk)?;
-    Some(item.media.iter().flat_map(|m| &m.part).flat_map(|p| &p.stream)
+    Some(stream_rows(&item, part_id))
+}
+
+/// The pure half of [`subtitle_rows`], so the scoping is testable without a server.
+///
+/// An item with several versions (`Media`) lists every version's streams side by side, and
+/// [`identify`] would adopt another version's new stream as ours, so there `part_id` keeps only the
+/// streams of that Part. A one-version item (stacked or not) and `part_id == 0` (unknown) read
+/// every Part, as before.
+pub(crate) fn stream_rows(item: &plx_plex::plex::Metadata, part_id: i64) -> Vec<StreamRow> {
+    let scoped = part_id != 0 && item.media.len() > 1;
+    item.media.iter().flat_map(|m| &m.part)
+        .filter(|p| !scoped || p.id == part_id)
+        .flat_map(|p| &p.stream)
         .filter(|s| s.stream_type == 3)
         .map(|s| StreamRow { id: s.id, key: s.key.clone(), codec: s.codec.clone(),
             language_code: s.language_code.clone(), title: s.title.clone() })
-        .collect())
+        .collect()
 }
 
 /// Project the agent's rows into hits, best score first. The sort is STABLE, so the server's own
@@ -694,7 +732,7 @@ mod tests {
         let adapter = Arc::new(SubSearchAdapter::default());
         let mut state = SubSearchState::default();
         assert!(state.run(&adapter, SubSearchCmd::Open {
-            sid: ServerId::from_raw(1), rk: "506548".into(), lang: lang.into() }));
+            sid: ServerId::from_raw(1), rk: "506548".into(), lang: lang.into(), part_id: 0 }));
         (state, adapter)
     }
 
@@ -762,13 +800,98 @@ mod tests {
         assert_eq!(state.work_for_test(), Some(Work::Search { lang: "nl".into() }));
     }
 
+    fn open_cmd(rk: &str, lang: &str, part_id: i64) -> SubSearchCmd {
+        SubSearchCmd::Open { sid: ServerId::from_raw(1), rk: rk.into(), lang: lang.into(), part_id }
+    }
+
+    /// One `Media` with one `Part` (id `part`) carrying the subtitle streams `subs`.
+    fn media(part: i64, subs: &[i64]) -> plx_plex::plex::Media {
+        plx_plex::plex::Media {
+            part: vec![plx_plex::plex::MediaPart {
+                id: part,
+                stream: subs.iter().map(|&id| plx_plex::plex::Stream {
+                    id, stream_type: 3, key: format!("/library/streams/{id}"), codec: "srt".into(),
+                    ..Default::default()
+                }).collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn ids(rows: &[StreamRow]) -> Vec<i64> { rows.iter().map(|r| r.id).collect() }
+
+    /// **Regression (U3, version delta):** an item with several versions lists every version's
+    /// streams side by side, and a subtitle installed on the PLAYING version must not be confused
+    /// with another version's new stream. Scoped to the playing Part, the other version's stream
+    /// is invisible to both reads, so `identify` adopts nothing from it; a one-version item
+    /// (stacked or not) keeps the all-Parts read, and so does an unknown Part (0).
+    #[test]
+    fn stream_rows_are_scoped_to_the_playing_part() {
+        let before = plx_plex::plex::Metadata { media: vec![media(100, &[1]), media(200, &[2])], ..Default::default() };
+        let after = plx_plex::plex::Metadata { media: vec![media(100, &[1]), media(200, &[2, 3])], ..Default::default() };
+
+        let scoped_before = stream_rows(&before, 100);
+        assert_eq!(ids(&scoped_before), vec![1], "only the playing version's streams");
+        let scoped_after = stream_rows(&after, 100);
+        assert_eq!(
+            identify(&scoped_after, &ids(&scoped_before), ""), None,
+            "another version's new stream is not the one this download created");
+        // the playing version's own new stream is found
+        let mine = plx_plex::plex::Metadata { media: vec![media(100, &[1, 4]), media(200, &[2])], ..Default::default() };
+        assert_eq!(identify(&stream_rows(&mine, 100), &[1], "").map(|s| s.id), Some(4));
+        // unknown Part: every version, as before
+        assert_eq!(ids(&stream_rows(&after, 0)), vec![1, 2, 3]);
+        // a one-version item is never scoped, whatever Part id the player quotes
+        let one = plx_plex::plex::Metadata { media: vec![media(100, &[1, 2])], ..Default::default() };
+        assert_eq!(ids(&stream_rows(&one, 999)), vec![1, 2]);
+    }
+
+    /// **The scope follows the playing Part.** The search outlives a playback, so playing the same
+    /// item as another version re-sends `Open` with the new Part: it updates the scope without
+    /// searching again (the hits stay, nothing is superseded), and both the download's before-read
+    /// and the install poll then name the new Part.
+    #[test]
+    fn a_same_item_open_with_another_part_moves_the_scope_and_keeps_the_answer() {
+        let (mut state, adapter) = ready(vec![hit("/library/streams/2", "Rel", 5)]);
+        assert_eq!(state.view().part_id(), 0);
+        assert!(!state.run(&adapter, open_cmd("506548", "nl", 36_099)), "no change a viewer can see");
+        assert_eq!(state.view().part_id(), 36_099);
+        assert_eq!(state.view().hits().len(), 1, "the paid-for answer stays");
+        assert_eq!(state.view().status(), SearchStatus::Ready);
+
+        let gen = state.generation();
+        assert!(state.run(&adapter, SubSearchCmd::Download { gen, hit: 0 }));
+        assert_eq!(state.work_for_test(),
+            Some(Work::Download { key: "/library/streams/2".into(), part_id: 36_099 }));
+        state.apply_for_test(Landing::Download(Ok(vec![1])));
+        assert!(!state.run(&adapter, open_cmd("506548", "nl", 36_013)), "even mid-install");
+        assert_eq!(state.work_for_test(), Some(Work::Refresh { part_id: 36_013 }), "the poll reads the playing Part");
+        // the language the viewer is on is not reset by the re-open that carries it
+        assert!(!state.run(&adapter, open_cmd("506548", state.view().lang(), 36_013)));
+    }
+
+    /// **The player's gate.** `Open` goes out for another item AND for this item on another Part;
+    /// for this item on the same Part it does not (the store already answers).
+    #[test]
+    fn the_player_reopens_for_another_item_or_another_part_of_this_one() {
+        let (state, _adapter) = opened("nl");
+        let sid = ServerId::from_raw(1);
+        let view = state.view();
+        assert!(!view.wants_open(sid, "506548", 0), "same item, same Part: nothing to send");
+        assert!(view.wants_open(sid, "506548", 36_099), "same item played as another version");
+        assert!(view.wants_open(sid, "other", 0), "another item");
+        assert!(view.wants_open(ServerId::from_raw(2), "506548", 0), "the share's item with the same key");
+        assert!(SubSearchView::IDLE.wants_open(sid, "506548", 0), "nothing open");
+    }
+
     /// Re-opening the menu on the same item and language keeps the answer already paid for.
     #[test]
     fn reopening_the_same_item_keeps_the_answer() {
         let (mut state, adapter) = ready(vec![hit("/library/streams/1", "a", 5)]);
         let gen = state.generation();
         assert!(!state.run(&adapter, SubSearchCmd::Open {
-            sid: ServerId::from_raw(1), rk: "506548".into(), lang: "nld".into() }));
+            sid: ServerId::from_raw(1), rk: "506548".into(), lang: "nld".into(), part_id: 0 }));
         assert_eq!(state.generation(), gen);
         assert_eq!(state.view().hits().len(), 1);
     }
@@ -847,7 +970,7 @@ mod tests {
         state.apply_for_test(Landing::Search(Ok(vec![hit("/library/streams/2", "b", 5)])));
         assert!(!state.run(&adapter, SubSearchCmd::Download { gen: stale, hit: 0 }));
         assert!(state.run(&adapter, SubSearchCmd::Download { gen: state.generation(), hit: 0 }));
-        assert_eq!(state.work_for_test(), Some(Work::Download { key: "/library/streams/2".into() }));
+        assert_eq!(state.work_for_test(), Some(Work::Download { key: "/library/streams/2".into(), part_id: 0 }));
     }
 
     /// One download at a time, and no language change while one installs.
@@ -869,7 +992,7 @@ mod tests {
         state.run(&adapter, SubSearchCmd::Download { gen: state.generation(), hit: 0 });
         state.apply_for_test(Landing::Download(Ok(vec![1884886, 1884899])));
         assert_eq!(state.retry_for_test(), POLL_FRAMES, "no read straight after the PUT");
-        assert_eq!(state.work_for_test(), Some(Work::Refresh));
+        assert_eq!(state.work_for_test(), Some(Work::Refresh { part_id: 0 }));
 
         // first read: not there yet (what the probe actually saw)
         state.apply_for_test(Landing::Streams(Some(vec![row(1884886, ""), row(1884899, "")])));

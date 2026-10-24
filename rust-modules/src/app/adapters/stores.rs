@@ -1156,7 +1156,7 @@ mod tests {
         plx_plex::plex::reset_servers_for_test();
         let sid = plx_plex::plex::register_for_test("runner", "127.0.0.1", 9, "t", "cid");
         let mut store = SubSearchStore::default();
-        assert!(store.run(SubSearchCmd::Open { sid, rk: "506548".into(), lang: "nl".into() }));
+        assert!(store.run(SubSearchCmd::Open { sid, rk: "506548".into(), lang: "nl".into(), part_id: 0 }));
         store.pump(plx_machine::landgate::fixture_gate(), &registry_keys());
         let mut jobs = store.take_jobs();
         assert_eq!(jobs.len(), 1, "one open search, one request");
@@ -1273,7 +1273,7 @@ mod tests {
         let sid = plx_plex::plex::register_for_test("runner", "127.0.0.1", 9, "t", "cid");
         let mut bridge = Bridge::for_test(|| 0);
 
-        assert!(bridge.subsearch_run(SubSearchCmd::Open { sid, rk: "506548".into(), lang: "nl".into() }));
+        assert!(bridge.subsearch_run(SubSearchCmd::Open { sid, rk: "506548".into(), lang: "nl".into(), part_id: 0 }));
         bridge.assert_no_store_jobs_left_for_test();
         bridge.subsearch_pump();
         bridge.assert_no_store_jobs_left_for_test();

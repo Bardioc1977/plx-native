@@ -31,7 +31,7 @@ impl Rig {
     fn opened(lang: &str) -> Self {
         let adapter = Arc::new(SubSearchAdapter::default());
         let mut state = SubSearchState::default();
-        assert!(state.run(&adapter, SubSearchCmd::Open { sid: sid(), rk: "506548".into(), lang: lang.into() }));
+        assert!(state.run(&adapter, SubSearchCmd::Open { sid: sid(), rk: "506548".into(), lang: lang.into(), part_id: 0 }));
         assert!(state.jobs.is_empty(), "a command emits no job: the request is the pump's");
         Rig { state, adapter }
     }
@@ -95,13 +95,13 @@ fn each_answer_makes_the_next_pump_emit_the_next_request() {
 
     assert!(rig.run(SubSearchCmd::Download { gen: generation, hit: 0 }));
     plx_machine::assert_fx!(rig.pump(&holding()),
-        [rig.job(generation, Work::Download { key: "/library/streams/1".into() })]);
+        [rig.job(generation, Work::Download { key: "/library/streams/1".into(), part_id: 0 })]);
 
     // accepted: the install is asynchronous, so the poll waits a beat before it reads
     rig.adapter.land_for_test(generation, Landing::Download(Ok(vec![10])));
     plx_machine::assert_fx!(rig.pump(&holding()), []);
     for _ in 1..POLL_FRAMES { plx_machine::assert_fx!(rig.pump(&holding()), []); }
-    plx_machine::assert_fx!(rig.pump(&holding()), [rig.job(generation, Work::Refresh)]);
+    plx_machine::assert_fx!(rig.pump(&holding()), [rig.job(generation, Work::Refresh { part_id: 0 })]);
 }
 
 /// A server that holds no client has nothing to ask: no job, no claim, and the next attempt is
@@ -205,7 +205,7 @@ fn an_answer_applies_to_its_own_search_and_a_superseded_one_is_dropped() {
 fn a_job_emitted_before_a_reset_answers_into_the_retired_adapter() {
     let mut store = SubSearchStore::default();
     assert!(!store.has_jobs());
-    assert!(store.run(SubSearchCmd::Open { sid: sid(), rk: "506548".into(), lang: "nl".into() }));
+    assert!(store.run(SubSearchCmd::Open { sid: sid(), rk: "506548".into(), lang: "nl".into(), part_id: 0 }));
     assert!(!store.has_jobs(), "a command emits no job");
     store.pump(&Gate::default(), &holding());
     assert!(store.has_jobs());
@@ -217,7 +217,7 @@ fn a_job_emitted_before_a_reset_answers_into_the_retired_adapter() {
 
     store.run(SubSearchCmd::Reset);
     assert_ne!(port, store.subsearch_port(), "the job holds the retired adapter's port");
-    assert!(store.run(SubSearchCmd::Open { sid: sid(), rk: "506548".into(), lang: "nl".into() }));
+    assert!(store.run(SubSearchCmd::Open { sid: sid(), rk: "506548".into(), lang: "nl".into(), part_id: 0 }));
 
     port.done(job.addr, SubSearchAnswer(Landing::Search(Ok(vec![]))));
     assert!(!store.adapter_for_test().has_mail_for_test(), "the replacement's landing never sees the answer");
