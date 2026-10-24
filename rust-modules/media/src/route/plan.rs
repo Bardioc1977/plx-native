@@ -1380,6 +1380,10 @@ pub struct Plan {
     /// The played version's `mediaIndex`: 0 for the default, else the picked version's position
     /// in the item this resolve fetched. `part_id` and the source codecs are that version's too.
     pub media_index: usize,
+    /// The played version's own length in ms, for the resume clamp at the landing (`pump_play`);
+    /// 0 = unknown, and always 0 for a default play (the page judged that resume against its own
+    /// item). Set only when a picked version landed.
+    pub played_dur_ms: i64,
     pub pq_id: String,
     pub pq_item_id: String,
     pub machine_id: String, // "" = leave the cached one alone
@@ -1625,6 +1629,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
     plan.part = part.to_string();
     if let Some(v) = played.as_ref() {
         plan.media_index = v.index;
+        plan.played_dur_ms = v.dur_ms;
         plan.part_id = part_id_of(part);
         plan.src_vcodec = vcodec.to_string();
         plan.src_acodec = acodec.to_string();

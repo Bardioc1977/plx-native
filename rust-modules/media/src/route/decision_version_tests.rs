@@ -502,3 +502,56 @@ fn a_landing_names_the_part_that_plays_and_leaves_the_request_alone() {
         });
     }
 }
+
+// ---- a resume point is judged against the length of the version that plays ------------------------
+
+/// An episode whose version 0 (id 3086) runs 100 minutes and whose version 1 (id 3082) runs 90.
+fn two_lengths() -> Vec<u8> {
+    let media = |id: i64, part: i64, ms: i64| {
+        serde_json::json!({
+            "id": id, "videoCodec": "h264", "audioCodec": "aac", "width": 1920, "height": 1080,
+            "bitrate": 6_600, "container": "mkv", "duration": ms,
+            "Part": [{ "id": part, "key": format!("/library/parts/{part}/1/file.mkv"), "container": "mkv", "Stream": [
+                { "id": part * 10 + 1, "streamType": 1, "codec": "h264", "index": 0 },
+                { "id": part * 10 + 2, "streamType": 2, "codec": "aac", "channels": 2, "index": 1,
+                  "languageCode": "eng", "default": true, "selected": true },
+            ] }],
+        })
+    };
+    serde_json::to_vec(&serde_json::json!({"MediaContainer": {"Metadata": [{
+        "ratingKey": RK, "type": "episode", "duration": 6_000_000,
+        "Media": [media(3086, 3134, 6_000_000), media(3082, 3130, 5_400_000)],
+    }]}}))
+    .unwrap()
+}
+
+/// What `pump_play` hands the player as the start point for a play of `version` armed with a resume
+/// point of `resume_min` minutes, and the point a retry would reopen at.
+fn start_of(version: Option<plx_plex::plex::MediaId>, resume_min: i64) -> (Option<i64>, i64) {
+    let mut w = world(&two_lengths(), MDE_DIRECTPLAY);
+    let mut meta = plx_data::stores::metadata::MetadataStore::default();
+    assert!(w.request_play(&mut meta, version));
+    assert!(arm_play_resume(&mut w.ps, resume_min * 60 * 1_000_000_000));
+    assert!(wait_resolve_workers_for_test(std::time::Duration::from_secs(10)));
+    let start = pump_play(&mut w.ps, &mut meta);
+    let retry = unpresented_resume_ns(&w.ps);
+    w.finish();
+    (start, retry)
+}
+
+/// **U5.** The resume point a card or page carries is judged against version 0's length. Version 1
+/// is 10 minutes shorter, so a 95-minute point lies past its end: the play starts over, and a retry
+/// of that play must not reopen on the credits either.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_resume_point_past_the_end_of_the_picked_version_starts_over() {
+    let min = |m: i64| m * 60 * 1_000_000_000;
+    assert_eq!(start_of(Some(PICKED), 95), (Some(0), 0), "past the picked version's end: from the start");
+    assert_eq!(start_of(Some(PICKED), 60), (Some(min(60)), min(60)), "inside it: unchanged");
+    assert_eq!(start_of(None, 95), (Some(min(95)), min(95)), "a default play is untouched (judged by the page)");
+    assert_eq!(
+        start_of(Some(plx_plex::plex::MediaId(9)), 95),
+        (Some(min(95)), min(95)),
+        "a pick the item lost plays the default and keeps the point"
+    );
+}

@@ -513,6 +513,40 @@ fn dts_hd_master_audio_has_a_friendly_name() {
     assert_eq!(friendly_codec("dca"), "DTS", "plain DTS keeps its name");
 }
 
+/// **U5.** A resume point judged against version 0's length can lie past the end of a shorter
+/// version: against the length of the version that plays it follows `resume_ns`'s 95% rule, and an
+/// unknown length leaves the point alone.
+#[test]
+fn a_resume_point_is_judged_against_the_played_versions_length() {
+    let min = |m: i64| m * 60_000;
+    let ns = |m: i64| m * 60_000 * 1_000_000;
+    assert_eq!(resume_ns_for(ns(100), min(90)), 0, "past the end of the played version: start over");
+    assert_eq!(resume_ns_for(ns(86), min(90)), 0, "past its 95% mark (85.5 min) too");
+    assert_eq!(resume_ns_for(ns(85), min(90)), ns(85), "still inside the played version");
+    assert_eq!(resume_ns_for(ns(100), 0), ns(100), "no length known: the point stands");
+    assert_eq!(resume_ns_for(ns(100), -1), ns(100));
+    assert_eq!(resume_ns_for(0, min(90)), 0, "no resume stays no resume");
+    // the same boundary as `resume_ns`: 95% of 90 minutes is 5_130_000 ms
+    assert_eq!(resume_ns_for(5_130_000 * 1_000_000, min(90)), 0, "at the mark");
+    assert_eq!(resume_ns_for(5_129_999 * 1_000_000, min(90)), 5_129_999 * 1_000_000, "a millisecond before it");
+    assert_eq!(resume_ns(5_130_000, min(90)), 0, "`resume_ns` draws the line in the same place");
+}
+
+/// **U5.** A picked version names its own length (`Media.duration`), the figure the resume clamp
+/// reads; a default play names none, and a version that does not say is 0.
+#[test]
+fn a_picked_version_carries_its_own_length() {
+    let it: plx_plex::plex::Metadata = serde_json::from_value(serde_json::json!({ "type": "movie", "duration": 6_000_000,
+        "Media": [
+        { "id": 1, "duration": 6_000_000, "Part": [{ "key": "/p/1" }] },
+        { "id": 2, "duration": "5400000", "Part": [{ "key": "/p/2" }] },
+        { "id": 3, "Part": [{ "key": "/p/3" }] }] })).unwrap();
+    let dur = |id: i64| {
+        playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(id))).1.map(|v| v.dur_ms)
+    };
+    assert_eq!((dur(1), dur(2), dur(3), dur(9)), (Some(6_000_000), Some(5_400_000), Some(0), None));
+}
+
 /// `PlayingItem.hdr` is the played leaf's video HDR flag (PQ or HLG transfer), the fact the
 /// player's HDR overlay dim reads; an SDR leaf and an absent item are not HDR.
 #[test]

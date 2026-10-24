@@ -8390,6 +8390,11 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
     // read-out; `apply_plan` leaves the selection UNKNOWN for it), but it has no Engine and therefore no ACTIVE_ENCODER/scrobble owner. The cold
     // source probe or the decision itself may already have registered the logical resource.
     let refused_resources = (!ok).then(|| abandoned_plan_resources(&plan)).flatten();
+    // The length of the version this plan plays, read before `apply_plan` consumes the plan: the
+    // resume point a card or page carries was judged against the ITEM's length, which is version
+    // 0's, so a shorter picked version can leave it past its own end (0 = a default play or an
+    // unknown length: the point stands).
+    let played_dur_ms = plan.played_dur_ms;
     let resume_ns = {
         let mut resume = PLAY_RESUME.lock().unwrap_or_else(|e| e.into_inner());
         take_resume_for(&mut resume, gen)
@@ -8424,7 +8429,12 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
             warm(item_sid(cur_sid(ps)), &u.thumb);
         }
     }
-    ok.then_some(resume_ns)
+    let start_ns = plx_data::metadata::resume_ns_for(resume_ns, played_dur_ms);
+    if start_ns != resume_ns {
+        // a retry reads the same point: it must not reopen on the credits either
+        { let s = &mut *ps; s.requested_resume_ns = start_ns };
+    }
+    ok.then_some(start_ns)
 }
 
 /// MAIN THREAD ONLY: the one place a resolved [`Session`] is installed, + the player's audio-track

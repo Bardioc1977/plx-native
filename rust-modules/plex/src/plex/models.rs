@@ -639,6 +639,11 @@ pub struct Media {
     /// reads it, and the profile that matters to the decoder rides the Load payload's own fields.
     #[serde(rename = "videoProfile", default)]
     pub video_profile: String,
+    /// This version's own length in **ms** (0 = not sent). Versions of one item can differ in
+    /// length (an extended cut, a trimmed intro), which the item-level `duration` cannot say: it
+    /// is the resume clamp's input for the version that plays.
+    #[serde(default, deserialize_with = "de_i64")]
+    pub duration: i64,
     #[serde(rename = "Part", default)]
     pub part: Vec<MediaPart>,
 }
@@ -1359,6 +1364,16 @@ mod tests {
         assert_eq!((i, m.id, m.audio_channels), (0, MediaId(3086), 6));
         assert!(it.media_version(Some(MediaId(9))).is_none());
         assert_eq!(it.default_part().map(|p| p.key.as_str()), Some("/p/3134"));
+    }
+
+    /// A version's own length parses as a number or a string, and an absent one is 0.
+    #[test]
+    fn a_version_carries_its_own_length() {
+        let json = br#"{"MediaContainer":{"Metadata":[{"ratingKey":"1","duration":"6000000","Media":[
+              {"id":1,"duration":"6000000"},{"id":2,"duration":5400000},{"id":3}]}]}}"#;
+        let env: Envelope = serde_json::from_slice(json).expect("parse");
+        let lengths: Vec<i64> = env.media_container.metadata[0].media.iter().map(|m| m.duration).collect();
+        assert_eq!(lengths, [6_000_000, 5_400_000, 0]);
     }
 
     /// A `/decision` body is read off the version it marks `selected`.

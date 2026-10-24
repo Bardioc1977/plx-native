@@ -292,6 +292,19 @@ pub fn resume_ns(resume_ms: i64, dur_ms: i64) -> i64 {
     }
 }
 
+/// [`resume_ns`]'s 95% rule applied to a resume point already in NANOSECONDS (`at_ns`, as
+/// [`resume_ns`] returned it) against the length of the version actually played (`played_dur_ms`;
+/// `<= 0` = unknown, the point stands). A card's or a page's resume point is judged against the
+/// item-level duration, which is version 0's; a shorter version can leave the point past its own
+/// 95% mark, and starting there would open on the credits. Past it the play starts over.
+pub fn resume_ns_for(at_ns: i64, played_dur_ms: i64) -> i64 {
+    if played_dur_ms > 0 && at_ns as f64 >= 0.95 * played_dur_ms as f64 * 1_000_000.0 {
+        0
+    } else {
+        at_ns
+    }
+}
+
 /// Friendly display name for an audio/subtitle codec id — the ONE codec→name map (the track
 /// menu's section accessory and the Info card's track line both read it, so the same track
 /// can't be named two ways).
@@ -2729,6 +2742,10 @@ pub struct PlayedVersion {
     /// [`source_video_kbps`]): its own video stream's, else the whole file's, else 0. The default's
     /// figure (`ResolveEnv::src_kbps`) describes `Media[0]` and is never the picked file's.
     pub video_kbps: i64,
+    /// This version's own length in ms (`Media.duration`), 0 when the server did not say. The resume
+    /// point a card or page carries was judged against the ITEM's length, which is version 0's;
+    /// [`resume_ns_for`] judges it against this one.
+    pub dur_ms: i64,
 }
 
 /// The source rate to judge against a quality ceiling, in kbps: **the VIDEO stream's own**, falling
@@ -2770,6 +2787,7 @@ pub fn playing_version_from(
         vcodec: m.video_codec.clone(),
         acodec: m.audio_codec.clone(),
         video_kbps: source_video_kbps(media_video_kbps(m), m.bitrate),
+        dur_ms: m.duration,
     });
     (playing_item_of(sid, rk, it, media), played)
 }
