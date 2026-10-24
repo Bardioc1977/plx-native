@@ -1465,7 +1465,7 @@ impl Bridge {
     /// carries them.
     pub(crate) fn viewstate_run(&mut self, cmd: plx_data::stores::viewstate::ViewStateCmd) -> plx_data::stores::StoreOutcome {
         super::adapters::stores::refill_client_keys(&mut self.client_keys);
-        let outcome = self.stores.viewstate_run(cmd, self.directory.view(), &self.client_keys);
+        let outcome = self.stores.viewstate_run(cmd, self.directory.view(), &self.client_keys, Self::profile_scope());
         self.start_store_jobs_in(plx_data::stores::Stores::VIEWSTATE_FILLS);
         outcome
     }
@@ -1508,20 +1508,21 @@ impl Bridge {
 
     pub(crate) fn viewstate_pump(&mut self) -> plx_data::stores::EndpointRefreshSet {
         super::adapters::stores::refill_client_keys(&mut self.client_keys);
-        let endpoints = self.stores.viewstate_pump(self.directory.view(), &self.client_keys);
+        let endpoints = self.stores.viewstate_pump(self.directory.view(), &self.client_keys, Self::profile_scope());
         self.start_store_jobs_in(plx_data::stores::Stores::VIEWSTATE_FILLS);
         endpoints
     }
 
     /// The read-back worker's pass (`stores::viewreconcile`), and the Browse pump a membership
     /// re-query needs while a page is pushed over the Library page and so it is not ticked to pump its own store.
-    /// The keys are refilled first and the reads the step sent are started before this goes on, in
-    /// the same call; only the reconcile outbox is drained here, the shared `Stores` call's other
-    /// fan-outs emit no jobs of their own.
+    /// The keys are refilled first and the writes and reads the step sent are started before this
+    /// goes on, in the same call: an end-of-stream fan-out it queues starts ViewState's next write,
+    /// so both outboxes are drained here (`Stores::RECONCILE_FILLS`); the shared `Stores` call's
+    /// other fan-outs emit no jobs of their own.
     pub(crate) fn reconcile_pump(&mut self) -> plx_data::stores::EndpointRefreshSet {
         super::adapters::stores::refill_client_keys(&mut self.client_keys);
-        let mut outcome = self.stores.reconcile_pump(self.directory.view(), &self.client_keys);
-        self.start_store_jobs_of(StoreId::ViewReconcile);
+        let mut outcome = self.stores.reconcile_pump(self.directory.view(), &self.client_keys, Self::profile_scope());
+        self.start_store_jobs_in(plx_data::stores::Stores::RECONCILE_FILLS);
         if outcome.changed {
             plx_machine::idle::invalidate();
         }
@@ -1631,6 +1632,14 @@ impl Bridge {
     /// the store; the data layer reads no session global for it.
     fn household_ids() -> Vec<i64> {
         plx_plex::plex::session::peek().household_ids()
+    }
+
+    /// The profile the Session owner has seated, as the scope counter it allocated and published
+    /// (`session::current_gen`): it moves when a profile is seated, detached or signed out and
+    /// never on a same-profile token refresh. ViewState's step takes it as an argument and drops a
+    /// write pressed under another one; the Bridge reads the session here, the data layer does not.
+    fn profile_scope() -> u32 {
+        plx_plex::plex::session::current_gen()
     }
 
     /// Search commands snapshot their initial favourite-library ranking from the same retained
@@ -4331,6 +4340,9 @@ mod collection_lifecycle_tests;
 #[cfg(test)]
 #[path = "store_admission_tests.rs"]
 mod store_admission_tests;
+#[cfg(test)]
+#[path = "viewstate_controlled_tests.rs"]
+mod viewstate_controlled_tests;
 #[cfg(test)]
 #[path = "browse_hubs_drain_tests.rs"]
 mod browse_hubs_drain_tests;

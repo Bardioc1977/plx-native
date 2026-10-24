@@ -177,7 +177,9 @@ and three registry reads are gone from `data/src/browse/section_hubs.rs`; the re
 directory, page and source reads, discovery, the pins) is still on its ledger. The Metadata store's
 season switch and episode-page window are the tenth (the bullet headed "The Metadata reads"): their
 two worker starts and the `client_for` reads of `fetch_episodes` and `fetch_episode_page` are gone
-from `data/src/metadata.rs`.
+from `data/src/metadata.rs`. The household's watch-state writes are the eleventh (the bullet headed
+"The view-state write lane"): the worker start and all five `client_for` reads are gone from
+`data/src/viewstate.rs`, and its two `data-viewstate` ledger files are deleted.
 
 - **The shape.** `plx_machine::job` holds `Job<R>` (an `Addr` and a request that carries everything
   the worker needs), `Port<T>` (where the one answer goes: exactly one `done` or `refused` per job)
@@ -224,9 +226,10 @@ from `data/src/metadata.rs`.
   `Stores::take_jobs_of(StoreId)` takes ONE store's outbox and `Stores::take_jobs` aggregates every
   store's, and each Bridge entry point drains the outboxes its step can fill, in the same call as
   the step. A step that touches only its own store drains it with `start_store_jobs_of`; a `Stores`
-  call that fans out to other stores (`viewstate_run`, `viewstate_pump`, `notify_pump`) drains every
-  outbox named in its `*_FILLS` list (`Stores::VIEWSTATE_FILLS`, `Stores::NOTIFY_FILLS`) with
-  `Bridge::start_store_jobs_in`. `Bridge::metadata_run` steps then drains Metadata, and so does `Bridge::metadata_pump_season`
+  call that fans out to other stores (`viewstate_run`, `viewstate_pump`, `reconcile_pump`,
+  `notify_pump`) drains every outbox named in its `*_FILLS` list (`Stores::VIEWSTATE_FILLS`,
+  `Stores::RECONCILE_FILLS`, `Stores::NOTIFY_FILLS`) with `Bridge::start_store_jobs_in`.
+  `Bridge::metadata_run` steps then drains Metadata, and so does `Bridge::metadata_pump_season`
   (a guard: no landing pump emits a job today, so it finds nothing); `Bridge::person_pump` and
   `Bridge::collection_pump` refill the keys, step, then run
   `Bridge::start_store_jobs_of(StoreId::Person)` and `(StoreId::Collection)`;
@@ -238,8 +241,10 @@ from `data/src/metadata.rs`.
   the `Store(Browse(..))` arm calls), the `StoreWork::Browse` arm and `Bridge::reconcile_pump`'s
   membership re-query each refill the keys, step and run `(StoreId::Browse)`, and `viewstate_pump`
   and `notify_pump` reach Browse through their `*_FILLS` lists (ViewState's terminal
-  `HubsInvalidateAll`, the notification map's `HubsInvalidateServer`); `viewstate_run` drains the same
-  `VIEWSTATE_FILLS` list, though its `ApplyView` edits emit nothing today.
+  `HubsInvalidateAll`, the notification map's `HubsInvalidateServer`); `viewstate_run` and
+  `viewstate_pump` drain `VIEWSTATE_FILLS` too, whose ViewState entry is where a household write
+  leaves (`StoreJob::ViewWrite`), and `reconcile_pump` drains `RECONCILE_FILLS`
+  (`[ViewState, ViewReconcile]`) because an end-of-stream fan-out it queues starts the next write.
   Draining inside each pump, not at the frame's end, keeps every store's
   admissions in the tape where they were: the frame pumps Person, then Collection, then reconciles
   the Detail page. A caller that holds only the store (`describe_movie` gets a `&mut MetadataStore`, and the
@@ -265,7 +270,7 @@ from `data/src/metadata.rs`.
   `Store(Search(..))` and `StoreWork::Search` arms, `boot.rs`'s reset and `dev/scenarios.rs`'s query
   all reach them through `Bridge::search_run` and `Bridge::search_pump`, which drain in the same call.
 - **Results do not return as FIFO events.** A gated store's result (Detail, Collection, Person,
-  Search, subtitle search, the view-state read-back) goes back through the landing and its gate
+  Search, subtitle search, the view-state read-back, the view-state write) goes back through the landing and its gate
   (`landgate`, the `adapter_rank` of the landing key), where the pump takes it by value. This is a
   deliberate exception to "every result returns as one addressed event in the same drain": it is
   kept so that the replay anchors hold, because the landing is where they already record a result.
@@ -332,8 +337,9 @@ from `data/src/metadata.rs`.
   `Fetch::refuse_for(gen)` frees that generation's claim and remembers the refusal for
   `take_refused` to answer once, and a refusal for a superseded generation (one whose claim a newer
   request or a supersede has replaced) frees nothing and records nothing. A store whose claim is a mailbox of landings
-  (the view-state read-back) has its port post a store-local `NotStarted` landing, and the next pump
-  puts the flight's items back and waits. A refusal never goes into a recorded mailbox (a recorded
+  (the view-state read-back and the view-state write) has its port post a store-local `NotStarted`
+  landing, and the next pump puts the flight's items back and waits (a write is judged again first,
+  and dropped when its profile, its server or its client's key moved). A refusal never goes into a recorded mailbox (a recorded
   take would write it as an async result and change the bytes). It reaches the step one pump after
   the launch; no fixture holds a refused start, so no recorded byte moves.
 - **Subtitle search and the view-state read-back** are the fifth and sixth stores on the lane. The
@@ -342,9 +348,10 @@ from `data/src/metadata.rs`.
   `plx_plex::plex::ClientKeys` as an argument and emits a `StoreJob`
   (`plx_data::subsearch::{SubSearchReq, SubSearchPort}` and
   `plx_data::stores::viewreconcile::{ReconcileReq, ReconcilePort}`); the runner starts the job
-  only if `client_for` still answers the key the step decided on. `Bridge::subsearch_pump` and
-  `Bridge::reconcile_pump` refill the keys, step, then run `Bridge::start_store_jobs_of` for their
-  own store in the same call; `Bridge::subsearch_run` only drains, because the command step takes no
+  only if `client_for` still answers the key the step decided on. `Bridge::subsearch_pump` refills
+  the keys, steps, then runs `Bridge::start_store_jobs_of` for its own store in the same call;
+  `Bridge::reconcile_pump` drains `Stores::RECONCILE_FILLS` with `Bridge::start_store_jobs_in`,
+  because an end-of-stream fan-out it queues sends a ViewState write; `Bridge::subsearch_run` only drains, because the command step takes no
   keys and emits nothing. Neither kind is on the tape, so the runner makes no admission record for
   them and a replay launches them live.
 - **The Hubs lane.** Home's source reads (`data/src/pms.rs`) are the seventh store on the lane. The
@@ -357,7 +364,7 @@ from `data/src/metadata.rs`.
   for. The Hubs read differs from the six before it in four ways.
   - **A third admission family.** `StoreJob::admission()` names `Tape` (Detail, Collection, Person),
     `Direct` (Catalog, subtitle search, view reconcile, Search's fetches and recents writes, the section
-    hubs' read, the Metadata season switch and episode-page window) or `Home`,
+    hubs' read, the view-state writes, the Metadata season switch and episode-page window) or `Home`,
     as one exhaustive match. A `Home`
     job is recorded in a controlled Home run's own ordered ledger (`HomeIo::admit`), not on the tape,
     with the bytes `HubRequest::admission` returns (the bytes `hubs_descriptor` returned before it,
@@ -494,3 +501,46 @@ from `data/src/metadata.rs`.
     refusing the thread cannot be forced on a host, so the refused branches are pinned at the port
     (`a_refused_season_job_ends_season_loading_and_leaves_the_tab_and_the_list`,
     `a_refused_page_job_releases_its_inflight_keys_and_the_next_want_asks_again`).
+- **The view-state write lane.** The household's watch-state writes (`data/src/viewstate.rs`: mark
+  watched, mark unwatched, remove from Continue Watching, and the fan-out of a watched write, or of
+  an end of stream, to the title's other copies) are the eleventh store on the lane. `kick` starts no
+  worker: it emits `StoreJob::ViewWrite(Job<ViewWriteReq>, ViewWritePort)` on `ViewStateStore`'s
+  outbox, one write out at a time. Admission is `Direct`, and a controlled Home run refuses every
+  write before it reaches the store (`app/viewstate_controlled_tests.rs`), so no replay fixture moved.
+  It differs from the reads above in four ways.
+  - **Two inputs, not one.** The step takes the `ClientKeys` and the profile the press was made
+    under (`Bridge::profile_scope()`, which is `plex::session::current_gen()`: the Session owner's
+    profile-scope counter, allocated only when a profile is seated, detached or signed out, and
+    never moved by a same-profile token refresh). `Req` captures both at the press. At the kick, and
+    when a refusal lands, a write whose profile moved, or whose client carries another key than the
+    press named, is dropped and its ledger entry retired: a profile switch re-tokens the registry's
+    clients in place, so the slot still answers, under the next profile's credential, and a write
+    is one household member's statement. The key compare is not optional: a switch swaps the tokens
+    in the frame the session adopts them and the new scope is published by a later commit, so for
+    those frames the profile still reads as the press's. A genuine same-profile token refresh drops
+    a press too (the read-back restores what the server holds); keeping it would take an identity
+    that moves with the token swap.
+  - **The fan-out reaches other servers through the snapshot.** The job carries the whole
+    `ClientKeys` the step decided under, and the worker (`finish_view_write_job`) builds
+    `plx_plex::plex::KeyedClients` from it, with the registry read the runner passes in as a `fn`
+    pointer, so no data-layer line names `client_for`. `fan_out` and `ask_sources` ask it for each
+    other source, and a source whose client no longer carries the key (re-tokened by a switch after
+    the press) is sent neither the lookup nor the write. The origin's client is resolved once, at the
+    launch, and the worker is handed that `&'static Client`. The check covers the moment a request
+    is built: one already on the wire is not recalled.
+  - **A refusal is not a failure.** The runner refuses a write whose origin key moved by the launch
+    (or by the time a parked job runs), or whose thread the system refused, and the port posts
+    `NotStarted` into the owner's mailbox. Nothing left the device, so the pump changes no ledger
+    entry and owes no read-back or hub refresh: it judges the write again like any queued write (a
+    moved profile, a vanished server or a re-tokened client drops it) and puts it back at the head
+    of the queue, and waits out the retry ladder. A worker that panics answers with a failed write, never `NotStarted`: the origin write
+    may already be on the server, and a second scrobble would add a second viewCount.
+  - **One outbox, two fill lists.** ViewState sits in `Stores::VIEWSTATE_FILLS` at its `StoreId`
+    position, and `Stores::RECONCILE_FILLS` is what `Bridge::reconcile_pump` drains. A reset keeps
+    the outbox: a job already sent answers into the adapter it was emitted under, which the owning
+    store has retired.
+
+  A step test drives the lane through the job's port (`data/src/viewstate.rs`), the key-checked
+  fan-out has a test that fails when `fan_out` reads the registry again
+  (`stores/viewreconcile_tests.rs`), and the runner's branches have tests that fail without the key
+  compare in `resolve` (`app/adapters/stores.rs`).
