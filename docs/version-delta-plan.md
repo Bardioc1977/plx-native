@@ -668,3 +668,21 @@ Deviations and findings, appended to as each step lands.
   The existing assertion `env.cached_item.is_none() && env.src_kbps == 0` is now `env.cached_item.is_none()`.
   When a pick is gone from the item (`played` is `None`) the default plays with the caller's `env.src_kbps`,
   which is the default's own figure, so nothing else changes. A trailer/extra never carries a version.
+- **S5 (U2).** As designed (`Plan.part`, `PlaybackSession.cur_part` at its three sites, `side_reader_target`
+  reads it and no longer needs `ps.request`). The red test is
+  `side_reader_target_names_the_played_part_of_a_picked_version` in `decision_audio_enhancement_tests.rs`
+  (built on a new `install_with` that lets a test have the last word on the plan). It cannot name `Plan.part`
+  before the field exists, so the red run was made with that one line commented out: `assertion left == right
+  failed: the Part that plays, not the card's version 0  left: "/library/parts/960001/1/file.mkv"  right:
+  "/library/parts/960777/1/file.mkv"`; the line was enabled in the fix commit. `install` (the shared plan
+  builder of that file) now sets `part`, because the existing side-reader tests used to get the Part from
+  `ps.request`; `plan_audio_enhancement_tests.rs` lands a real `build_stream` plan and needed only its comment
+  changed. `a_landing_names_the_part_that_plays_and_leaves_the_request_alone` (`decision_version_tests.rs`)
+  covers pick, default and a lost pick end to end.
+- **Batch 1 gates.** On the S5 tree (before this note): `make check-cargo` (lint, default-feature unit pass, hostsim
+  unit pass, all crates) exit 0, e.g. `plx_media` `test result: ok. 1743 passed; 0 failed; 64 ignored` (default) and
+  `1905 passed; 0 failed; 64 ignored` (hostsim); `plx_data` `1210 passed`; `make check-nodef`, `make lint` and
+  `ci/check-deps.sh` green, ledgers untouched (16/78/58/11). `make check` as a whole stays red only on
+  `ci/test_disk_preflight.py` (free-space assertion about this machine), which also stops its cargo branch, hence
+  the halves. The new test names contain no `MAX_*` constant and no new cap, so `ci/list-caps.ini` is unchanged.
+  Open for later steps: the new doc citations of this plan (S0 note) and the replay/screen shapes (no shape touched).

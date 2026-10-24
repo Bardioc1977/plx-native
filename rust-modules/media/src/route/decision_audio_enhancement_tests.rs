@@ -96,6 +96,20 @@ fn install(
     cand: Option<AutoOriginalCandidate>,
     sub_sid: i64,
 ) {
+    install_with(ps, live, route, audio, cand, sub_sid, |_| {});
+}
+
+/// [`install`] with a last word on the plan (a picked version's landing sets its media index and
+/// Part).
+fn install_with(
+    ps: &mut PlaybackSession,
+    live: &Live,
+    route: Delivery,
+    audio: CarriedAudio,
+    cand: Option<AutoOriginalCandidate>,
+    sub_sid: i64,
+    tweak: impl FnOnce(&mut Plan),
+) {
     let port = live.port;
     let (url, tsession, contract, enhancement) = match route {
         Delivery::Direct => (
@@ -127,13 +141,12 @@ fn install(
             EnhancementOutcome::Off,
         ),
     };
-    apply_plan(
-        ps,
-        Plan {
+    let mut plan = Plan {
             sid: live.sid,
             url,
             tsession,
             sess: "enh-logical".into(),
+            part: "/library/parts/960001/1/file.mkv".into(),
             part_id: 960001,
             vcodec: "hevc".into(),
             acodec: audio.codec.clone(),
@@ -148,9 +161,9 @@ fn install(
             auto_original: cand,
             sub_sid,
             ..Default::default()
-        },
-        "960001",
-    );
+        };
+    tweak(&mut plan);
+    apply_plan(ps, plan, "960001");
 }
 
 /// The toggle row minus persistence (`request_audio_enhancement` also retains a session write,
@@ -4222,6 +4235,49 @@ fn side_reader_target_names_the_selected_tracks_ordinal() {
         commit_subtitle_selection(&mut ps, 4, 77, true);
         ps.side_subs_refused = true;
         assert!(side_reader_target(&ps).is_none());
+        live.finish();
+        cleanup(&mut ps);
+    });
+}
+
+/// **U2: the side reader reads the PLAYED Part.** A card-raised play of a picked version asks with
+/// version 0's Part key (the request keeps what the caller asked for, so a retry re-asks it), and
+/// the landing names the Part of the file that plays. The reader's target must be that one: it
+/// would otherwise read a client-drawn embedded subtitle out of the wrong file.
+#[test]
+fn side_reader_target_names_the_played_part_of_a_picked_version() {
+    const CARD_PART: &str = "/library/parts/960001/1/file.mkv";
+    const PLAYED_PART: &str = "/library/parts/960777/1/file.mkv";
+    plx_base::devtrig::with_private_triggers(|| {
+        let mut ps = PlaybackSession::IDLE;
+        let _g = fresh_registry(&mut ps);
+        let live = Live::start(EnhMode::Honor("ac3"));
+        restore_quality(Quality::Auto);
+        reset_player_control_for_test(&ps);
+        crate::player::restore_audio_enhancements(NONE);
+        ps.request = Some(PlaybackRequest {
+            sid: live.sid,
+            rk: "5".into(),
+            part: CARD_PART.into(),
+            vcodec: "hevc".into(),
+            acodec: "truehd".into(),
+            title: String::new(),
+            ctx: String::new(),
+            preview: false,
+            version: Some(plx_plex::plex::MediaId(102)),
+        });
+        install_with(&mut ps, &live, Delivery::Remux(NONE), a4(), Some(candidate(false, a4(), None)), 0, |plan| {
+            plan.media_index = 1;
+            plan.part_id = 960777;
+            plan.part = PLAYED_PART.into();
+        });
+        ps.auto_original.as_mut().expect("a candidate").probe_part = PLAYED_PART.into();
+        ps.cur_transport_kbps = 7_400;
+        commit_subtitle_selection(&mut ps, 4, 77, true);
+        let target = side_reader_target(&ps).expect("an admitted embedded pick starts the reader");
+        assert_eq!(target.part, PLAYED_PART, "the Part that plays, not the card's version 0");
+        assert_ne!(target.part, CARD_PART);
+        assert_eq!(ps.request.as_ref().map(|r| r.part.as_str()), Some(CARD_PART), "the request is what the caller asked for");
         live.finish();
         cleanup(&mut ps);
     });

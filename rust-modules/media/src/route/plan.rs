@@ -1373,6 +1373,10 @@ pub struct Plan {
     pub tsession: String,
     pub sess: String,
     pub part_id: i64,
+    /// The key of the Part that plays: the caller's argument for a default play, the picked
+    /// version's own for a picked one. `part_id` is derived from it. Installed as
+    /// `PlaybackSession::cur_part`.
+    pub part: String,
     /// The played version's `mediaIndex`: 0 for the default, else the picked version's position
     /// in the item this resolve fetched. `part_id` and the source codecs are that version's too.
     pub media_index: usize,
@@ -1618,6 +1622,7 @@ pub(super) fn build_stream(off: &plx_base::task::OffFrame, rk: &str, part: &str,
         Some(v) => (v.part.as_str(), v.vcodec.as_str(), v.acodec.as_str()),
         None => (part, vcodec, acodec),
     };
+    plan.part = part.to_string();
     if let Some(v) = played.as_ref() {
         plan.media_index = v.index;
         plan.part_id = part_id_of(part);

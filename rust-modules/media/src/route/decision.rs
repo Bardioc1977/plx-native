@@ -354,6 +354,11 @@ pub struct PlaybackSession {
     /// the playing item's Part id (from the part key), so an audio switch can PUT the
     /// server-side stream selection — the transcoder encodes the part's SELECTED audio.
     cur_part_id: i64,
+    /// The key of the Part that PLAYS (`/library/parts/<id>/<n>/file.<ext>`), installed from the plan
+    /// beside [`Self::cur_part_id`]: a picked version's own, not the one the caller's request named
+    /// (`ps.request` keeps what was asked, so a retry re-asks it and a version that has vanished
+    /// since falls back to the default). What the side reader opens.
+    cur_part: String,
     /// Opaque internal playback generation, regenerated on each play_movie/play_episode. It is
     /// also the first encoder's PMS session id. Adaptive replacements keep this app generation
     /// stable but use their own coupled PMS wire id; the active encoder mutex supplies timeline,
@@ -541,6 +546,7 @@ impl PlaybackSession {
         sub_mode: SubMode::Track,
         track_ctx: None,
         cur_part_id: 0,
+        cur_part: String::new(),
         sess: String::new(),
         machine_id: String::new(),
         machine_sid: ServerId::UNSET,
@@ -628,6 +634,7 @@ impl PlaybackSession {
             sub_mode,
             track_ctx: _,
             cur_part_id,
+            cur_part,
             sess,
             machine_id,
             machine_sid,
@@ -695,6 +702,7 @@ impl PlaybackSession {
             sub_mode: *sub_mode,
             track_ctx: None,
             cur_part_id: *cur_part_id,
+            cur_part: cur_part.clone(),
             sess: sess.clone(),
             machine_id: machine_id.clone(),
             machine_sid: *machine_sid,
@@ -8566,6 +8574,7 @@ fn apply_plan(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata::M
             sub_mode,
             track_ctx: plan.track_ctx,
             cur_part_id: plan.part_id,
+            cur_part: plan.part,
             sess: plan.sess,
             machine_id,
             machine_sid,
@@ -9582,7 +9591,8 @@ pub struct SideReaderTarget {
 /// The side reader's inputs for this playback, or `None` unless the live route is a plain remux of
 /// a real (non-preview) playback on which the app draws an embedded track
 /// ([`SubtitlePresenter::ClientOverRemux`], not a sidecar — the app fetches that itself), or the
-/// dev trigger is armed with no subtitle selected in the route.
+/// dev trigger is armed with no subtitle selected in the route. It reads the Part that PLAYS
+/// ([`PlaybackSession::cur_part`]), which for a picked version is not the one the request named.
 pub fn side_reader_target(ps: &PlaybackSession) -> Option<SideReaderTarget> {
     if ps.preview || live_family(ps) != RouteFamily::Remux {
         return None;
@@ -9597,13 +9607,12 @@ pub fn side_reader_target(ps: &PlaybackSession) -> Option<SideReaderTarget> {
     } else {
         return None;
     };
-    let request = ps.request.as_ref()?;
-    if request.part.is_empty() || ps.tsession.is_empty() {
+    if ps.cur_part.is_empty() || ps.tsession.is_empty() {
         return None;
     }
     Some(SideReaderTarget {
         sid: ps.cur_sid,
-        part: request.part.clone(),
+        part: ps.cur_part.clone(),
         session: ps.tsession.clone(),
         part_kbps: u32::try_from(ps.cur_transport_kbps).unwrap_or(0),
         ordinal,

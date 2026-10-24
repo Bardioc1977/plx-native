@@ -461,3 +461,44 @@ fn picking_the_default_row_plays_like_a_default_play_under_a_rung() {
     assert_eq!((picked.part_id, picked.media_index), (default.part_id, default.media_index));
     assert_eq!(default.src_measure.0, 6_000);
 }
+
+// ---- the landing names the Part that plays ------------------------------------------------------------
+
+/// **U2.** `Plan.part` is the Part key that plays (the picked version's own, the argument for a
+/// default play and for a pick the item has lost) and the landing installs it as `cur_part`, beside
+/// `cur_part_id`; the request keeps what the caller asked for.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_landing_names_the_part_that_plays_and_leaves_the_request_alone() {
+    const PICKED_PART: &str = "/library/parts/3130/1/file.mkv";
+    let mut w = world(TWO_VERSIONS, MDE_DIRECTPLAY);
+    let mut meta = plx_data::stores::metadata::MetadataStore::default();
+    assert!(w.request_play(&mut meta, Some(PICKED)));
+    w.finish();
+
+    for (pick, part, id) in [
+        (Some(PICKED), PICKED_PART, 3130),
+        (None, DEFAULT_PART, 3134),
+        (Some(plx_plex::plex::MediaId(9)), DEFAULT_PART, 3134),
+    ] {
+        let plan = w.resolve(&w.env(pick));
+        assert_eq!(plan.part, part, "{pick:?}");
+        assert_eq!(plan.part_id, id, "{pick:?}");
+        test_support::apply_plan(&mut w.ps, plan, RK);
+        assert_eq!(w.ps.cur_part, part, "{pick:?}: the session names the Part that plays");
+        assert_eq!(cur_part_id(&w.ps), id);
+        assert_eq!(w.ps.request.as_ref().map(|r| r.part.as_str()), Some(DEFAULT_PART), "the request is what was asked");
+        reset_session(&mut w.ps);
+        w.ps.request = Some(PlaybackRequest {
+            sid: w.sid,
+            rk: RK.into(),
+            part: DEFAULT_PART.into(),
+            vcodec: "h264".into(),
+            acodec: "aac".into(),
+            title: String::new(),
+            ctx: String::new(),
+            preview: false,
+            version: Some(PICKED),
+        });
+    }
+}

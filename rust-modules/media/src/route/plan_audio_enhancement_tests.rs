@@ -590,8 +590,8 @@ fn cold_start_plan_lands_as_client_over_remux_with_a_reader_target() {
         |_, _| {});
     assert_eq!(r.plan.sub_render_ordinal, Some(0));
     apply_plan(&mut ps, r.plan, "rk-enh");
-    // The play request (`request_play`) is what names the Part the reader reads; a plan landing
-    // alone does not carry it.
+    // The reader opens the Part the landing named (`cur_part`); the request is installed beside it
+    // as `request_play` does, and no longer decides which file is read.
     ps.request = Some(PlaybackRequest {
         sid: ps.cur_sid,
         rk: "rk-enh".into(),
