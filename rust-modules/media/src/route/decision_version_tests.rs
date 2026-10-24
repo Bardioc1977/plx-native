@@ -226,7 +226,7 @@ fn the_picked_version_rides_the_request_and_the_landing() {
     assert_eq!(ps.request.as_ref().and_then(|r| r.version), Some(plx_plex::plex::MediaId(3082)));
     let env = request_env(&ps, meta.view(), ps.request.as_ref().unwrap(), None);
     assert_eq!(env.version, Some(plx_plex::plex::MediaId(3082)));
-    assert!(env.cached_item.is_none() && env.src_kbps == 0, "the default's facts never stand in for the pick");
+    assert!(env.cached_item.is_none(), "the default's streams never stand in for the pick");
     cancel_play(&mut ps);
     test_support::apply_plan(&mut ps, Plan { media_index: 1, ..Default::default() }, "rk-v");
     assert_eq!(cur_media_index(&ps), 1);
@@ -371,4 +371,93 @@ fn a_remembered_audio_track_matches_in_every_version_of_the_episode() {
         (Some(370_023), 37_002),
         "version 1: ITS Japanese track, same memory"
     );
+}
+
+// ---- the quality ceiling is judged against the rate of the file that plays ------------------------
+
+/// An episode with two 1080p h264/aac versions whose video-stream and whole-file rates the caller
+/// chooses: version 0 (id 3086) 6000 kbps video in a 6600 kbps file, version 1 (id 3082) as given.
+fn rated_versions(video1: i64, whole1: i64) -> Vec<u8> {
+    let media = |id: i64, part: i64, video: i64, whole: i64| {
+        serde_json::json!({
+            "id": id, "videoCodec": "h264", "audioCodec": "aac", "width": 1920, "height": 1080,
+            "videoResolution": "1080", "bitrate": whole, "container": "mkv",
+            "Part": [{ "id": part, "key": format!("/library/parts/{part}/1/file.mkv"), "container": "mkv", "Stream": [
+                { "id": part * 10 + 1, "streamType": 1, "codec": "h264", "index": 0, "bitrate": video },
+                { "id": part * 10 + 2, "streamType": 2, "codec": "aac", "channels": 2, "index": 1,
+                  "languageCode": "eng", "default": true, "selected": true },
+            ] }],
+        })
+    };
+    serde_json::to_vec(&serde_json::json!({"MediaContainer": {"Metadata": [{
+        "ratingKey": RK, "type": "episode",
+        "Media": [media(3086, 3134, 6_000, 6_600), media(3082, 3130, video1, whole1)],
+    }]}}))
+    .unwrap()
+}
+
+/// Resolve `rk-v` under `quality` with the pick `version`, MDE answering direct play.
+fn resolve_rated(item: &[u8], quality: Quality, version: Option<plx_plex::plex::MediaId>, src_kbps: i64) -> Plan {
+    let w = world(item, MDE_DIRECTPLAY);
+    let mut env = w.env(version);
+    env.quality = quality;
+    env.src_kbps = src_kbps;
+    w.resolve(&env)
+}
+
+/// **U1.** A fixed rung (`maxVideoBitrate` bounds the VIDEO lane) is judged against the rate of the
+/// file that plays: the picked version's own video stream, not 0. A 6000 kbps video in an 8500 kbps
+/// file fits the 8000 kbps rung (the whole-file figure would not), so it direct-plays its own part.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_picked_version_is_measured_from_its_own_video_stream_under_a_quality_rung() {
+    // `src_kbps` 0: what `request_env` hands a picked version today (the default's rate is not its own)
+    let plan = resolve_rated(&rated_versions(6_000, 8_500), Quality::P1080, Some(PICKED), 0);
+    assert_eq!(plan.src_measure.0, 6_000, "the ceiling is judged against the picked file's video rate");
+    assert!(plan.url.contains("/library/parts/3130/"), "a version under the rung direct-plays: {}", plan.url);
+    assert!(!plan.url.contains("start.mkv"), "and is not re-encoded: {}", plan.url);
+    assert_eq!((plan.part_id, plan.media_index), (3130, 1));
+}
+
+/// **U1.** Above the rung the same measurement denies direct play and remux: the measured rate is
+/// 9000, so the plan re-encodes (and says what it measured, for every later quality change).
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_picked_version_above_the_rung_is_re_encoded_and_remembers_what_it_measured() {
+    let plan = resolve_rated(&rated_versions(9_000, 9_500), Quality::P1080, Some(PICKED), 0);
+    assert_eq!(plan.src_measure.0, 9_000);
+    assert!(plan.url.contains("start.mkv"), "{}", plan.url);
+}
+
+/// **U1.** PMS omits a stream's own rate often enough that the whole-file figure stays the fallback
+/// (the conservative direction, `plx_plex::plex::Ceiling::admits`), for a picked version as for the
+/// default.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_picked_version_without_a_video_stream_rate_falls_back_to_the_whole_file() {
+    let plan = resolve_rated(&rated_versions(0, 7_500), Quality::P1080, Some(PICKED), 0);
+    assert_eq!(plan.src_measure.0, 7_500);
+    assert!(plan.url.contains("/library/parts/3130/"), "{}", plan.url);
+    let over = resolve_rated(&rated_versions(0, 8_500), Quality::P1080, Some(PICKED), 0);
+    assert_eq!(over.src_measure.0, 8_500);
+    assert!(over.url.contains("start.mkv"), "{}", over.url);
+}
+
+/// **U1.** The row at wire index 0 is the Default: picking it behaves like a default play of the
+/// same item (same route, same part, same measurement), the rate of a default play being what the
+/// loaded detail hands the environment (`ResolveEnv::src_kbps`, version 0's video rate).
+#[test]
+#[cfg(feature = "devtriggers")]
+fn picking_the_default_row_plays_like_a_default_play_under_a_rung() {
+    let item = rated_versions(9_000, 9_500);
+    let default = resolve_rated(&item, Quality::P1080, None, 6_000);
+    let picked = resolve_rated(&item, Quality::P1080, Some(plx_plex::plex::MediaId(3086)), 0);
+    let route = |p: &Plan| {
+        let path = p.url.split('?').next().unwrap_or_default();
+        path[path.find("/video").or_else(|| path.find("/library")).unwrap_or(0)..].to_owned()
+    };
+    assert_eq!(route(&picked), route(&default), "the same route to the same part");
+    assert_eq!(picked.src_measure, default.src_measure);
+    assert_eq!((picked.part_id, picked.media_index), (default.part_id, default.media_index));
+    assert_eq!(default.src_measure.0, 6_000);
 }

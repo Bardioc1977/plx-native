@@ -387,6 +387,34 @@ fn a_picked_version_is_the_whole_playing_item() {
     assert_eq!(item.width, 1920);
 }
 
+/// The rate a quality ceiling is judged against for a picked version is its own video stream's,
+/// the whole file's only as the fallback, through the one rule the loaded page's figure uses too.
+#[test]
+fn a_picked_versions_video_rate_is_its_own_stream_else_the_whole_file() {
+    assert_eq!(source_video_kbps(6_000, 8_500), 6_000, "the video lane's own rate wins");
+    assert_eq!(source_video_kbps(0, 8_500), 8_500, "no stream rate: the whole file's");
+    assert_eq!(source_video_kbps(0, 0), 0, "unknown stays unknown (the ceiling fails closed on it)");
+
+    let it: plx_plex::plex::Metadata = serde_json::from_value(serde_json::json!({ "type": "movie", "Media": [
+        { "id": 1, "bitrate": 4_000, "Part": [{ "key": "/p/1", "Stream": [
+            { "id": 1, "streamType": 1, "bitrate": 3_500 }, { "id": 2, "streamType": 2, "bitrate": 448 }] }] },
+        { "id": 2, "bitrate": 9_000, "Part": [{ "key": "/p/2", "Stream": [
+            { "id": 3, "streamType": 1, "bitrate": 8_000 }, { "id": 4, "streamType": 2, "bitrate": 640 }] }] },
+        { "id": 3, "bitrate": 7_500, "Part": [{ "key": "/p/3", "Stream": [{ "id": 5, "streamType": 1 }] }] },
+        { "id": 4, "Part": [{ "key": "/p/4" }] }
+    ] })).unwrap();
+    let rate = |id: i64| {
+        playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(id)))
+            .1
+            .map(|v| v.video_kbps)
+    };
+    assert_eq!(rate(2), Some(8_000), "the video stream, not the 9000 kbps file");
+    assert_eq!(rate(1), Some(3_500));
+    assert_eq!(rate(3), Some(7_500), "a video stream that does not say its rate: the file's");
+    assert_eq!(rate(4), Some(0), "nothing is known");
+    assert_eq!(rate(99), None, "a version the item lost has no figure of its own");
+}
+
 /// The picker's facts come off the listing row, one per version in the server's order; a
 /// single-version item offers none.
 #[test]

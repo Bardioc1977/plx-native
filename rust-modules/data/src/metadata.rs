@@ -2724,6 +2724,30 @@ pub struct PlayedVersion {
     pub part: String,
     pub vcodec: String,
     pub acodec: String,
+    /// The rate a quality ceiling is judged against for THIS file, in kbps (see
+    /// [`source_video_kbps`]): its own video stream's, else the whole file's, else 0. The default's
+    /// figure (`ResolveEnv::src_kbps`) describes `Media[0]` and is never the picked file's.
+    pub video_kbps: i64,
+}
+
+/// The source rate to judge against a quality ceiling, in kbps: **the VIDEO stream's own**, falling
+/// back to the whole-file figure (0 when neither is known).
+///
+/// The distinction is the units the ceiling is spent in. `Ceiling::max_kbps` ships as
+/// `maxVideoBitrate`, which bounds the VIDEO lane alone, while a `Media`'s `bitrate` is the
+/// whole-stream number, video plus every audio track. Judging the second against the first makes
+/// each rung bite about one AC-3 track early. PMS omits a stream's own rate often enough that the
+/// whole-file fallback has to stay; falling back is the conservative direction (see
+/// `plx_plex::plex::Ceiling::admits`, which fails closed on 0).
+///
+/// The ONE rule: the loaded page's figure (`route::plan::source_kbps` over a `Detail`) and a
+/// picked version's ([`PlayedVersion::video_kbps`]) both come through here.
+pub fn source_video_kbps(video_stream_kbps: i64, whole_file_kbps: i64) -> i64 {
+    if video_stream_kbps > 0 {
+        video_stream_kbps
+    } else {
+        whole_file_kbps
+    }
 }
 
 /// [`fetch_playing_item`]'s pure half.
@@ -2741,8 +2765,18 @@ pub fn playing_version_from(
         part: m.part.first().map(|p| p.key.clone()).unwrap_or_default(),
         vcodec: m.video_codec.clone(),
         acodec: m.audio_codec.clone(),
+        video_kbps: source_video_kbps(media_video_kbps(m), m.bitrate),
     });
     (playing_item_of(sid, rk, it, media), played)
+}
+
+/// The first video stream's own bitrate of a version's first Part, in kbps (0 when it has none or
+/// the stream does not say): the same stream [`convert_streams`] keeps as `Streams::video`.
+fn media_video_kbps(m: &plx_plex::plex::Media) -> i64 {
+    m.part
+        .first()
+        .and_then(|p| p.stream.iter().find(|s| s.stream_type == 1))
+        .map_or(0, |s| s.bitrate)
 }
 
 /// The conversion half of [`fetch_playing_item`] for the default version, pure so the parse is

@@ -7892,9 +7892,10 @@ fn request_env(
     env.fresh_play = retry.is_none() && !request.preview;
     env.version = request.version;
     if env.version.is_some() {
-        // Both describe the default version: a picked one is measured from its own fetch.
+        // The cached streams describe the default version: a picked one is read from its own
+        // fetch. The source rate needs no such reset, `build_stream` measures a picked file from
+        // that same fetch and falls back to this (the default's) only when the pick is gone.
         env.cached_item = None;
-        env.src_kbps = 0;
     }
     if let Some(retry) = retry {
         apply_retry(&mut env, retry);

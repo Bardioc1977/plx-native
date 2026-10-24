@@ -653,3 +653,18 @@ Deviations and findings, appended to as each step lands.
   `a_remembered_audio_track_matches_in_every_version_of_the_episode`. All pass on `origin/main` behaviour by
   design (they pin what upstream gets right). Non-vacuity was checked by mutation: with `request_env` forgetting
   `request.version`, the two re-entry tests and `the_picked_version_rides_the_request_and_the_landing` go red.
+- **S4 (U1).** As designed, one deviation in shape: the shared rule is `plx_data::metadata::source_video_kbps(video,
+  whole)` (a two-number function) instead of a function over `Streams`, because `PlayedVersion` is built from
+  the plex DTO (`media_video_kbps`, the first video stream of the first Part, the same stream `convert_streams`
+  keeps) while the page's figure comes from `Detail.video`; `route::plan::source_kbps(&Detail)` now calls it. The
+  four U1 tests are `a_picked_version_is_measured_from_its_own_video_stream_under_a_quality_rung`,
+  `..._above_the_rung_is_re_encoded_and_remembers_what_it_measured`, `..._without_a_video_stream_rate_falls_back_to_the_whole_file`
+  and `picking_the_default_row_plays_like_a_default_play_under_a_rung`, fixture `rated_versions` (two 1080p
+  versions, rates chosen per test; the video-vs-whole case is 6000 in an 8500 kbps file under the 8000 rung).
+  Observed red on the pre-fix tree: `assertion left == right failed: the ceiling is judged against the picked
+  file's video rate  left: 0  right: 6000` (and `left: 0 right: 9000`, `left: 0 right: 7500`, and for the Default
+  row the route was `start.mkv` against the default play's direct `/library/parts/3134/...`). A data test pins
+  the rule and `playing_version_from`'s figure (`a_picked_versions_video_rate_is_its_own_stream_else_the_whole_file`).
+  The existing assertion `env.cached_item.is_none() && env.src_kbps == 0` is now `env.cached_item.is_none()`.
+  When a pick is gone from the item (`played` is `None`) the default plays with the caller's `env.src_kbps`,
+  which is the default's own figure, so nothing else changes. A trailer/extra never carries a version.
