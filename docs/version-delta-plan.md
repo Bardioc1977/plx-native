@@ -764,3 +764,22 @@ written first and observed red at the old behaviour; the literal assertions foll
   with a Part-less `Media[0]` is not the Default (N4 owns the cursor and the tick). `labels` drops facts for
   every row alike, so one very long row costs the others their size; the estimate is the only coupling to the
   glyph widths. Citations of this plan from docs and comments are S13's to repoint.
+
+### Batch 2, review fixes (`docs/version-delta-review-2.md`, REJECT, one blocking item)
+
+- **Blocking (U5 clamp hit live retries) - confirmed in code and fixed.** `request_play_inner` writes a retry's
+  live playhead into the same `PLAY_RESUME` slot `arm_play_resume` fills for the card or page point, so
+  `pump_play` clamped both. Now only the generation armed by `arm_play_resume` (`PLAY_RESUME_CARD`, cleared by
+  `cancel_play`) is judged, through the pure `landing_start_ns(resume_ns, card_point, played_dur_ms)`; the
+  contract-changed re-entry judges the card's point against the discarded plan's version before handing it on,
+  because the second landing would read it as a retry's. Red (before the fix, `make test-hostsim C=plx_media`):
+  `a_retry_of_the_picked_version_keeps_the_live_playhead_past_its_95_percent_mark`: `the live playhead is not a
+  stored viewOffset  left: Some(0)  right: Some(5280000000000)` (a retry at 88 of 90 minutes) and the seam test
+  `a retry's playhead stands  left: 0`. Also pinned: the card's point is still clamped after a contract-changed
+  re-resolve, and the seam leaves a default play (`played_dur_ms == 0`) alone. Commit `8b0a6052`.
+- **Non-blocking 1 (U7 estimate) - taken.** `exotic_case()` (the fuzz's `MSMPEG4V3 HDR . DTS-HD MA Mono . WEBM`
+  and a `WMV3 / TrueHD Mono / M4V / 888 GB` row) joins the every-language fit test. Red at 125 units: `es versions
+  exotic: Detail "MSMPEG4V3 HDR . DTS-HD MA Mono . WEBM" is 532px in a 527px column` (and `measured_width 655 >
+  MENU_MAX_W 650`); green at `DETAIL_UNITS = 120`. The pinned edge row (124 units) now drops its size
+  (`VC1 HDR . DTS-HD MA 7.1 . MKV`); without the HDR word the rows keep their remaining three facts. The other
+  non-blocking remarks stay with their later steps (S11 cursor and tick, S13 `parity-gaps.md`).
