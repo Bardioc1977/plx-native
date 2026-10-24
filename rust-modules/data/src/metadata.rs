@@ -2009,6 +2009,23 @@ fn patch_loaded_offset(state: &mut MetadataState, at: &crate::viewstate::ViewAt,
     true
 }
 
+/// Tick the version a bare Play takes in the version list of the loaded item, or of the loaded show's
+/// episode, whose (server, key) is exactly `(sid, rk)`. Reports whether a list was found.
+/// **MAIN THREAD.**
+fn mark_plays_version(
+    state: &mut MetadataState,
+    sid: plx_plex::plex::ServerId,
+    rk: &str,
+    media: Option<plx_plex::plex::MediaId>,
+) -> bool {
+    let Some(d) = state.current.as_mut() else { return false };
+    if plx_plex::plex::same_item((d.sid, &d.rk), (sid, rk)) {
+        crate::pms::mark_plays(&mut d.versions, media);
+        return true;
+    }
+    d.sid == sid && d.episodes.edit(rk, |e| crate::pms::mark_plays(&mut e.versions, media))
+}
+
 /// drop the loaded detail (on leaving the detail page). Also supersedes any in-flight async
 /// fetch — otherwise a load requested on the way in lands after the page closed and silently
 /// repopulates CURRENT (and NOW, via `sync_now_playing`) behind whatever screen is now mounted.
@@ -4189,6 +4206,7 @@ pub fn run(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>,
             install_playing(state, p);
             true
         }
+        MetadataCmd::MarkPlaysVersion { sid, rk, media } => mark_plays_version(state, sid, &rk, media),
         MetadataCmd::AppendPlayingSub { sid, rk, stream } => append_playing_sub(state, sid, &rk, stream),
         MetadataCmd::MarkSkipped(m) => {
             mark_skipped(state, m);

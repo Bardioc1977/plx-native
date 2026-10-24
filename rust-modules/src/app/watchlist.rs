@@ -386,6 +386,8 @@ impl Bridge {
             .find(|&i| view.row(i).is_some_and(|r| r.guid == row.guid))
             .and_then(|i| view.facts(i))
             .unwrap_or_default();
+        // No `versions`: a catalog row knows no `Media[]`, so this card's menu offers no Play Version
+        // row and there is no list to tick (`bridge::mark_plays_for`).
         plx_data::pms::PmsMovie {
             sid: copy.server_id,
             rk: copy.rating_key.to_string(),

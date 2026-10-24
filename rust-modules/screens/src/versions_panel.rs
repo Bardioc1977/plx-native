@@ -85,7 +85,10 @@ impl VersionsPanelScreen {
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         // rows carry a sub-line: the track menu's size class
         form.table.compact = false;
-        form.set(Form::new().section(plx_appkit::version_list::section(versions, VersionRow, |v| v.id)), Some(&VersionRow(0)));
+        form.set(
+            Form::new().section(plx_appkit::version_list::section(versions, VersionRow, |v| v.id)),
+            Some(&VersionRow(plx_appkit::version_list::opening(versions))),
+        );
         Self { entry, arg, versions: versions.iter().map(|v| v.id).collect(), form }
     }
 
@@ -329,6 +332,27 @@ mod tests {
         )
     }
 
+    /// **N4.** The panel opens its cursor on the ticked row, the version a bare Play takes, and that
+    /// row alone wears the check; with nothing ticked it opens on the first row and wears none.
+    #[test]
+    fn the_panel_opens_on_the_ticked_row() {
+        let anchor = [500.0f32, 600.0, 64.0, 64.0].map(f32::to_bits);
+        let open = |versions: &[MediaVersion]| {
+            VersionsPanelScreen::new(
+                EntryId(3),
+                VersionsArg { host: InstanceId(9), sid: ServerId::from_raw(1), rk: "42".into(), anchor },
+                versions,
+            )
+        };
+        let plain = open(&plx_appkit::version_list::sample());
+        assert_eq!(plain.form.selected_key(), Some(RowKey(0)), "nothing ticked: the first row");
+        assert!(plain.form.table.sections[0].rows.iter().all(|r| !r.checked));
+
+        let ticked = open(&plx_appkit::version_list::ticked(plx_appkit::version_list::sample(), Some(1)));
+        assert_eq!(ticked.form.selected_key(), Some(RowKey(1)), "the cursor opens on the ticked row");
+        assert_eq!(ticked.form.table.sections[0].rows.iter().map(|r| r.checked).collect::<Vec<_>>(), [false, true]);
+    }
+
     /// **U7: the hero's Play Version panel fits its worst row**, in every shipped language, on the
     /// same fixtures the item menu's page is graded on.
     #[test]
@@ -339,19 +363,23 @@ mod tests {
         let mut out = Vec::new();
         for language in SHIPPED {
             let _guard = language_on_this_thread_for_test(language);
-            for (name, versions) in [
+            for (name, fixture) in [
                 ("worst", plx_appkit::version_list::worst_case()),
                 ("edge", plx_appkit::version_list::edge_case()),
             ] {
-                let panel = VersionsPanelScreen::new(
-                    EntryId(3),
-                    VersionsArg { host: InstanceId(9), sid: ServerId::from_raw(1), rk: "42".into(), anchor },
-                    &versions,
-                );
-                let tag = format!("{} versions panel {name}", language.tag());
-                out.extend(panel.form.table.menu_cap_failure(&measure, &tag));
-                out.extend(panel.form.table.app_fit_failures(plx_ui::table::MENU_MAX_W, &tag));
-                out.extend(panel.form.table.app_fit_failures_hugged(&tag));
+                // nothing ticked, and each row in turn the one a bare Play takes (it wears the check)
+                for tick in std::iter::once(None).chain((0..fixture.len()).map(Some)) {
+                    let versions = plx_appkit::version_list::ticked(fixture.clone(), tick);
+                    let panel = VersionsPanelScreen::new(
+                        EntryId(3),
+                        VersionsArg { host: InstanceId(9), sid: ServerId::from_raw(1), rk: "42".into(), anchor },
+                        &versions,
+                    );
+                    let tag = format!("{} versions panel {name} tick {tick:?}", language.tag());
+                    out.extend(panel.form.table.menu_cap_failure(&measure, &tag));
+                    out.extend(panel.form.table.app_fit_failures(plx_ui::table::MENU_MAX_W, &tag));
+                    out.extend(panel.form.table.app_fit_failures_hugged(&tag));
+                }
             }
         }
         plx_ui::table::assert_no_fit_failures(&out);

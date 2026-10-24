@@ -15,7 +15,8 @@ pub fn title() -> &'static str {
 }
 
 /// **The list as one section**, in the server's order: row `n` is `versions[n]`, identified by
-/// `id(n)` and reporting `act(&versions[n])`. Every row is a button that plays.
+/// `id(n)` and reporting `act(&versions[n])`. Every row is a button that plays; the one a bare Play
+/// takes wears the leading check ([`MediaVersion::plays`]).
 pub fn section<Id: FormId, A, D>(
     versions: &[MediaVersion],
     id: impl Fn(u16) -> Id,
@@ -23,13 +24,21 @@ pub fn section<Id: FormId, A, D>(
 ) -> FormSection<Id, A, D> {
     let mut sec = FormSection::new(title());
     for (n, (v, (label, detail))) in versions.iter().zip(labels(versions)).enumerate() {
-        let mut row = Row::new(label);
+        let mut row = Row::new(label).checked(v.plays);
         if !detail.is_empty() {
             row = row.detail(detail);
         }
         sec = sec.item(id(n as u16), RowKind::Button, act(v), row);
     }
     sec
+}
+
+/// **Where the cursor opens**: the ticked row (the version a bare Play takes, `plays`), else the first
+/// row. "The first row" only places the cursor; it says nothing about which version is the Default
+/// (that is the row whose wire `index` is 0, ticked by `plx_data::pms::mark_plays`, and with a
+/// Part-less `Media[0]` no row is).
+pub fn opening(versions: &[MediaVersion]) -> u16 {
+    versions.iter().position(|v| v.plays).map_or(0, |n| n as u16)
 }
 
 /// What each version's row says: `"25.2 Mbps · 4K"`, over the facts that DIFFER between the
@@ -128,6 +137,16 @@ pub fn sample() -> Vec<MediaVersion> {
     ]
 }
 
+/// `versions` with row `tick` ticked (the version a bare Play takes), for the fit tests: the check
+/// takes the leading column of the row it marks, so every fit is graded with each row marked.
+#[cfg(any(test, feature = "test-support"))]
+pub fn ticked(mut versions: Vec<MediaVersion>, tick: Option<usize>) -> Vec<MediaVersion> {
+    for (n, v) in versions.iter_mut().enumerate() {
+        v.plays = tick == Some(n);
+    }
+    versions
+}
+
 /// The list at its WORST: every fact that can differ does (video codec and HDR, audio and layout,
 /// container, size) and each is at its longest, plus a stereo row, whose layout word is translated.
 /// The fixture the fit tests of both surfaces read (`sample()` shares audio and container, so its
@@ -197,6 +216,26 @@ mod tests {
         }
     }
 
+    /// **N4.** The row of the version a bare Play takes wears the leading check, and the cursor opens
+    /// on it; with no row ticked it opens on the first row, which wears nothing.
+    #[test]
+    fn the_ticked_row_wears_the_check_and_the_cursor_opens_on_it() {
+        let rows = |versions: &[MediaVersion]| {
+            let mut form: FormTable<Pos, plx_plex::plex::MediaId, Infallible> = FormTable::new(plx_ui::table_screen::BAND_BASE);
+            form.set(Form::new().section(section(versions, Pos, |v| v.id)), None);
+            form.table.sections[0].rows.iter().map(|r| r.checked).collect::<Vec<_>>()
+        };
+        let mut versions = sample();
+        assert_eq!(rows(&versions), [false, false], "nothing ticked, nothing checked");
+        assert_eq!(opening(&versions), 0, "the first row only places the cursor");
+        versions[1].plays = true;
+        assert_eq!(rows(&versions), [false, true]);
+        assert_eq!(opening(&versions), 1);
+        versions[0].plays = true;
+        versions[1].plays = false;
+        assert_eq!((rows(&versions), opening(&versions)), (vec![true, false], 0));
+    }
+
     /// The label is rate and resolution; the sub-line names only what tells the versions apart
     /// (here the video codec and HDR, and the size), never a fact they share (audio, container).
     #[test]
@@ -220,14 +259,18 @@ mod tests {
         let mut out = Vec::new();
         for language in SHIPPED {
             let _guard = language_on_this_thread_for_test(language);
-            for (name, versions) in [("sample", sample()), ("worst", worst_case()), ("edge", edge_case()), ("exotic", exotic_case())] {
-                let mut form: FormTable<Pos, plx_plex::plex::MediaId, Infallible> = FormTable::new(plx_ui::table_screen::BAND_BASE);
-                form.set(Form::new().section(section(&versions, Pos, |v| v.id)), None);
-                form.table.compact = false;
-                let tag = format!("{} versions {name}", language.tag());
-                out.extend(form.table.menu_cap_failure(&measure, &tag));
-                out.extend(form.table.app_fit_failures(plx_ui::table::MENU_MAX_W, &tag));
-                out.extend(form.table.app_fit_failures_hugged(&tag));
+            for (name, fixture) in [("sample", sample()), ("worst", worst_case()), ("edge", edge_case()), ("exotic", exotic_case())] {
+                // nothing ticked, and each row in turn the one a bare Play takes (it wears the check)
+                for tick in std::iter::once(None).chain((0..fixture.len()).map(Some)) {
+                    let versions = ticked(fixture.clone(), tick);
+                    let mut form: FormTable<Pos, plx_plex::plex::MediaId, Infallible> = FormTable::new(plx_ui::table_screen::BAND_BASE);
+                    form.set(Form::new().section(section(&versions, Pos, |v| v.id)), None);
+                    form.table.compact = false;
+                    let tag = format!("{} versions {name} tick {tick:?}", language.tag());
+                    out.extend(form.table.menu_cap_failure(&measure, &tag));
+                    out.extend(form.table.app_fit_failures(plx_ui::table::MENU_MAX_W, &tag));
+                    out.extend(form.table.app_fit_failures_hugged(&tag));
+                }
             }
         }
         plx_ui::table::assert_no_fit_failures(&out);

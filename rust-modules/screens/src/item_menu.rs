@@ -732,8 +732,12 @@ impl ItemMenuScreen {
     /// Where focus starts, and where it falls back to when the key it had is gone — the table's
     /// opening row, which skips the separator and never lands on a destructive row while any other
     /// is on offer.
+    ///
+    /// A page that landed the cursor on a row of its own (the Play Version page opens on the ticked
+    /// version) says so through the table's cursor, as `AltSourcesScreen::seat` does; every other page
+    /// opens on the table's opening row, which is where its cursor is until the viewer moves it.
     fn opening(&self) -> u32 {
-        self.form.opening_key().map_or(0, |k| k.0)
+        self.form.selected_key().or_else(|| self.form.opening_key()).map_or(0, |k| k.0)
     }
 
     fn frame(&self, measure: &dyn plx_machine::machine::Measure) -> Rect {
@@ -800,12 +804,13 @@ impl ItemMenuScreen {
     }
 
     /// Replace the rows with the Play Version page, in the same panel. The focused row is gone
-    /// from the new form, so the engine's reconcile seats focus on its opening row, the first
-    /// version.
+    /// from the new form, so the engine's reconcile seats focus on the page's opening row: the
+    /// version a bare Play takes (ticked), else the first.
     fn show_versions(&mut self, rk: &str) {
+        let opening = plx_appkit::version_list::opening(self.versions());
         let form = build_versions(rk, self.versions());
         self.form.table.compact = false;
-        self.form.set(form, None);
+        self.form.set(form, Some(&ItemRow::Version(opening)));
     }
 
     /// The highlighted row, for the focus probe — a READ of the cursor the engine moves.
@@ -2318,16 +2323,20 @@ mod tests {
         let mut out = Vec::new();
         for language in SHIPPED {
             let _guard = language_on_this_thread_for_test(language);
-            for (name, versions) in [
+            for (name, fixture) in [
                 ("worst", plx_appkit::version_list::worst_case()),
                 ("edge", plx_appkit::version_list::edge_case()),
             ] {
-                let mut menu = built(super::build_versions("42", &versions));
-                menu.0.table.compact = false;
-                let tag = format!("{} item menu versions {name}", language.tag());
-                out.extend(menu.0.table.menu_cap_failure(&measure, &tag));
-                out.extend(menu.0.table.app_fit_failures(MENU_MAX_W, &tag));
-                out.extend(menu.0.table.app_fit_failures_hugged(&tag));
+                // nothing ticked, and each row in turn the one a bare Play takes (it wears the check)
+                for tick in std::iter::once(None).chain((0..fixture.len()).map(Some)) {
+                    let versions = plx_appkit::version_list::ticked(fixture.clone(), tick);
+                    let mut menu = built(super::build_versions("42", &versions));
+                    menu.0.table.compact = false;
+                    let tag = format!("{} item menu versions {name} tick {tick:?}", language.tag());
+                    out.extend(menu.0.table.menu_cap_failure(&measure, &tag));
+                    out.extend(menu.0.table.app_fit_failures(MENU_MAX_W, &tag));
+                    out.extend(menu.0.table.app_fit_failures_hugged(&tag));
+                }
             }
         }
         plx_ui::table::assert_no_fit_failures(&out);
@@ -2386,6 +2395,28 @@ mod tests {
         let req = commit(&mut s, second);
         assert_eq!(req.act, Action::PlayVersion { rk: "42".into(), media: plx_plex::plex::MediaId(3086) });
         assert_eq!(req.item.map(|r| r.rk), Some("42".into()), "the captured row rides with it");
+    }
+
+    /// **N4.** The Play Version page marks the version a bare Play takes and opens its cursor (and
+    /// focus) on it; with nothing ticked it opens on the first row, as before.
+    #[test]
+    fn the_play_version_page_opens_on_the_ticked_row() {
+        let open = |tick: Option<usize>| {
+            let m = PmsMovie { versions: plx_appkit::version_list::ticked(sample_versions(), tick), ..item(3, PosterMark::None) };
+            let mut s = ItemMenuScreen::new(EntryId(7), card_arg(&m, false));
+            s.built = true;
+            s.form.set(build_card(&m, false, DeckPress::Play, None, None, None), None);
+            s.show_versions("42");
+            s
+        };
+        let plain = open(None);
+        assert_eq!(plain.form.selected_key(), Some(ItemRow::Version(0).key()));
+        assert!(plain.form.table.sections[0].rows.iter().all(|r| !r.checked));
+
+        let ticked = open(Some(1));
+        assert_eq!(ticked.form.selected_key(), Some(ItemRow::Version(1).key()), "the cursor is on the ticked row");
+        assert_eq!(ticked.opening(), ItemRow::Version(1).key().0, "and so is focus when it reseats");
+        assert_eq!(ticked.form.table.sections[0].rows.iter().map(|r| r.checked).collect::<Vec<_>>(), [false, true]);
     }
 
     /// **The Watchlist hold menu** is `hold::rows_for` bound to actions: the go row

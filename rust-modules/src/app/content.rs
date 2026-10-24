@@ -136,6 +136,31 @@ fn note_extra_now_playing(meta: &mut plx_data::stores::metadata::MetadataStore, 
     }
 }
 
+/// What a content panel owes the store before its surface is presented: the Play Version panel's
+/// list is ticked ([`mark_hero_versions`]); no other panel reads anything but what is loaded.
+pub(super) fn prepare_panel(meta: &mut plx_data::stores::metadata::MetadataStore, panel: &plx_screens::registry::ContentPanel) {
+    if matches!(panel, plx_screens::registry::ContentPanel::Versions { .. }) {
+        mark_hero_versions(meta);
+    }
+}
+
+/// **Tick the version a bare Play takes in the hero's Play Version panel.** The panel lists the loaded
+/// Detail's versions (`hero_versions`), the data layer cannot name the memory, so the application
+/// reads the profile's remembered version of the item the hero's Play plays and has the store tick
+/// it (`MetadataCmd::MarkPlaysVersion`) just before the panel is presented. Computed at open, so
+/// there is no hook at the landing and nothing to go stale after a pick.
+fn mark_hero_versions(meta: &mut plx_data::stores::metadata::MetadataStore) {
+    let Some((sid, rk)) = meta
+        .view()
+        .current()
+        .and_then(|d| plx_screens::detail::hero_versions_rk(d).map(|rk| (d.sid, rk.to_string())))
+    else {
+        return;
+    };
+    let media = plx_media::route::recalled_version(sid, &rk);
+    meta.run(plx_data::stores::metadata::MetadataCmd::MarkPlaysVersion { sid, rk, media });
+}
+
 pub(super) fn request_play_intent(
     session: &mut plx_media::route::PlaybackSession,
     meta: &mut plx_data::stores::metadata::MetadataStore,
@@ -609,6 +634,8 @@ pub(crate) fn content_requests(app: &mut App, fr: &Frame) {
                     _ => None,
                 };
                 let subject = subject.as_ref().map(|(sid, rk)| (*sid, rk.as_str()));
+                // …and the Play Version panel's list is ticked before it is presented
+                prepare_panel(app.bridge.metadata_mut(), &panel);
                 bridge::open_content_panel(&mut app.pages, instance, subject, panel);
             }
             ContentReq::ItemMenu => {
@@ -2689,3 +2716,7 @@ mod repair_replay_tests {
         assert_eq!(live, vec![PlayerReq::RepairSandbox, PlayerReq::Exit]);
     }
 }
+
+#[cfg(test)]
+#[path = "version_ticks_tests.rs"]
+mod version_ticks_tests;

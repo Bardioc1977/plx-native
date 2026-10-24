@@ -4583,6 +4583,17 @@ pub(crate) fn hero_versions(d: &Detail) -> &[plx_data::pms::MediaVersion] {
     }
 }
 
+/// The ratingKey of the item [`hero_versions`] lists the versions of: the page's own movie or
+/// episode, or on a show page the episode its Play plays. The application ticks that item's list
+/// (`MetadataCmd::MarkPlaysVersion`) before it opens the Play Version panel.
+pub fn hero_versions_rk(d: &Detail) -> Option<&str> {
+    if d.is_show {
+        hero_episode_played(d).map(|ep| ep.rk.as_str())
+    } else {
+        Some(d.rk.as_str())
+    }
+}
+
 /// A presented preview must leave the framebuffer transparent. The player route punches this
 /// hole from the loop; this page stays mounted, so an opaque [`plx_gfx::gfx::frame_clear`] is a
 /// full-screen sheet over the plane (sound, no picture).

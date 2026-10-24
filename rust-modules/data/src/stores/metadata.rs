@@ -221,6 +221,12 @@ pub enum MetadataCmd {
     ApplyView { at: crate::viewstate::ViewAt, edit: crate::viewstate::ViewEdit },
     /// The playback plan's leaf (`route.rs`).
     InstallPlaying(Option<crate::metadata::PlayingItem>),
+    /// Tick the version a bare Play takes in the version list of the loaded item `(sid, rk)`, or of
+    /// the loaded show's episode of that key: `media` is the profile's remembered version (the
+    /// application reads the memory, which this layer cannot name), and [`crate::pms::mark_plays`]
+    /// applies the one rule. Issued by the application just before it presents the hero's Play
+    /// Version panel; touches nothing else. Controlled recordings never carry it.
+    MarkPlaysVersion { sid: ServerId, rk: String, media: Option<plx_plex::plex::MediaId> },
     /// A subtitle the server just installed for the PLAYING item (the player's subtitle search),
     /// appended to its subtitle list so the menu lists it and the pick can be committed. Touches
     /// nothing else — not `InstallPlaying`, which clears the skipped markers and replaces the whole

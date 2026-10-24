@@ -206,6 +206,25 @@ pub struct MediaVersion {
     /// A video stream is HDR or Dolby Vision. Only a response that carries streams can say so (a
     /// listing usually does not), so `false` is "not known to be".
     pub hdr: bool,
+    /// **The version a bare Play takes for this profile**: the list's tick ([`mark_plays`]). Set by the
+    /// application at the moment a menu or panel captures the list (the data layer cannot name the
+    /// memory), never stored: it is skipped while false and outside the Home catalog's canonical hash
+    /// like the list itself.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub plays: bool,
+}
+
+/// **Tick the version a bare Play takes**: the row whose `id` is `recalled` (the profile's remembered
+/// pick) if it is listed, else the row whose WIRE `index` is 0 (the Default) if it is listed, else no
+/// row. Never "the first row": with a Part-less `Media[0]` the first row is `Media[1]`, which a bare
+/// Play does not take. THE rule for every menu and panel that draws the list, so they cannot tick
+/// two different rows; it clears any earlier tick first, so marking twice leaves one.
+pub fn mark_plays(versions: &mut [MediaVersion], recalled: Option<plx_plex::plex::MediaId>) {
+    let listed = recalled.and_then(|id| versions.iter().position(|v| v.id == id));
+    let plays = listed.or_else(|| versions.iter().position(|v| v.index == 0));
+    for (n, v) in versions.iter_mut().enumerate() {
+        v.plays = plays == Some(n);
+    }
 }
 
 /// Can this `Media` be played at all? It needs a `Part` with a key: that key is what the player
@@ -254,6 +273,7 @@ pub fn versions_of(it: &plx_plex::plex::Metadata) -> Vec<MediaVersion> {
                 container: clean(part.map_or(&m.container, |p| if p.container.is_empty() { &m.container } else { &p.container })),
                 size: part.map_or(0, |p| p.size),
                 hdr: part.is_some_and(|p| p.stream.iter().any(|s| s.stream_type == 1 && s.is_hdr())),
+                plays: false,
             }
         })
         .collect();

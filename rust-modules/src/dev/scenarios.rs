@@ -2601,6 +2601,7 @@ fn modal_bench_open(app: &mut App, target: bench::ModalTarget) {
             let arg = ItemMenuArg {
                 sid,
                 rk: rk.clone(),
+                // An empty `PmsMovie`: no versions, so nothing to tick (`bridge::mark_plays_for`).
                 kind: ItemMenuKind::Card {
                     row: Box::new(plx_data::pms::PmsMovie { sid, rk, ..Default::default() }),
                     from_deck: false,

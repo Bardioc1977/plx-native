@@ -485,6 +485,50 @@ fn an_unplayable_version_is_not_a_row_and_each_survivor_keeps_its_wire_index() {
         "an empty Part key is as unplayable as no Part, and the gap stays in the indices");
 }
 
+/// The ids of the ticked rows, in list order.
+fn ticked(rows: &[crate::pms::MediaVersion]) -> Vec<i64> {
+    rows.iter().filter(|v| v.plays).map(|v| v.id.0).collect()
+}
+
+/// **N4: the tick is the version a bare Play takes.** The remembered id if the list has it, else the
+/// row at WIRE index 0, else no row, and never "the first row".
+#[test]
+fn the_tick_is_the_remembered_version_else_the_wire_index_0_row_else_none() {
+    let id = |n: i64| Some(plx_plex::plex::MediaId(n));
+    let mut rows = crate::pms::versions_of(&two_versions());
+    crate::pms::mark_plays(&mut rows, id(3082));
+    assert_eq!(ticked(&rows), [3082], "the remembered version is listed");
+    crate::pms::mark_plays(&mut rows, None);
+    assert_eq!(ticked(&rows), [3086], "nothing remembered: the Default, the row at wire index 0");
+    crate::pms::mark_plays(&mut rows, id(9));
+    assert_eq!(ticked(&rows), [3086], "a remembered id the item lost: the Default plays, so it is ticked");
+
+    // a Part-less Media[0] and two playable others: the first row is Media[1], which is NOT the Default
+    let mut rows = crate::pms::versions_of(&partless_default());
+    assert_eq!(rows.iter().map(|v| v.index).collect::<Vec<_>>(), [1, 2]);
+    crate::pms::mark_plays(&mut rows, None);
+    assert_eq!(ticked(&rows), Vec::<i64>::new(), "the Default cannot play and is no row: no tick, not the first row");
+    crate::pms::mark_plays(&mut rows, id(12));
+    assert_eq!(ticked(&rows), [12], "a remembered Media[2] is ticked");
+    crate::pms::mark_plays(&mut rows, id(10));
+    assert_eq!(ticked(&rows), Vec::<i64>::new(), "the remembered id is the Part-less Media[0]: not listed, and no Default row either");
+    crate::pms::mark_plays(&mut rows, id(11));
+    assert_eq!(ticked(&rows), [11], "re-marking moves the tick instead of adding one");
+}
+
+/// A tick is a value of the moment, not a record: a list nobody ticked serializes exactly as it did
+/// before the field existed (recorded `Detail`s and the Home catalog's bytes).
+#[test]
+fn an_unticked_list_serializes_as_before() {
+    let rows = crate::pms::versions_of(&two_versions());
+    assert!(!serde_json::to_string(&rows).unwrap().contains("plays"));
+    let mut ticked_rows = rows.clone();
+    crate::pms::mark_plays(&mut ticked_rows, None);
+    assert!(serde_json::to_string(&ticked_rows).unwrap().contains("\"plays\":true"));
+    let back: Vec<crate::pms::MediaVersion> = serde_json::from_str(&serde_json::to_string(&rows).unwrap()).unwrap();
+    assert_eq!(back, rows, "and reads back without the key");
+}
+
 /// **U6, the single gate.** A list is offered for two or more playable versions, and also for ONE
 /// playable version that is not the Default (a Part-less `Media[0]` plus exactly one playable
 /// other: that version is reachable only through the list). A lone Default, or nothing playable, is
@@ -867,5 +911,39 @@ fn an_offset_moves_the_loaded_item_and_the_episode_it_names_and_only_when_it_dif
     let d = current(test_state()).unwrap();
     assert_eq!(d.resume_ms, 7_000);
     assert_eq!((d.episodes.get(0).unwrap().resume_ms, d.episodes.get(1).unwrap().resume_ms), (42_000, 6), "no other episode moved");
+    clear(test_state(), test_adapter());
+}
+
+/// **N4: the hero panel's tick.** `MarkPlaysVersion` ticks the version a bare Play takes in the loaded
+/// movie's list, or in the loaded show's episode of that key, by the one `mark_plays` rule, and
+/// touches no other list.
+#[test]
+fn mark_plays_version_ticks_the_loaded_item_or_the_episode_it_names() {
+    use crate::stores::metadata::MetadataCmd;
+    let _serial = plx_base::testlock::serial();
+    let rows = crate::pms::versions_of(&two_versions());
+    let id = |n: i64| Some(plx_plex::plex::MediaId(n));
+    set_current_for_test(test_state(), Some(Detail {
+        sid: SRV_A,
+        rk: "movie".into(),
+        versions: rows.clone(),
+        episodes: vec![
+            Episode { rk: "e1".into(), season: 1, versions: rows.clone(), ..Default::default() },
+            Episode { rk: "e2".into(), season: 1, versions: rows.clone(), ..Default::default() },
+        ].into(),
+        ..Default::default()
+    }));
+    let mark = |sid, rk: &str, media| super::run(test_state(), test_adapter(),
+        MetadataCmd::MarkPlaysVersion { sid, rk: rk.into(), media });
+    assert!(mark(SRV_A, "movie", id(3082)), "the loaded item's list");
+    let d = current(test_state()).unwrap();
+    assert_eq!(ticked(&d.versions), [3082]);
+    assert!(mark(SRV_A, "e2", None), "an episode of the loaded show: the Default");
+    let d = current(test_state()).unwrap();
+    let episode = |i: usize| ticked(&d.episodes.get(i).unwrap().versions);
+    assert_eq!((episode(0), episode(1)), (Vec::<i64>::new(), vec![3086]), "only the episode it names");
+    assert_eq!(ticked(&d.versions), [3082], "and the page's own list is as it was");
+    assert!(!mark(SRV_B, "movie", id(3086)), "another server's key names nothing here");
+    assert!(!mark(SRV_A, "nobody", id(3086)), "neither does an episode that is not loaded");
     clear(test_state(), test_adapter());
 }

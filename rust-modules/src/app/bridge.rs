@@ -1135,10 +1135,7 @@ impl Bridge {
             }
             if let Some((rk, mark)) = page.focused_episode(ret.focus, meta) {
                 // the ONE entry point whose item is a leaf of the season this page has loaded
-                let versions = meta.current()
-                    .and_then(|d| d.episodes.position(&rk).and_then(|i| d.episodes.get(i)))
-                    .map(|ep| ep.versions.clone())
-                    .unwrap_or_default();
+                let versions = episode_versions(meta, sid, &rk);
                 let mut arg = strip_menu_arg(sid, &rk, ItemMenuKind::Episode { mark, versions }, entry, ret.focus, rect);
                 arg.watchlist = self.watchlist_face(page.watchlist_hex(), plx_data::watchlist::model::Kind::Show, true);
                 return Some(arg);
@@ -3116,6 +3113,43 @@ fn anchor_bits(rect: Option<plx_ui::Rect>) -> [u32; 4] {
     [r.x.to_bits(), r.y.to_bits(), r.w.to_bits(), r.h.to_bits()]
 }
 
+/// **Tick the version a bare Play takes in a version list a menu captures**: the profile's remembered
+/// version of `(sid, rk)` if the list has it, else the Default, by the one rule
+/// (`plx_data::pms::mark_plays`). The data layer cannot name the memory, so the application sets the
+/// tick at the moment a menu captures its list, which is also what keeps it fresh: it is computed at
+/// open, never stored. MAIN THREAD.
+///
+/// Every capture of a version list goes through here: [`card_menu_arg`] (Home, Library, Search,
+/// Related, Person and Collection cards), the detail filmstrip's episode menu
+/// ([`episode_versions`]), and the hero's Play Version panel (`content::mark_hero_versions`). The
+/// Watchlist's matched card (`watchlist.rs`) and the dev bench's menu (`dev/scenarios.rs`) build a
+/// `PmsMovie` with no versions, so there is nothing to tick there.
+pub(crate) fn mark_plays_for(
+    sid: plx_plex::plex::ServerId,
+    rk: &str,
+    versions: &mut [plx_data::pms::MediaVersion],
+) {
+    if !versions.is_empty() {
+        plx_data::pms::mark_plays(versions, plx_media::route::recalled_version(sid, rk));
+    }
+}
+
+/// The versions of the loaded show's episode `rk`, as the filmstrip's menu captures them (ticked,
+/// [`mark_plays_for`]); empty when the episode is not loaded or has no choice.
+pub(crate) fn episode_versions(
+    meta: plx_data::metadata::MetadataView<'_>,
+    sid: plx_plex::plex::ServerId,
+    rk: &str,
+) -> Vec<plx_data::pms::MediaVersion> {
+    let mut versions = meta
+        .current()
+        .and_then(|d| d.episodes.position(rk).and_then(|i| d.episodes.get(i)))
+        .map(|ep| ep.versions.clone())
+        .unwrap_or_default();
+    mark_plays_for(sid, rk, &mut versions);
+    versions
+}
+
 /// The argument for a hold on a CARD — a home shelf, the Library grid, a Search result shelf, a
 /// person's filmography, the detail page's Related shelf. All five were `MenuHost` variants and
 /// all five are the same arm: the row rides in the argument instead of being looked up in the hub
@@ -3128,10 +3162,14 @@ pub(crate) fn card_menu_arg(
     focus: Option<FocusKey<u32>>,
     rect: Option<plx_ui::Rect>,
 ) -> plx_screens::registry::ItemMenuArg {
+    // The row rides in the argument, so its version list is captured NOW: ticked for the version a
+    // bare Play takes (`mark_plays_for`), computed at open and never stored.
+    let mut row = item.clone();
+    mark_plays_for(row.sid, &row.rk, &mut row.versions);
     plx_screens::registry::ItemMenuArg {
         sid: item.sid, // the ROW's server, not the current one
         rk: item.rk.clone(),
-        kind: ItemMenuKind::Card { row: Box::new(item.clone()), from_deck },
+        kind: ItemMenuKind::Card { row: Box::new(row), from_deck },
         host,
         focus,
         anchor: anchor_bits(rect),
