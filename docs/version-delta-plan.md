@@ -783,3 +783,97 @@ written first and observed red at the old behaviour; the literal assertions foll
   MENU_MAX_W 650`); green at `DETAIL_UNITS = 120`. The pinned edge row (124 units) now drops its size
   (`VC1 HDR . DTS-HD MA 7.1 . MKV`); without the HDR word the rows keep their remaining three facts. The other
   non-blocking remarks stay with their later steps (S11 cursor and tick, S13 `parity-gaps.md`).
+
+## Implementation notes, batch 3 (S9-S11)
+
+Commits: S9 `1195426f`, S10a `7132081d`, S10b `521ade1b`, S11a `26bf2c0f`, S11b `9f81559a`. Every gate ran on the
+committed tree with `git status --short` empty before and after; ledgers untouched (16/78/58/11, pinned by
+`tests/test_harness.py`), `ci/list-caps.ini` gained only the two `work` sections of N1, no `SHAPE` string moved.
+
+- **S9 (N1).** `git cherry-pick -n 31628fa9 9a28735c` applied without a code conflict; the only conflict was the plan
+  document of the old branch, which is not carried (deleted again). The two citations of it (`plex/CLAUDE.md`,
+  `prefs/version_memory.rs`) now point at `docs/version-selection-spec.md` section 4.3. Contents as planned: scope
+  `PerItem`, account-bound, `de_soft_vec`, `CAP` 128, `BUDGET_BYTES` 24 KiB, shed last, `DESCRIPTORS` line,
+  `ACCOUNT_BOUND_PREFERENCES`, the worst-case household test fills it (so the 256 KiB guard is graded with four
+  lists at their caps), `document_size_line` reports every memory share. Gates: `plx_plex` `test result: ok. 748
+  passed; 0 failed` (735 + 13), `plx_platform` `281 passed`, list-caps, module-layers and `ci/check-deps.sh` green,
+  `make lint`, `make check-nodef`. The `plex/CLAUDE.md` sentence "read by `route::recalled_version`" becomes true at S10a.
+- **S10a (N2).** Port of step 5 with `MediaId` at the API: `recalled_version(sid, rk) -> Option<MediaId>` (an id <= 0
+  reads as nothing) and `remember_version(sid, rk, Option<MediaId>) -> bool`; mirror, tenant and `MEMORY_ROWS` entry
+  as designed. The old eight door tests are ported (mirror before file, stamp, re-pick/forget, non-positive id, two
+  servers, restore and per-profile isolation, foreign account, unseated boot, unrestored mirror). `plx_media` 1758,
+  hostsim 1920 passed.
+- **S10b (N3).** `request_play_inner` takes `mut request` and recalls once, after `begin_playback_request` and before
+  `ps.request` is stored, when `retry.is_none() && !preview && !context_omits_queue_continuous(ctx)` and the request
+  names no version. `fetch_playing_item` now answers `Option<(PlayingItem, VersionLookup)>`
+  (`Default | Picked(PlayedVersion) | Gone | Unanswered`); `Plan.version_settle` (`Untouched | Remember(id) |
+  Forget`, decided by the pure `plan::version_settle`, keyed on the version's WIRE index) is read in `pump_play`
+  before `apply_plan` consumes the plan, and applied only for a playable landing whose `PlayLanding.settles` is set,
+  through `settle_version`, which calls the door only when `recalled_version` differs from the target.
+  *Deviations / findings.* (1) `settles` is a property of the landing, not derivable at `pump_play`, and the
+  in-flight contract re-resolve is a `Some(retry)` re-entry that must still settle an explicit pick, so
+  `request_play_inner`'s `trace_generation: Option<u32>` became `continued: Option<Continued {trace_generation,
+  settles}>`; a retry or rescue never settles. (2) `Gone` forgets unconditionally, so an explicit pick of a vanished id
+  also drops a different remembered one (edge of an edge; the plan's rule as written). (3) A retry after a
+  SUCCESSFUL landing is refused by `begin_playback_request`, so the retry tests re-enter after a refused first
+  landing, as the S3 characterisation does. (4) `a_failed_fetch_keeps_the_pick` serves an unparseable body and asserts
+  the play still lands, so it cannot be vacuous. (5) A new log line `route: playing remembered version <id>` and
+  `route: the item could not be read for version <id>; playing the default` (ids only).
+  *Red, observed at the tree with only the types in place (12 of 27 tests of the file failed):*
+  `a_remembered_version_survives_the_contract_changed_in_flight_re_resolve`: `recalled once, onto the request  left:
+  None right: Some(MediaId(3082))`; `a_retry_after_a_refused_first_plan_keeps_the_remembered_version`: `but the
+  request still names it  left: None right: Some(MediaId(3082))`; `a_pick_of_wire_index_0_forgets`: `the Default
+  needs no record, and the old pick is gone  left: Some(MediaId(3082)) right: None`;
+  `a_vanished_remembered_id_is_forgotten_and_the_default_plays`: `the dead id is dropped  left: Some(MediaId(9999))
+  right: None`; `the_explicit_pick_wins_over_a_different_remembered_one`: `left: Some(MediaId(3082)) right:
+  Some(MediaId(3090))`; `with_a_partless_media_0_and_two_playable_others_a_pick_of_media_1_is_remembered`: `left:
+  None right: Some(MediaId(3082))`; `an_up_next_successor_recalls_its_own_episodes_pick`: `left: None right:
+  Some(MediaId(3082))`. *Non-vacuity of the rest by mutation* (each of these turned a named test red, restored
+  after): recall only in `request_env` for `fresh_play` (B1: five tests incl. both re-entry tests); every
+  non-continued landing settles (`a_retry_landing_never_settles`, `an_extra_a_trailer_and_a_preview_landing_never_settle`);
+  no `ok` guard (`a_refused_plan_after_a_remembered_pick_leaves_the_old_pick_standing`); `Unanswered` forgets
+  (`a_failed_fetch_keeps_the_pick`); `Gone` keeps (two tests); index 0 remembers (`a_pick_of_wire_index_0_forgets`,
+  `a_pick_of_the_default_with_nothing_remembered_writes_nothing`); first-row-forgets (`with_a_partless_media_0_...`);
+  extras recall (two tests); the contract continuation loses `settles`
+  (`an_explicit_pick_still_settles_after_a_contract_changed_re_resolve`). A first mutation pass printed "none failed"
+  for three mutants because they did not compile (dead-code under deny-warnings); they were redone as compiling
+  mutants. Gates: `plx_data` 1220, `plx_media` 1777, `make test-hostsim C=plx_media` 1939 passed, `make test-fast`
+  green (app crate 1001), lint, `check-nodef`, `ci/check-deps.sh`.
+- **S11a (N4).** `MediaVersion.plays` (skipped while false; `versions` is already outside the Home catalog hash) and
+  the pure `plx_data::pms::mark_plays` (recalled id if listed, else the wire-index-0 row if listed, else none;
+  re-marking clears first). `MetadataCmd::MarkPlaysVersion {sid, rk, media}` ticks the loaded item's list or the
+  loaded show's episode of that key; recorded flows never emit it (the existing "unsupported controlled metadata
+  command" arm). The application ticks at the captures: `card_menu_arg` (every card menu), `episode_versions` (the
+  filmstrip episode's menu, in `content_menu_arg`), and `content::prepare_panel` before `ContentPanel::Versions` is
+  presented (`plx_screens::detail::hero_versions_rk` names the leaf the hero's Play plays). The watchlist's matched
+  card and the dev bench's menu carry no `versions`, so both only say so. `version_list::section` draws the check;
+  `version_list::opening` places the cursor; the item menu's Play Version page (`show_versions` keeps the ticked row,
+  `opening()` is now "the table's cursor, else the opening row", as `AltSourcesScreen::seat` already did) and the
+  hero panel open on it. *Red observed:* `the_tick_is_the_remembered_version_else_the_wire_index_0_row_else_none`
+  (stub `mark_plays`): `the remembered version is listed  left: [] right: [3082]`, and with the first-row mutant:
+  `the Default cannot play and is no row: no tick, not the first row  left: [11] right: []`;
+  `mark_plays_version_ticks_the_loaded_item_or_the_episode_it_names`: `assertion failed: mark(SRV_A, "movie",
+  id(3082))`; `the_ticked_row_wears_the_check_and_the_cursor_opens_on_it`: `left: [false, false] right: [false,
+  true]`; `the_panel_opens_on_the_ticked_row`: `the cursor opens on the ticked row  left: Some(RowKey(0)) right:
+  Some(RowKey(1))`; `the_play_version_page_opens_on_the_ticked_row`: `left: Some(RowKey(100)) right:
+  Some(RowKey(101))`; `a_card_menu_ticks_the_version_a_bare_play_takes`: `nothing remembered: the Default  left: []
+  right: [10]`. *Not host-tested:* the two one-line call sites of `episode_versions` (in `content_menu_arg`) and
+  `prepare_panel` (the `ContentReq::Panel` arm of `content_requests`) sit behind a dispatcher and an `App`; their
+  helpers are tested, the wiring is left to the S15 simulator leg. The fit tests of the appkit list, the item menu
+  page and the hero panel now grade every row as the ticked one (`version_list::ticked`) in every shipped language:
+  green, the check does not cost a pixel of the column the rows were fitted to. **No screen `SHAPE` moved**
+  (`VersionsPanel{.. versions:[i64] ..}`, `item_menu::SHAPE`, `the_screen_shape_inventory_is_pinned`), so
+  `SCREEN_SHAPES_PIN` is untouched and S16 stays conditional on nothing so far; `make check-replay` `3 fixtures, 6
+  replays, 0 failures` (all `verdict=SAME`). Gates: `plx_data` 1223, `plx_appkit` 350, `plx_screens` 1710, `make
+  test-fast` (app crate 1006) and `make test-hostsim` (app crate) 1119 passed.
+- **S11b (N5).** Ported the harness hunks only: `arm_version_memory` beside `arm_track_memory` (one shared
+  `forget_all_memory`), the `SeatWatch` call, `tests/run.py` (every case), `tests/test_harness.py` (the expected list
+  and `test_every_case_forgets_version_memory_at_the_seat`), `tests/README.md` (one paragraph). `--guest` never seats,
+  so the arm clears what a seated boot holds, through the door, exactly as the track-memory arm. Red observed:
+  `armed with clear, the seated profile's picks are forgotten  left: 2 right: 0`, `and the seat trigger ran the
+  clear for the profile it seated  left: 1 right: 0`, `Lists differ: [] != [('plxnative-versionmemory', 'clear')]`.
+  Gates: `make test-hostsim` 1121, `make test-fast` (app crate 1007), `python3 tests/test_harness.py` `Ran 544 tests
+  ... OK (skipped=1)`.
+- **Open for later steps.** S12 mock; S13 doc-claim audit must also see `PlaybackRequest.version`/`ResolveEnv.version`
+  (already reworded in S10b), `Detail.versions`' doc ("`plays`"), the `plex/CLAUDE.md` memory-door paragraph; the
+  `docs/known-issues.md` entry "Part-less `Media[0]` has no way back" is now also visible as "no row ticked".
