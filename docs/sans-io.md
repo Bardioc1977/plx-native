@@ -111,3 +111,50 @@ becomes one code path that tests and the product both drive. The PR then:
 It never edits a line to make a new site pass, and never adds one: a new worker start, registry read
 or fork in a machine is moved behind an effect instead. A ledger file that reaches zero entries is
 deleted; a rule whose last file is gone has a total of zero, and its pin says so.
+
+A store the Bridge runs leaves as a store job, not an `AppFx`, while a stepped machine such as the
+session owner leaves as an `Effects` value; the next section is the rule for the two.
+
+## The store job lane
+
+The Metadata store's detail request (`request_detail`) was the first to stop starting its own
+worker. Its three ledger lines are gone and the shape is the one the other `data/` stores copy.
+
+- **The shape.** `plx_machine::job` holds `Job<R>` (an `Addr` and a request that carries everything
+  the worker needs), `Port<T>` (where the one answer goes: exactly one `done` or `refused` per job)
+  and `assert_fx!` (a step test reads the jobs it emitted instead of waiting on a thread). A store
+  keeps its own job enum, request types and port: `plx_data::stores::StoreJob`,
+  `MetadataStore::take_jobs`, and `plx_data::metadata::{DetailReq, DetailPort}`. The app's `StoreRunner`
+  (`app/adapters/stores.rs`) executes a job and owns what `data/` must not: the tape's admission
+  record, the thread and the `client_for` read. It is `Live` or `Held` (a test parks the job and
+  runs it on the test thread), chosen when the `Bridge` is constructed.
+- **Two drains, one rule.** A stepped machine (the session owner) emits its work through `Effects`,
+  and the owner's drain starts it. A store the Bridge runs emits through its own `take_jobs`, and
+  `Stores::take_jobs` aggregates every store's outbox: `Bridge::metadata_run` drains it right after
+  the store step, so a job is started in the same Bridge call that emitted it. A caller that holds
+  only the store (`describe_movie` gets a `&mut MetadataStore`) drains with
+  `Bridge::start_store_jobs` the moment its call returns. A new store joins by implementing its
+  own outbox and adding it to `Stores::take_jobs` and `Stores::has_jobs`, in that one place.
+- **Whoever steps a store drains it.** `MetadataStore`'s `Machine::step` runs the command and does
+  not drain: a `RequestDetail` stepped through it leaves its job on the outbox and nothing starts
+  it. The same holds for the `pub` `Stores::metadata_run`. The owner drains in the same call, as
+  `Bridge::metadata_run` does; no type enforces it, the counter below catches the lapse.
+- **Results do not return as FIFO events.** A store's result goes back through the landing and its
+  gate (`landgate`, the `adapter_rank` of the landing key), where the pump takes it by value. This
+  is a deliberate exception to "every result returns as one addressed event in the same drain":
+  it is kept so that the replay anchors hold, because the landing is where they already record a
+  result.
+- **Why the job is not an `AppFx`.** A new `app_effect` arm that starts IO without pushing
+  `Fx::Deliver(` is a new `fxlanes` site; `bootstrap::effects::app` fails closed on a variant it
+  cannot encode in controlled Home; and every `Fx::App` is an `"e":"App"` record, so the replay
+  fixtures would change. A later store that routes its jobs through `AppFx` brings all three back.
+- **A bypassed drain is a red test, and in production a logged one.** `metadata_pump_detail` keeps
+  a backstop under the senders: a job it finds on an outbox is started there, so the request still
+  settles, and is counted in the Bridge's `late_store_jobs` and logged as one `stores: WARN` line.
+  `Bridge::assert_no_store_jobs_left_for_test` (`#[cfg(test)]`) fails a frame that ends with a job
+  still on an outbox or with that count above zero, so a sender that bypassed `Bridge::metadata_run`
+  is red in every rig that makes the check, the one that runs `update()`'s pump included. The rigs
+  make it at the frame's end.
+- **The port holds the adapter `Arc`.** `Reset` replaces the adapter and the store keeps no handle to
+  the retired one, so an epoch id could only reach it through a registry of retired adapters. A job
+  emitted before a `Reset` answers into the adapter it was made for, as the request did before.
