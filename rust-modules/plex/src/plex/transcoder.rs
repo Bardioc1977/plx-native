@@ -15,7 +15,7 @@
 //! or re-encode via a separate `transcode_decision`. The ABR deadline-bearing twin retains
 //! HTTP, deadline and transport causes for route policy.
 use super::client::{Client, JsonDeadlineOutcome, QueryBuilder, StreamUrl};
-use super::models::MediaContainer;
+use super::models::{MediaContainer, Narrowed};
 use super::params::{Ceiling, TranscodeDelivery, TranscodeSpec};
 use super::probe::Location;
 
@@ -361,6 +361,26 @@ fn forced_direct_profile() -> String {
     forced_direct_profile_for(plx_platform::devcaps::caps())
 }
 
+/// **The one door a `/decision` body leaves through for a PICKED version.** The readers in the route
+/// (`mde_verdict`, `decision_codecs`, `decision_audio`, `decision_copies_video`) take the entry
+/// flagged `selected`, else the first, of the body: right when PMS lists only the chosen version or
+/// flags it, wrong when it lists every version and flags none (they would silently judge version 0
+/// for a version-N play). So a body asked about `media_index != 0` is cut to that entry here
+/// ([`MediaContainer::narrow_to_media_index`]), or emptied, verdict and all, when it is plainly about
+/// another one; each reader then answers "no media" exactly as it does for an unusable body.
+///
+/// `0`, the default, returns the body untouched: the default path keeps upstream's bytes and
+/// behaviour. Nothing here is measured against a real PMS (`docs/known-issues.md`): it is correct
+/// under every answer the mock models. The log line carries counts only, never a title or a path.
+fn narrowed_decision(mut mc: MediaContainer, media_index: usize) -> MediaContainer {
+    if media_index != 0 {
+        if let Narrowed::Mismatch { listed } = mc.narrow_to_media_index(media_index) {
+            plx_base::eventlog::log(&format!("decision: wanted media index {media_index}, server listed {listed}"));
+        }
+    }
+    mc
+}
+
 impl Client {
     /// GET /photo/:/transcode?width&height&minSize=1&url=…[&format=png]&X-Plex-Token — returns
     /// the built PATH (the sole path-returning method): posters uses it as the LRU key AND the
@@ -564,7 +584,7 @@ impl Client {
                 "X-Plex-Client-Profile-Extra",
                 &if forced { forced_direct_profile() } else { profile_extra(TranscodeDelivery::ProgressiveMkv) },
             );
-        self.get_json(&q.build())
+        self.get_json(&q.build()).map(|mc| narrowed_decision(mc, media_index))
     }
 
     /// Register `spec` with the universal transcoder (the /decision GET — required before
@@ -572,6 +592,8 @@ impl Client {
     /// return the decision body. Callers building a fresh Load payload MUST feed the body
     /// through route::apply_decision_codecs — the payload has to describe what the server
     /// will actually send.
+    ///
+    /// The body is narrowed to `spec.media_index` at this door ([`narrowed_decision`]).
     ///
     /// `_off` is the proof the round trip is on a worker: the frame thread cannot mint one.
     #[track_caller]
@@ -582,6 +604,7 @@ impl Client {
         );
         let session_header = format!("X-Plex-Session-Identifier: {}", spec.session);
         self.get_json_with_headers(&path, &[&session_header])
+            .map(|mc| narrowed_decision(mc, spec.media_index))
     }
 
     /// Register the same candidate, but as one leg of a caller-owned absolute transaction
@@ -599,7 +622,13 @@ impl Client {
             self.transcode_query(spec)
         );
         let session_header = format!("X-Plex-Session-Identifier: {}", spec.session);
-        self.get_json_with_headers_until(&path, &[&session_header], deadline)
+        match self.get_json_with_headers_until(&path, &[&session_header], deadline) {
+            JsonDeadlineOutcome::Response { reply, parsed } => JsonDeadlineOutcome::Response {
+                reply,
+                parsed: parsed.map(|mc| narrowed_decision(mc, spec.media_index)),
+            },
+            other => other,
+        }
     }
 
     /// The delivery-matched stream target for `spec` — same params as the registering decision.
@@ -708,6 +737,8 @@ mod tests {
     use super::{
         link_policy, Ceiling, Client, LinkPolicy, Location, TranscodeDelivery, TranscodeSpec,
     };
+    #[cfg(feature = "devtriggers")]
+    use super::{JsonDeadlineOutcome, MediaContainer};
     use plx_platform::devcaps::Caps;
     use crate::plex::{AudioEnhancements, EncodeContract, Origin, ServerId};
 
@@ -1868,6 +1899,78 @@ mod tests {
         );
         call(&client);
         server.join().unwrap().trim_end().to_owned()
+    }
+
+    /// A loopback PMS that answers every request with the JSON `body`.
+    #[cfg(feature = "devtriggers")]
+    fn client_answering(body: &'static str) -> Client {
+        use std::io::{BufRead, BufReader, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port() as i32;
+        std::thread::spawn(move || {
+            while let Ok((mut socket, _)) = listener.accept() {
+                let mut line = String::new();
+                let _ = BufReader::new(&socket).read_line(&mut line);
+                let _ = write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+            }
+        });
+        Client::new(ServerId::from_raw(1), "mach", Origin::http("127.0.0.1", port), "tok", "cid")
+    }
+
+    /// Every version listed, none flagged `selected`, and a refusing container verdict.
+    #[cfg(feature = "devtriggers")]
+    const ALL_UNFLAGGED: &str = r#"{"MediaContainer":{"generalDecisionCode":2000,"generalDecisionText":"no","Metadata":[{"Media":[
+        {"videoCodec":"h264"},{"videoCodec":"hevc"}]}]}}"#;
+
+    /// **U4 at the Client doors.** All three functions that return a decision body cut it to the
+    /// asked version when that is not the default; the default (index 0) keeps the body as it
+    /// arrived, entries, flags and verdict.
+    #[cfg(feature = "devtriggers")]
+    #[test]
+    fn the_decision_doors_cut_the_body_for_a_picked_version_and_leave_the_default_alone() {
+        let client = client_answering(ALL_UNFLAGGED);
+        let codec = |mc: &MediaContainer| mc.metadata[0].decided_media().map(|m| m.video_codec.clone());
+
+        let picked = client.mde_decision("5", 1, "s1", 0, 0).expect("a parsed body");
+        assert_eq!((picked.metadata[0].media.len(), codec(&picked).as_deref()), (1, Some("hevc")), "the MDE ask");
+        let picked = client.mde_decision_forced("5", 1, "s1", 0, 0).expect("a parsed body");
+        assert_eq!(codec(&picked).as_deref(), Some("hevc"), "the forced MDE ask");
+
+        let off = plx_base::task::OffFrame::for_test();
+        let spec1 = TranscodeSpec { media_index: 1, ..spec(false, false) };
+        let decided = client.transcode_decision(&off, &spec1).expect("a parsed body");
+        assert_eq!(codec(&decided).as_deref(), Some("hevc"), "the transcode decision");
+        match client.transcode_decision_until(&off, &spec1, std::time::Instant::now() + std::time::Duration::from_secs(10)) {
+            JsonDeadlineOutcome::Response { parsed: Some(mc), .. } => {
+                assert_eq!(codec(&mc).as_deref(), Some("hevc"), "the deadline-bearing twin");
+            }
+            _ => panic!("the loopback answered within the deadline"),
+        }
+
+        // the default is byte-for-byte what arrived: both entries, the first one decides, the verdict stays
+        let default = client.mde_decision("5", 0, "s1", 0, 0).expect("a parsed body");
+        assert_eq!((default.metadata[0].media.len(), codec(&default).as_deref()), (2, Some("h264")));
+        assert_eq!(default.general_decision_code, Some(2000));
+        let decided = client.transcode_decision(&off, &spec(false, false)).expect("a parsed body");
+        assert_eq!(decided.metadata[0].media.len(), 2, "the default transcode decision is not cut");
+    }
+
+    /// **U4.** A body that is plainly about another version leaves the door empty and without its
+    /// verdict, so no reader judges it and no refusal of another file is quoted.
+    #[cfg(feature = "devtriggers")]
+    #[test]
+    fn a_decision_about_another_version_leaves_the_door_empty() {
+        const IGNORED: &str = r#"{"MediaContainer":{"generalDecisionCode":2000,"generalDecisionText":"no","Metadata":[{"Media":[
+            {"videoCodec":"h264","selected":true},{"videoCodec":"hevc"}]}]}}"#;
+        let client = client_answering(IGNORED);
+        let mc = client.mde_decision("5", 1, "s1", 0, 0).expect("a parsed body");
+        assert!(mc.metadata.is_empty());
+        assert_eq!((mc.general_decision_code, mc.general_decision_text.as_str()), (None, ""));
     }
 
     /// `mde_decision` and `mde_decision_forced` (the two MDE handshakes), byte for byte.

@@ -555,3 +555,98 @@ fn a_resume_point_past_the_end_of_the_picked_version_starts_over() {
         "a pick the item lost plays the default and keeps the point"
     );
 }
+
+// ---- a /decision body about another version is never judged as the pick's ---------------------------
+//
+// MOCK-MODELLED ONLY (docs/version-delta-plan.md, O3 and decision D10): what a real PMS lists for
+// `mediaIndex=N`, and whether it flags the chosen `Media` `selected`, has never been measured. These
+// tests pin that the client is safe under every answer the mock models.
+
+/// A `/decision` body in one of four modes, for a play of version 1. Version 0 is a direct play of
+/// h264/aac, version 1 a remux that transcodes the audio (hevc copied, eac3 re-encoded), so the two
+/// read differently through every reader. No `Media.id`: the door is index-only.
+///
+/// * `chosen`: the server lists only the chosen version.
+/// * `all`: it lists every version and flags the chosen one `selected`.
+/// * `all-unflagged`: it lists every version and flags none.
+/// * `ignore`: it ignored `mediaIndex` and answers about version 0, flagged, beside the others.
+fn decision_in_mode(mode: &str, container: serde_json::Value) -> &'static [u8] {
+    let v0 = |selected: bool| serde_json::json!({ "selected": selected, "Part": [{ "decision": "directplay", "Stream": [
+        { "streamType": 1, "codec": "h264", "decision": "copy" }, { "streamType": 2, "codec": "aac", "decision": "copy" }] }] });
+    let v1 = |selected: bool| serde_json::json!({ "selected": selected, "Part": [{ "decision": "transcode", "Stream": [
+        { "streamType": 1, "codec": "hevc", "decision": "copy" }, { "streamType": 2, "codec": "eac3", "decision": "transcode" }] }] });
+    let media = match mode {
+        "chosen" => vec![v1(true)],
+        "all" => vec![v0(false), v1(true)],
+        "all-unflagged" => vec![v0(false), v1(false)],
+        "ignore" => vec![v0(true), v1(false)],
+        other => panic!("unknown mode {other}"),
+    };
+    let mut body = serde_json::json!({ "MediaContainer": { "Metadata": [{ "Media": media }] } });
+    for (key, value) in container.as_object().into_iter().flatten() {
+        body["MediaContainer"][key] = value.clone();
+    }
+    Box::leak(serde_json::to_vec(&body).unwrap().into_boxed_slice())
+}
+
+fn resolve_with_decision(body: &'static [u8]) -> Plan {
+    let w = world(TWO_VERSIONS, body);
+    w.resolve(&w.env(Some(PICKED)))
+}
+
+/// **U4.** A play of version 1 never takes version 0's answer for its own: where the body names the
+/// chosen version (`chosen`, `all`) or can be cut to it by position (`all-unflagged`) the play is
+/// the pick's remux (hevc copied, eac3 out) and not version 0's direct play; where the server
+/// plainly answered about another file (`ignore`) the decision is unusable and the play takes the
+/// path an unusable decision always takes, never version 0's codecs.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_decision_about_another_version_is_never_judged_as_the_picks() {
+    for mode in ["chosen", "all", "all-unflagged"] {
+        let plan = resolve_with_decision(decision_in_mode(mode, serde_json::json!({})));
+        assert!(plan.url.contains("start.mkv"), "{mode}: the pick is a remux, not version 0's direct play: {}", plan.url);
+        assert_eq!((plan.vcodec.as_str(), plan.acodec.as_str()), ("hevc", "eac3"), "{mode}: the pick's output codecs");
+        assert_eq!(plan.media_index, 1, "{mode}");
+        assert!(plan.verdict.is_none(), "{mode}");
+    }
+    let plan = resolve_with_decision(decision_in_mode("ignore", serde_json::json!({})));
+    assert!(plan.url.contains("start.mkv"), "ignore: an unusable decision never direct-plays: {}", plan.url);
+    assert_ne!(plan.vcodec, "h264", "ignore: never version 0's codecs");
+    assert_ne!(plan.acodec, "aac", "ignore: never version 0's codecs");
+}
+
+/// **U4.** A mismatch must not let the container-level verdict of a body about ANOTHER file speak
+/// for the chosen version: a refusing `generalDecisionCode` beside version 0's flagged answer is
+/// dropped with it, so the pick is not reported as refused by the server.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_refusal_in_a_body_about_another_version_does_not_refuse_the_pick() {
+    let refusing = serde_json::json!({
+        "generalDecisionCode": 2000,
+        "generalDecisionText": "Neither direct play nor conversion is available.",
+        "transcodeDecisionCode": 4007,
+        "transcodeDecisionText": "Cannot convert this item.",
+    });
+    let plan = resolve_with_decision(decision_in_mode("ignore", refusing.clone()));
+    assert!(plan.verdict.is_none(), "the pick is not refused on another file's verdict");
+    assert!(!plan.url.is_empty());
+    // the same refusal in a body that IS about the pick still refuses it
+    let plan = resolve_with_decision(decision_in_mode("all", refusing));
+    assert!(plan.verdict.is_some() && plan.url.is_empty(), "a refusal of the chosen version stands");
+}
+
+/// **U4.** The default play is untouched: index 0 reads a body exactly as upstream does (the entry
+/// flagged `selected`, else the first), because the door is active only for a picked index.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_default_play_reads_the_decision_body_exactly_as_before() {
+    for (mode, direct) in [("all-unflagged", true), ("ignore", true), ("all", false)] {
+        let w = world(TWO_VERSIONS, decision_in_mode(mode, serde_json::json!({})));
+        let plan = w.resolve(&w.env(None));
+        assert_eq!(plan.media_index, 0, "{mode}");
+        // unflagged or flagged on version 0 reads version 0 (a direct play); a flag on another
+        // entry is followed, as it always was
+        assert_eq!(plan.url.contains("/library/parts/3134/"), direct, "{mode}: {}", plan.url);
+        assert_eq!(plan.url.contains("start.mkv"), !direct, "{mode}: {}", plan.url);
+    }
+}

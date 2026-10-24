@@ -577,10 +577,71 @@ impl Metadata {
     }
 
     /// The version a `/decision` body describes: the one PMS marks `selected`, else its first.
-    /// A decision answers for the `mediaIndex` it was asked about, so this is the chosen
-    /// version's output, never version 0's by position.
+    /// For a PICKED version the `Client` doors have already cut the body to that one entry
+    /// ([`MediaContainer::narrow_to_media_index`]), so a server that lists every version and flags
+    /// none cannot make this read version 0's output for a version-N play; the default's body
+    /// arrives untouched.
     pub fn decided_media(&self) -> Option<&Media> {
         self.media.iter().find(|m| m.selected).or_else(|| self.media.first())
+    }
+}
+
+/// What cutting a `/decision` body to the version a play asked about found
+/// ([`MediaContainer::narrow_to_media_index`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Narrowed {
+    /// The body now describes the asked version (or lists at most one entry, which is taken as
+    /// the answer).
+    Kept,
+    /// The body is about some other version: it was emptied so no reader judges it. `listed` is
+    /// how many `Media` it carried.
+    Mismatch { listed: usize },
+}
+
+impl MediaContainer {
+    /// **Cut a `/decision` body to the version at `index` of `Media[]`**, by position only (the
+    /// `mediaIndex` the request carried), so the readers that take `decided_media()` of it judge the
+    /// asked version and no other. What PMS lists for `mediaIndex=N` and whether it flags the
+    /// chosen entry `selected` has never been measured (`docs/pms-api.md`, `docs/known-issues.md`);
+    /// this is correct under every modelled answer:
+    ///
+    /// * at most one `Media` listed: left alone (the server answered with the one it chose);
+    /// * several, exactly one flagged `selected`: that one, if it is the entry at `index`, else the
+    ///   body is about another version ([`Narrowed::Mismatch`]);
+    /// * several, none or more than one flagged: the entry at `index` if there is one, else a
+    ///   mismatch.
+    ///
+    /// A mismatch empties `Metadata` AND drops the container-level verdict codes and sentences,
+    /// which belong to the same answer: otherwise a refusing `generalDecisionCode` of a body about
+    /// another file would be quoted as the reason THIS file cannot play.
+    pub fn narrow_to_media_index(&mut self, index: usize) -> Narrowed {
+        let Some(item) = self.metadata.first_mut() else { return Narrowed::Kept };
+        let listed = item.media.len();
+        if listed <= 1 {
+            return Narrowed::Kept;
+        }
+        let flagged: Vec<usize> = (0..listed).filter(|&at| item.media[at].selected).collect();
+        let keep = match flagged[..] {
+            [only] => (only == index).then_some(only),
+            _ => (index < listed).then_some(index),
+        };
+        match keep {
+            Some(at) => {
+                let kept = item.media.swap_remove(at);
+                item.media.clear();
+                item.media.push(kept);
+                Narrowed::Kept
+            }
+            None => {
+                self.metadata.clear();
+                self.general_decision_code = None;
+                self.mde_decision_code = None;
+                self.transcode_decision_code = None;
+                self.general_decision_text.clear();
+                self.transcode_decision_text.clear();
+                Narrowed::Mismatch { listed }
+            }
+        }
     }
 }
 
@@ -1244,7 +1305,7 @@ fn de_ultrablur<'de, D: serde::Deserializer<'de>>(
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog_hex_of_guid, resolve_catalog_hex, Envelope, MediaId};
+    use super::{catalog_hex_of_guid, resolve_catalog_hex, Envelope, MediaContainer, MediaId, Metadata, Narrowed};
 
     const HEX: &str = "5d7768264de0ee001fcc87e4";
     const BYTES: [u8; 12] = [0x5d, 0x77, 0x68, 0x26, 0x4d, 0xe0, 0xee, 0x00, 0x1f, 0xcc, 0x87, 0xe4];
@@ -1386,6 +1447,72 @@ mod tests {
         let one = br#"{"MediaContainer":{"Metadata":[{"Media":[{"id":7}]}]}}"#;
         let env: Envelope = serde_json::from_slice(one).expect("parse");
         assert_eq!(env.media_container.metadata[0].decided_media().map(|m| m.id), Some(MediaId(7)));
+    }
+
+    /// The decision body of a three-version item, flagged as the case says, with a refusing
+    /// container verdict beside it.
+    fn decision(selected: &[usize], listed: usize) -> MediaContainer {
+        let media: Vec<_> = (0..listed)
+            .map(|n| serde_json::json!({ "videoCodec": format!("codec{n}"), "selected": selected.contains(&n) }))
+            .collect();
+        serde_json::from_value::<Envelope>(serde_json::json!({ "MediaContainer": {
+            "generalDecisionCode": 2000, "mdeDecisionCode": 1, "transcodeDecisionCode": 4007,
+            "generalDecisionText": "general", "transcodeDecisionText": "transcode",
+            "Metadata": [{ "Media": media }] } })).expect("parse").media_container
+    }
+
+    /// The codec of the one entry a narrowed body describes.
+    fn described(mc: &MediaContainer) -> Option<String> {
+        mc.metadata.first().and_then(Metadata::decided_media).map(|m| m.video_codec.clone())
+    }
+
+    /// **U4: the `/decision` body is cut to the asked version by position.** One entry is taken as the
+    /// answer; several are cut to the flagged one if it is the asked one, to the asked position when
+    /// none or several are flagged, and a body that is plainly about another version is a mismatch.
+    #[test]
+    fn a_decision_body_is_cut_to_the_asked_media_index() {
+        // a body that lists only one entry is left alone, flagged or not
+        for flags in [vec![], vec![0]] {
+            let mut mc = decision(&flags, 1);
+            assert_eq!(mc.narrow_to_media_index(1), Narrowed::Kept);
+            assert_eq!(described(&mc).as_deref(), Some("codec0"));
+            assert_eq!(mc.general_decision_code, Some(2000), "a kept body keeps its verdict");
+        }
+        // several listed, the asked one flagged: that one
+        let mut mc = decision(&[1], 3);
+        assert_eq!(mc.narrow_to_media_index(1), Narrowed::Kept);
+        assert_eq!((mc.metadata[0].media.len(), described(&mc).as_deref()), (1, Some("codec1")));
+        // several listed, none flagged: the entry at the asked position
+        let mut mc = decision(&[], 3);
+        assert_eq!(mc.narrow_to_media_index(2), Narrowed::Kept);
+        assert_eq!((mc.metadata[0].media.len(), described(&mc).as_deref()), (1, Some("codec2")));
+        // several flagged: also by position
+        let mut mc = decision(&[0, 1], 3);
+        assert_eq!(mc.narrow_to_media_index(1), Narrowed::Kept);
+        assert_eq!(described(&mc).as_deref(), Some("codec1"));
+        // no Metadata at all: nothing to cut
+        let mut empty = serde_json::from_slice::<Envelope>(br#"{"MediaContainer":{"generalDecisionCode":2000}}"#)
+            .expect("parse").media_container;
+        assert_eq!(empty.narrow_to_media_index(1), Narrowed::Kept);
+        assert_eq!(empty.general_decision_code, Some(2000));
+    }
+
+    /// **U4: a body about another version is emptied, and its verdict goes with it.** A flag on a
+    /// different entry than the asked one, or an asked position the body does not list, is a
+    /// mismatch; the container-level codes and sentences of that answer are dropped so a refusal
+    /// of another file is never quoted for this one.
+    #[test]
+    fn a_decision_body_about_another_version_is_emptied_with_its_verdict() {
+        for (flags, listed, index) in [(vec![0], 2, 1), (vec![0], 3, 2), (vec![], 2, 2), (vec![0, 1], 2, 5)] {
+            let mut mc = decision(&flags, listed);
+            assert_eq!(mc.narrow_to_media_index(index), Narrowed::Mismatch { listed }, "{flags:?} of {listed} at {index}");
+            assert!(mc.metadata.is_empty(), "nothing left to judge");
+            assert_eq!(
+                (mc.general_decision_code, mc.mde_decision_code, mc.transcode_decision_code),
+                (None, None, None)
+            );
+            assert!(mc.general_decision_text.is_empty() && mc.transcode_decision_text.is_empty());
+        }
     }
 
     /// The `/decision` verdict block, in BOTH encodings PMS uses for it. This body is the one the
