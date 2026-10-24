@@ -85,10 +85,11 @@ pub fn labels(versions: &[MediaVersion]) -> Vec<(String, String)> {
 
 /// How wide a row's sub-line may be, in [`weight`] units, before [`labels`] drops its
 /// lowest-priority fact. The 650 px menu column holds about 527 px of sub-line (a unit is about
-/// 4.1 px at the sub-line's size, so 125 units are 512 px, under the table's headroom), and
+/// 4.1 px at the sub-line's size, so 120 units are 492 px, which leaves the table's headroom and the
+/// few pixels the estimate under-counts on wide capitals such as `M`, `W` and `V`), and
 /// `the_list_fits_in_every_language` measures the [`worst_case`] and [`edge_case`] lists against the
 /// real column in every shipped language, which is what pins this number.
-const DETAIL_UNITS: usize = 125;
+const DETAIL_UNITS: usize = 120;
 
 /// A character's rough width in the sub-line face, in units of about 4.1 px: capitals and digits are
 /// wide (about 17 px), lower case about 13, the thin letters (`i l j t f r I`) and spaces and
@@ -165,6 +166,23 @@ pub fn edge_case() -> Vec<MediaVersion> {
     ]
 }
 
+/// Exotic ids at their widest, found by the reviewer's fuzz of codec, container and size ids: the
+/// capitals `M`, `W`, `V` and a `Mono` layout make a sub-line the estimate must not under-count.
+#[cfg(any(test, feature = "test-support"))]
+pub fn exotic_case() -> Vec<MediaVersion> {
+    let id = plx_plex::plex::MediaId;
+    vec![
+        MediaVersion {
+            id: id(3101), kbps: 9_000, resolution: "1080".into(), vcodec: "msmpeg4v3".into(), hdr: true,
+            acodec: "dca-ma".into(), channels: 1, container: "webm".into(), size: 5 << 30, ..Default::default()
+        },
+        MediaVersion {
+            id: id(3102), index: 1, kbps: 4_000, resolution: "720".into(), vcodec: "wmv3".into(), hdr: false,
+            acodec: "truehd".into(), channels: 1, container: "m4v".into(), size: 888 << 30, ..Default::default()
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,7 +220,7 @@ mod tests {
         let mut out = Vec::new();
         for language in SHIPPED {
             let _guard = language_on_this_thread_for_test(language);
-            for (name, versions) in [("sample", sample()), ("worst", worst_case()), ("edge", edge_case())] {
+            for (name, versions) in [("sample", sample()), ("worst", worst_case()), ("edge", edge_case()), ("exotic", exotic_case())] {
                 let mut form: FormTable<Pos, plx_plex::plex::MediaId, Infallible> = FormTable::new(plx_ui::table_screen::BAND_BASE);
                 form.set(Form::new().section(section(&versions, Pos, |v| v.id)), None);
                 form.table.compact = false;
@@ -229,8 +247,13 @@ mod tests {
         assert!(rows.iter().all(|(_, d)| weight(d) <= DETAIL_UNITS && d.matches(" \u{b7} ").count() == 1), "{rows:?}");
         assert!(rows[1].1.contains("DTS-HD MA 7.1"), "dca-ma reads as DTS-HD MA: {:?}", rows[1].1);
 
+        // 124 units is over the 120 budget: size goes, the other three stay
         let edge = labels(&edge_case());
-        assert_eq!(edge[1].1, format!("VC1 HDR \u{b7} DTS-HD MA 7.1 \u{b7} MKV \u{b7} {}", plx_ui::fmt::bytes(12 << 30, (1, 0, 0))),
+        assert_eq!(edge[1].1, "VC1 HDR \u{b7} DTS-HD MA 7.1 \u{b7} MKV");
+        // without the HDR word both rows say `VC1`, which then tells nothing apart; the other three fit
+        let mut plain = edge_case();
+        plain[1].hdr = false;
+        assert_eq!(labels(&plain)[1].1, format!("DTS-HD MA 7.1 \u{b7} MKV \u{b7} {}", plx_ui::fmt::bytes(12 << 30, (1, 0, 0))),
             "rows that fit keep every fact that tells them apart");
     }
 }
