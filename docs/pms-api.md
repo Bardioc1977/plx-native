@@ -816,9 +816,42 @@ Episode entry (verified, trimmed):
 ```
 
 Note: episodes can have **multiple `Media[]` versions** (this one: 4K HDR + 1080p).
-The picker must iterate `Media[]` and choose by codec/resolution, not take `[0]` blindly.
+The picker must iterate `Media[]` and choose by codec/resolution, not take `[0]` blindly: the client
+now does (the item menu's Play Version page and the Detail hero's panel list every `Media[]`
+entry, identified by `Media.id`; see "Multi-version items" below).
 Episode container metadata also carries `grandparentTitle`/`grandparentThumb` at the
 `MediaContainer` level for header rendering.
+
+### Multi-version items — `Media[]` (verified live 2026-10-24, PMS 1.43.5.11029)
+
+Measured by plain `GET`s only, counts and shapes (no title, path, id or address is recorded):
+every movie/episode row of one owner library, section listings paged by 200, two
+`/library/metadata/{rk}` fetches per multi-version item, `/children`, hubs, on-deck,
+continue-watching and recently-added. No `decision`, `start` or `playQueues` call was made, so
+what `mediaIndex=N` does on the real server is **UNVERIFIED** (mock-verified only, see
+`docs/version-delta-plan.md`).
+
+| # | fact | value |
+|---|---|---|
+| F1 | multi-version items | 50 of 5091 movie/episode rows: 23 movies, 27 episodes; 49 have 2 versions, 1 has 9 |
+| F2 | `Media.id` | present on 5148 of 5148 entries, always a JSON **number**, **globally unique** (0 duplicates), equal to `Part[0].id` on only 343 of them (not an alias of it) |
+| F3 | order | `Media[]` is **not** id order (ascending in 31 of 50); `Media[0]` is the highest bitrate in 44 of 50; the item-level `duration` equals `Media[0].duration` in 50 of 50 |
+| F4 | stability | for all 50: the same `Media.id` order in the section listing, two single-item fetches, every hub/on-deck/recently-added row that carried the item, and season `/children` (27 of 27 multi-version episodes, same list length). Across a library scan: not observable read-only |
+| F5 | listing rows carry the **full** `Media[]` | section `/all`, `/children`, on-deck, continue-watching, hubs and recently-added embed every version in the same order; **no row carries `Stream[]`** (0 of 5153 Parts). A card can count versions at no request cost; HDR kind and track lists need the single-item fetch |
+| F6 | `selected` | no `Media.selected` in the listing; `Stream.selected` is per **Part**: every version's Part has its own selected audio (sometimes subtitle); `Stream.id` is unique across the versions of an item (50 of 50). Whether a `/decision` body flags the chosen `Media` as `selected` is UNVERIFIED |
+| F7 | what differs between versions | of 50 items: HDR differs in 17, audio track count in 30, subtitle count in 44, audio language set in 30 |
+| F8 | label collisions | on `(videoResolution, videoCodec, audioCodec, audioChannels, container, videoProfile, audioProfile)`: 6 of 50 items collide; adding bitrate: 0; adding size: 0. The nine-version item differs in 9 bitrates, 9 sizes, 9 durations, 5 widths, 2 heights and 9 file names (one directory), with one codec/container/frame rate |
+| F9 | value sets on multi-version items | `videoResolution` `1080`, `4k`, `480`, `sd`, `576`; container `mkv`, `avi`, `mp4`; video `h264`, `hevc`, `mpeg4`; audio `opus`, `mp3`, `ac3`, `eac3`, `aac`, `dca`, `truehd`, `dca-ma`; channels 2, 6, 7, 8 |
+| F10 | durations differ | 12 of 50 items have versions whose `duration` differs by more than 1% (7 of them by 10% or more) |
+| F11 | stacked | 5 versions have 2 `Part`s: 4 are the only version of an episode, 1 is one of the nine versions of the nine-version movie (at `Media` index 2). Part durations sum to the Media duration |
+| F12 | `optimizedForStreaming` | the MP4 **fast-start** flag, not the Optimize marker: only on mp4/mov (Media level a JSON int 0/1, Part level a JSON bool), absent for mkv/avi/etc. |
+| F13 | Plex "Optimize" versions | 2 `Media` entries carry `proxyType` 42, `target` (a localized preset name) and `title`; the other version of those items carries `title` `Original`. 17 `Media` entries have a Part under a "Plex Versions" directory, so the path alone is not a marker |
+| F14 | docs | `plex-openapi.json` `components.parameters.14`: "Index of the media to transcode. -1 or not specified indicates let the server choose." (documentation, not a measurement) |
+
+Consequences the client relies on: the identity of a version is `Media.id` (a number that may
+also arrive string-encoded on another endpoint, so the parse is lenient), never its position;
+the position is only the `mediaIndex` wire value. `Media.title` exists (F13) but a plain version
+has no human label, so a picker derives one from the technical fields.
 
 ### Extras / trailers (verified live 2026-09-12, PMS 1.43)
 

@@ -505,9 +505,10 @@ Notes on the table:
 - **Ledgers (`ci/allow/**`) must not grow.** `workers`, `globals`, `forks`: the memory reads live in
   `route/decision_memory.rs` and `decision.rs`/`src/app` (not scanned); `subsearch.rs` adds a
   parameter only. Existing keys are `<path>::<fn>::<spelling>`: do not rename or split `build_stream`,
-  `fetch_detail`, `fetch_playing_item`, `cached_playing`. #1013 took `PINNED_LEDGER_TOTALS` from
-  18/90/58/11 to 18/82/58/11 (eight `client_for` lines left `ci/allow/globals/data-metadata.txt`); the
-  totals only shrink, and `fetch_playing_item` now takes the client, so no new registry read is needed
+  `fetch_detail`, `fetch_playing_item`, `cached_playing`. #1013 took the `globals` pin down by eight
+  (`client_for` lines left `ci/allow/globals/data-metadata.txt`) and #1015 moved the totals again; the pins
+  at `fba7a811` (`tests/test_harness.py:PINNED_LEDGER_TOTALS`, workers/globals/forks/fxlanes) are 16/78/58/11,
+  and the ledgers on disk sum to exactly that; the totals only shrink, and `fetch_playing_item` now takes the client, so no new registry read is needed
   in the data chain. `fxlanes`: no new `AppFx` arm (the new
   command is a `MetadataCmd`). `layers`: `plays` is set by the app (top layer) into a data type.
 - **Caps (`ci/list-caps.ini`):** only the two `work` sections of N1; no `MAX_*`/`*_MAX_*`, no `reach`
@@ -605,7 +606,8 @@ I re-derived each finding in code; none is disputed.
   (it cannot play), so a remembered pick stays; known-issues entry.
 - **Non-blocking:** (1) base moved: fast-forwarded to `fba7a811`; `fetch_playing_item(client, sid, rk,
   want)` is #1013's signature, `VersionLookup` is written against it, the ledger note and totals
-  90 -> 82 updated (#1015, search store jobs, touches none of this). (2) `ci/check-deps.sh` added to S4-S8,
+  updated (corrected in batch 1: the pins are 16/78/58/11 after #1015, which moved the totals but touches none
+  of the version code). (2) `ci/check-deps.sh` added to S4-S8,
   S10, S11; the `make check` red item is phrased as the environmental free-space assertion. (3) N3 tests
   added: Up Next recalls, retry and extra/trailer/preview landings never settle, a refused plan leaves the
   old pick. (4) replay "none expected": agreed, no change. (5) `dev/scenarios.rs:~2604` added to the capture
@@ -613,3 +615,23 @@ I re-derived each finding in code; none is disputed.
 - **Unresolved:** the coordinator's O2 wording ("chips follow the picked/remembered version only at
   fetch time") reads like my option B (fetch-time projection), not A (chips stay version 0). The plan
   keeps A as written; if B is meant, it is one extra step after S15 (O2 row).
+
+## Implementation notes, batch 1 (S0-S5)
+
+Deviations and findings, appended to as each step lands.
+
+- **S0.** The amended spec is a full rewrite-by-pointer of `docs/version-selection-spec.md` taken from the
+  tip of `version-selection` (it did not exist on `origin/main`); the dangling references to
+  `docs/parity-specs.md`, `docs/playlists-spec.md` and the `version-selection-plan.md` section numbers were
+  replaced by pointers into this plan. Tag `version-selection-final` was created on `version-selection`
+  (O4); `version-selection-archive` already pointed at the same commit. Ledger pins corrected in sections 6
+  and 9 above (16/78/58/11, verified against `tests/test_harness.py:PINNED_LEDGER_TOTALS` and the sums of
+  `ci/allow/*/*.txt`). `docs/known-issues.md` gained one section with the entries the plan lists (stacked
+  `Part[0]`, Part-less `Media[0]` stays refused, Info card runtime, HDR absent from card rows, mock-only
+  `mediaIndex`/`selected`) plus the two the challenger found missing (O2: Detail page facts stay on version
+  0; a Part-less `Media[0]` has no way back to the Default) and the one-playable-other reach loss
+  (challenger Round 2 remark 3, recorded as accepted for the owner). F6 in `docs/pms-api.md` is worded as
+  "no `Media.selected` in the listing" (the plan's section 8 O3 says the listing is all F6 measured).
+  The new docs cite `docs/version-delta-plan.md`, which lives on this branch only; whoever squashes decides
+  whether it lands (plan O4 says plan and challenge files stay on the branch), and the three citations in
+  `docs/pms-api.md`, `docs/version-selection-spec.md` and `docs/known-issues.md` then need repointing.
