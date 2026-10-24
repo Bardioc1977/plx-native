@@ -234,8 +234,9 @@ impl Stores {
 
     /// Take every job any store has emitted since the last take, store by store in a fixed order.
     /// The caller OWES each one to a runner (see [`StoreJob`]). A store with an outbox joins in
-    /// [`Stores::take_jobs_of`] and `has_jobs_of` and nowhere else: the Bridge's backstop and its
-    /// leftover-job check both read this aggregate, which walks [`StoreId::ALL`].
+    /// [`Stores::take_jobs_of`] and `has_jobs_of`, and in the `*_FILLS` list of every fanning call
+    /// that reaches it ([`Stores::VIEWSTATE_FILLS`], [`Stores::NOTIFY_FILLS`]): the Bridge's backstop
+    /// and its leftover-job check both read this aggregate, which walks [`StoreId::ALL`].
     #[must_use]
     pub fn take_jobs(&mut self) -> Vec<StoreJob> {
         StoreId::ALL.into_iter().flat_map(|id| self.take_jobs_of(id)).collect()
@@ -254,6 +255,7 @@ impl Stores {
             StoreId::Catalog => self.catalog.take_jobs(),
             StoreId::SubtitleSearch => self.subtitle_search.take_jobs(),
             StoreId::ViewReconcile => self.reconcile.take_jobs(),
+            StoreId::Hubs => self.hubs.take_jobs(),
             // The other stores emit no jobs yet.
             _ => Vec::new(),
         }
@@ -273,6 +275,7 @@ impl Stores {
             StoreId::Catalog => self.catalog.has_jobs(),
             StoreId::SubtitleSearch => self.subtitle_search.has_jobs(),
             StoreId::ViewReconcile => self.reconcile.has_jobs(),
+            StoreId::Hubs => self.hubs.has_jobs(),
             // The other stores emit no jobs yet.
             _ => false,
         }
@@ -310,13 +313,21 @@ impl Stores {
         self.browse.borrow_mut().controlled_discover(launch);
     }
 
+    /// The outboxes [`Stores::viewstate_run`] and [`Stores::viewstate_pump`] can fill, in drain
+    /// order: ViewState's `RefetchHubs` and `Reset` reach the Hubs step. Their Browse, Person,
+    /// Collection, Search and Metadata edits emit no jobs from this call. The Bridge drains
+    /// exactly these after either call (`Bridge::start_store_jobs_in`).
+    pub const VIEWSTATE_FILLS: &'static [StoreId] = &[StoreId::Hubs];
+
     /// ViewState's synchronous command path, with every Browse side effect addressed back to this
-    /// aggregate. The callback is invoked inline, preserving the press-frame optimistic edit.
+    /// aggregate. The callback is invoked inline, preserving the press-frame optimistic edit. The
+    /// outcome's `endpoints` are the refreshes the edit's Hubs step settled: the caller carries them.
     pub fn viewstate_run(
         &mut self,
         cmd: viewstate::ViewStateCmd,
         directory: browse::DirectoryView<'_>,
-    ) -> bool {
+        clients: &plx_plex::plex::ClientKeys,
+    ) -> StoreOutcome {
         if matches!(cmd, viewstate::ViewStateCmd::Reset) {
             self.reconcile.reset();
             self.notify.reset();
@@ -332,7 +343,7 @@ impl Stores {
         self.viewstate.borrow_mut().run(
             cmd,
             &mut |cmd| watchlist_tee(watchlist, cmd, |cmd| browse.borrow_mut().run(cmd)),
-            &mut |hubcmd| hubs.run_with_directory(hubcmd, directory),
+            &mut |hubcmd| hubs.run_with_directory(hubcmd, directory, clients),
             &mut |cmd| person.run(cmd),
             &mut |cmd| view_edit_collection(collection, cmd),
             &mut |cmd| search.run_with_directory(cmd, directory),
@@ -345,6 +356,7 @@ impl Stores {
     pub fn viewstate_pump(
         &mut self,
         directory: browse::DirectoryView<'_>,
+        clients: &plx_plex::plex::ClientKeys,
     ) -> EndpointRefreshSet {
         let browse = std::rc::Rc::clone(&self.browse);
         let hubs = &mut self.hubs;
@@ -356,13 +368,18 @@ impl Stores {
         self.viewstate.borrow_mut().pump_with_gate(
             &self.landgate,
             &mut |cmd| watchlist_tee(watchlist, cmd, |cmd| browse.borrow_mut().run(cmd)),
-            &mut |hubcmd| hubs.run_with_directory(hubcmd, directory),
+            &mut |hubcmd| hubs.run_with_directory(hubcmd, directory, clients),
             &mut |cmd| person.run(cmd),
             &mut |cmd| view_edit_collection(collection, cmd),
             &mut |cmd| search.run_with_directory(cmd, directory),
             &mut |cmd| metadata.run(cmd),
         )
     }
+
+    /// The outboxes the notification map ([`Stores::notify_map`]) can fill, in drain order: a
+    /// server-side change reads the affected source back with `RefetchSourceQuiet`. The Bridge
+    /// drains exactly these after the map (`Bridge::start_store_jobs_in`).
+    pub const NOTIFY_FILLS: &'static [StoreId] = &[StoreId::Hubs];
 
     /// The notification feed's per-frame pass. It stands down while the landing gate is armed (a
     /// recording, a replay or a dump owns the run), and never reads the registry's tokens.
@@ -414,15 +431,18 @@ impl Stores {
     /// on the stores that show the item, so a tile reads the new resume point before any read; and,
     /// when the server took the `stopped` POST, a read-back through the reconcile worker (which
     /// stays queued while the network is held); when it did not, only the Detail pages' own re-read
-    /// is owed. MAIN THREAD, route-unconditional.
-    pub fn stops_landed(&mut self, stops: Vec<crate::viewstate::StopRecord>, directory: browse::DirectoryView<'_>) {
+    /// is owed. The patches' Hubs steps settle refused launches, so the endpoint refreshes they owe
+    /// are returned for the caller to carry. MAIN THREAD, route-unconditional.
+    pub fn stops_landed(&mut self, stops: Vec<crate::viewstate::StopRecord>, directory: browse::DirectoryView<'_>,
+        clients: &plx_plex::plex::ClientKeys) -> EndpointRefreshSet {
+        let mut endpoints = EndpointRefreshSet::default();
         for stop in stops {
-            self.publish(crate::viewstate::ViewChange {
+            endpoints.merge(self.publish(crate::viewstate::ViewChange {
                 sid: stop.sid,
                 rk: stop.rk.clone(),
                 scope: crate::viewstate::Scope::Leaf,
                 fact: crate::viewstate::ViewFact::Offset { ms: stop.pos_ms, dur_ms: stop.dur_ms },
-            }, directory);
+            }, directory, clients));
             if stop.ok {
                 self.reconcile.enqueue_stop((stop.sid, stop.rk), stop.was_watched);
             } else {
@@ -431,9 +451,11 @@ impl Stores {
                 self.reconcile.owe_page((stop.sid, stop.rk));
             }
         }
+        endpoints
     }
 
-    fn publish(&mut self, change: crate::viewstate::ViewChange, directory: browse::DirectoryView<'_>) {
+    fn publish(&mut self, change: crate::viewstate::ViewChange, directory: browse::DirectoryView<'_>,
+        clients: &plx_plex::plex::ClientKeys) -> EndpointRefreshSet {
         self.watchlist.apply_view(&change);
         let browse = std::rc::Rc::clone(&self.browse);
         let hubs = &mut self.hubs;
@@ -444,20 +466,21 @@ impl Stores {
         crate::viewstate::publish_view(
             change,
             &mut |cmd| browse.borrow_mut().run(cmd),
-            &mut |hubcmd| hubs.run_with_directory(hubcmd, directory),
+            &mut |hubcmd| hubs.run_with_directory(hubcmd, directory, clients),
             &mut |cmd| person.run(cmd),
             &mut |cmd| view_edit_collection(collection, cmd),
             &mut |cmd| search.run_with_directory(cmd, directory),
             &mut |cmd| metadata.run(cmd),
-        );
+        )
     }
 
     /// The read-back worker's route-unconditional pass: hand it what landed writes owe, send its
     /// reads, and publish the facts it brought back to the stores that hold the rows. `clients` is
     /// the registry's answer as of this call. It does NOT start the reads it sent: a caller that
     /// returns without taking them ([`Stores::take_jobs_of`]) and handing them to a runner has
-    /// stranded the flights. The one production caller is `Bridge::reconcile_pump`.
-    pub fn reconcile_pump(&mut self, directory: browse::DirectoryView<'_>, clients: &plx_plex::plex::ClientKeys) -> bool {
+    /// stranded the flights. The one production caller is `Bridge::reconcile_pump`. The outcome's
+    /// `endpoints` are the refreshes the published facts' Hubs steps settled.
+    pub fn reconcile_pump(&mut self, directory: browse::DirectoryView<'_>, clients: &plx_plex::plex::ClientKeys) -> StoreOutcome {
         let owed = self.viewstate.borrow_mut().take_reread();
         self.reconcile.enqueue(owed);
         let idle = !self.viewstate.borrow().is_busy() && !self.network_held;
@@ -468,21 +491,22 @@ impl Stores {
         let search = &mut self.search;
         let metadata = &mut self.metadata;
         let watchlist = &mut self.watchlist;
-        let changed = self.reconcile.pump_with_gate(&self.landgate, idle, clients, &mut |change| crate::viewstate::publish_view(
+        let mut endpoints = EndpointRefreshSet::default();
+        let changed = self.reconcile.pump_with_gate(&self.landgate, idle, clients, &mut |change| endpoints.merge(crate::viewstate::publish_view(
             { watchlist.apply_view(&change); change },
             &mut |cmd| browse.borrow_mut().run(cmd),
-            &mut |hubcmd| hubs.run_with_directory(hubcmd, directory),
+            &mut |hubcmd| hubs.run_with_directory(hubcmd, directory, clients),
             &mut |cmd| person.run(cmd),
             &mut |cmd| view_edit_collection(collection, cmd),
             &mut |cmd| search.run_with_directory(cmd, directory),
             &mut |cmd| metadata.run(cmd),
-        ));
+        )));
         // A first watch whose read-back found the stream's end: the other servers' copies are
         // owed the same watched write, through ViewState's serial queue (the origin already holds it).
         for (sid, rk) in self.reconcile.take_watched_ends() {
             self.viewstate.borrow_mut().fan_out_origin_watched(sid, &rk);
         }
-        changed
+        StoreOutcome { changed, endpoints }
     }
 
     /// The `(server, ratingKey)` of every row a read-back has landed since the last call: what the
@@ -636,9 +660,36 @@ pub enum StoreJob {
     /// One read-back batch (`/library/metadata/{k1,k2,…}` of one server), emitted by the reconcile
     /// pump and addressed by its flight id. One is out per server. Not on the tape.
     ViewReconcile(plx_machine::job::Job<viewreconcile::ReconcileReq>, viewreconcile::ReconcilePort),
+    /// One Home fetch (a source's whole `/hubs`, a row's page, or the Continue Watching deck),
+    /// emitted by any Hubs step that kicks a source and addressed by the request id its adapter
+    /// minted. Several are out at once, one per source. On the tape only through a controlled run
+    /// ([`Admission::Home`]).
+    Hubs(plx_machine::job::Job<crate::pms::HubRequest>, crate::pms::HubsPort),
+}
+
+/// How the runner admits a job before it starts it: the policy a job kind belongs to, stated on
+/// the kind so a new kind cannot skip the question ([`StoreJob::admission`] is an exhaustive match).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Admission {
+    /// Every launch is recorded on the tape (`stores::tape::admit`) and a replay answers it.
+    Tape,
+    /// Recorded in a controlled Home run (`HomeIo::admit`, in the order the run asks), and started
+    /// with no record anywhere else: the live arms, the landing's follow-up reads and the fan-outs.
+    Home,
+    /// Never recorded: the launch is the whole decision.
+    Direct,
 }
 
 impl StoreJob {
+    /// The admission family of this job's kind.
+    pub fn admission(&self) -> Admission {
+        match self {
+            Self::Detail(..) | Self::Collection(..) | Self::Person(..) => Admission::Tape,
+            Self::Hubs(..) => Admission::Home,
+            Self::Catalog(..) | Self::SubtitleSearch(..) | Self::ViewReconcile(..) => Admission::Direct,
+        }
+    }
+
     pub fn store(&self) -> StoreId {
         match self {
             Self::Detail(..) => StoreId::Metadata,
@@ -647,6 +698,7 @@ impl StoreJob {
             Self::Catalog(..) => StoreId::Catalog,
             Self::SubtitleSearch(..) => StoreId::SubtitleSearch,
             Self::ViewReconcile(..) => StoreId::ViewReconcile,
+            Self::Hubs(..) => StoreId::Hubs,
         }
     }
 }
@@ -1182,6 +1234,22 @@ mod tests {
             assert_eq!(StoreId::from_ord(id.ord()), Some(id));
         }
         assert_eq!(StoreId::from_ord(StoreOrd(12)), None);
+    }
+
+    /// A fan-out call that can fill an outbox names it in a `*_FILLS` list the Bridge drains. A
+    /// new emitter joins the list of every call that reaches it (Browse appends itself where its
+    /// calls do), so the content is pinned: an emitter left off a list strands its jobs until the
+    /// backstop, which the test rigs count as a bypass.
+    #[test]
+    fn the_fan_out_fill_lists_name_the_stores_the_calls_can_fill() {
+        assert_eq!(Stores::VIEWSTATE_FILLS, [StoreId::Hubs]);
+        assert_eq!(Stores::NOTIFY_FILLS, [StoreId::Hubs]);
+        for list in [Stores::VIEWSTATE_FILLS, Stores::NOTIFY_FILLS] {
+            for (i, id) in list.iter().enumerate() {
+                assert!(StoreId::ALL.contains(id), "{id:?} is a store");
+                assert!(!list[..i].contains(id), "{id:?} is listed once");
+            }
+        }
     }
 }
 

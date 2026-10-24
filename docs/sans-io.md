@@ -152,7 +152,9 @@ in ascending slot order. The catalog page's read is the fourth: its one worker s
 plex.tv read as the captured identity), so it takes no `ClientKeys` and no tape admission, and the
 Catalog step is not pure either (the bullet headed "What the Catalog step still reads" lists what it
 still reads). Subtitle search and the view-state read-back are the fifth and sixth (the bullet
-headed "Subtitle search and the view-state read-back").
+headed "Subtitle search and the view-state read-back"). Home's Hubs read is the seventh (the bullet
+headed "The Hubs lane"): the worker start and the `client_for` read are gone from `data/src/pms.rs`
+and its three `data-pms` ledger files are deleted.
 
 - **The shape.** `plx_machine::job` holds `Job<R>` (an `Addr` and a request that carries everything
   the worker needs), `Port<T>` (where the one answer goes: exactly one `done` or `refused` per job)
@@ -161,11 +163,15 @@ headed "Subtitle search and the view-state read-back").
   `MetadataStore::take_jobs`, `plx_data::metadata::{DetailReq, DetailPort}`,
   `plx_data::collection::{CollectionReq, CollectionPort}`,
   `plx_data::person::{PersonReq, PersonPort}` and
-  `plx_data::stores::catalog::{CatalogReq, CatalogPort}`. The app's `StoreRunner`
+  `plx_data::stores::catalog::{CatalogReq, CatalogPort}` and
+  `plx_data::pms::{HubRequest, HubsPort}`. The app's `StoreRunner`
   (`app/adapters/stores.rs`) executes a job and owns what `data/` must not: the tape's admission
   record, the thread and the `client_for` read. It is `Live` or `Held` (a test parks the job and
   runs it on the test thread), chosen when the `Bridge` is constructed; a newer Detail request
-  retires only the parked Detail jobs, never another store's.
+  retires only the parked Detail jobs, never another store's. `Held` parks per kind:
+  `StoreRunner::held()` leaves the Hubs read live, as production runs it (a rig that waits for a
+  Home landing needs a real one), and `StoreRunner::held_all()` parks it too, for a test that
+  chooses when the read settles (`Bridge::run_held_store_jobs_of_for_test`).
 - **A registry read is an input.** A step that decides from "which client does this server slot
   hold" is handed `plx_plex::plex::ClientKeys` (one `ClientKey { instance, token }` per server) as
   an argument. The Bridge owns one buffer and refills it in place
@@ -177,8 +183,11 @@ headed "Subtitle search and the view-state read-back").
 - **Two drains, one rule.** A stepped machine (the session owner) emits its work through `Effects`,
   and the owner's drain starts it. A store the Bridge runs emits through its own `take_jobs`.
   `Stores::take_jobs_of(StoreId)` takes ONE store's outbox and `Stores::take_jobs` aggregates every
-  store's, and each Bridge entry point drains only its own store, in the same call as the step:
-  `Bridge::metadata_run` steps then drains Metadata; `Bridge::person_pump` and
+  store's, and each Bridge entry point drains the outboxes its step can fill, in the same call as
+  the step. A step that touches only its own store drains it with `start_store_jobs_of`; a `Stores`
+  call that fans out to other stores (`viewstate_run`, `viewstate_pump`, `notify_pump`) drains every
+  outbox named in its `*_FILLS` list (`Stores::VIEWSTATE_FILLS`, `Stores::NOTIFY_FILLS`) with
+  `Bridge::start_store_jobs_in`. `Bridge::metadata_run` steps then drains Metadata; `Bridge::person_pump` and
   `Bridge::collection_pump` refill the keys, step, then run
   `Bridge::start_store_jobs_of(StoreId::Person)` and `(StoreId::Collection)`;
   `Bridge::catalog_open` and `Bridge::catalog_pump` step the Catalog store and run
@@ -187,7 +196,9 @@ headed "Subtitle search and the view-state read-back").
   admissions in the tape where they were: the frame pumps Person, then Collection, then reconciles
   the Detail page. A caller that holds only the store (`describe_movie` gets a `&mut MetadataStore`)
   drains with `Bridge::start_store_jobs` the moment its call returns. A new store joins by implementing its
-  own outbox and adding it to `Stores::take_jobs_of` and `Stores::has_jobs_of`, in that one place.
+  own outbox and adding it to `Stores::take_jobs_of` and `Stores::has_jobs_of` AND to the `*_FILLS`
+  list of every fanning call that reaches it. Joining only the first pair strands its jobs until the
+  backstop, which the rigs count as a bypass.
 - **Whoever steps a store drains it.** `MetadataStore`'s `Machine::step` runs the command and does
   not drain: a `RequestDetail` stepped through it leaves its job on the outbox and nothing starts
   it. The same holds for the `pub` `Stores::metadata_run`. The owner drains in the same call, as
@@ -195,7 +206,11 @@ headed "Subtitle search and the view-state read-back").
   `CollectionStore`'s and `PersonStore`'s `Machine::step` are unreached and pass empty keys: a
   future sender must pass the host's keys and drain. The same holds for the public
   `CatalogStore::open` and `CatalogStore::pump`: `catalog_feed` and `catalog_reread` call
-  `Bridge::catalog_open` and `Bridge::catalog_pump`, which drain in the same call.
+  `Bridge::catalog_open` and `Bridge::catalog_pump`, which drain in the same call. And for
+  `HubsStore::run_with_directory`, `land_with_directory` and `tick_with_directory`: the
+  Bridge's `Store(Hubs(..))`, `HubsResult` and `StoreWork::Hubs` arms and `Bridge::hubs_run` drain
+  with `start_store_jobs_of(StoreId::Hubs)` in the same call, and a controlled Home arm admits the
+  jobs (`Bridge::admit_hubs_jobs`, the bullet headed "The Hubs lane").
 - **Results do not return as FIFO events.** A gated store's result (Detail, Collection, Person,
   subtitle search, the view-state read-back) goes back through the landing and its gate
   (`landgate`, the `adapter_rank` of the landing key), where the pump takes it by value. This is a
@@ -214,7 +229,8 @@ headed "Subtitle search and the view-state read-back").
   `Bridge::assert_no_store_jobs_left_for_test` (`#[cfg(test)]`) fails a frame that ends with a job
   still on an outbox or with that count above zero, so a sender that bypassed its store's Bridge
   drain (`metadata_run`, `person_pump`, `collection_pump`, `catalog_open`, `catalog_pump`,
-  `subsearch_pump`, `reconcile_pump`, `start_store_jobs_of`, `start_store_jobs`)
+  `subsearch_pump`, `reconcile_pump`, `hubs_run`, `viewstate_run`, `viewstate_pump`, `notify_pump`,
+  `start_store_jobs_of`, `start_store_jobs_in`, `start_store_jobs`)
   is red in every rig that makes the check, the one that runs `update()`'s pump included. The rigs
   make it at the frame's end.
 - **The port holds the adapter `Arc`.** `Reset` replaces the adapter and the store keeps no handle to
@@ -278,3 +294,40 @@ headed "Subtitle search and the view-state read-back").
   own store in the same call; `Bridge::subsearch_run` only drains, because the command step takes no
   keys and emits nothing. Neither kind is on the tape, so the runner makes no admission record for
   them and a replay launches them live.
+- **The Hubs lane.** Home's source reads (`data/src/pms.rs`) are the seventh store on the lane. The
+  kick decides from `ClientKeys` which sources to read, mints the request id and emits
+  `StoreJob::Hubs(Job<HubRequest>, HubsPort)` on `HubsStore`'s outbox instead of spawning.
+  `HubRequest` carries what the worker needs (the server, the `ClientKey` its step decided on, the
+  page, the held windows, the deck lane); `HubRequest::fetch` is the IO body and `complete` builds
+  the landing from it (`launch_hubs_job` and `finish_hubs_job` are the runner's two calls). The port
+  holds the adapter `Arc`, so a job emitted before a `Reset` answers into the adapter it was made
+  for. The Hubs read differs from the six before it in four ways.
+  - **A third admission family.** `StoreJob::admission()` names `Tape` (Detail, Collection, Person),
+    `Direct` (Catalog, subtitle search, view reconcile) or `Home`, as one exhaustive match. A `Home`
+    job is recorded in a controlled Home run's own ordered ledger (`HomeIo::admit`), not on the tape,
+    with the bytes `HubRequest::admission` returns (the bytes `hubs_descriptor` returned before it,
+    unchanged). A controlled arm of the Bridge steps Hubs, then admits what it emitted inside the
+    arm with `StoreRunner::start_admitted(job, Some(io))`, so the hubs line precedes the discovery
+    line in the ledger (`home_admission_tests` pins that order). Every other sender uses `start`,
+    which launches a `Home` job as a direct one. Replay pops the recorded answer and never
+    launches: a recorded launch answers nothing (the recorded landing settles it), a recorded
+    refusal is answered once by the runner.
+  - **The claim is raised at the launch.** `PmsAdapter::owed` (what the landing gate's dump mode
+    waits on) goes up on the calling thread before the worker exists (`HubsPort::claim` inside
+    `launch_hubs_job`; in `Held` at the park) and comes down when a take moves the landing out, or
+    when the launch fails. It is never raised at emission, because `Port` has no drop guard: a job
+    the runner never launches (a replay's recorded admission, a refusal, a client the registry no
+    longer holds) holds no claim.
+  - **A refusal is not a landing.** `HubsPort::refused` pushes the request id on
+    `PmsAdapter.refused`, a list outside the landing mailbox: only the mailbox becomes a recorded
+    `AppMsg::HubsResult`, so a refusal reaches no recorded byte. The next Hubs step settles it first
+    (`settle_refused`), as the failure it is, one step after the launch that failed. A `Reset`
+    rotates the adapter and retires the list with it.
+  - **Replay identity.** The landing compare builds its key from the landing's bound client
+    (`resource.instance_gen()`), never from the logical `instance` the landing records: a replayed
+    landing carries the recording's id there, and only the resource it was bound to is the registry's.
+
+  The two test seams the old inline spawn had (a refused spawn and a late worker) are the
+  runner's, `with_refused_hubs_launches_for_test` and `with_late_hubs_launches_for_test`, `#[cfg(test)]`
+  in `app/adapters/stores.rs` beside the boundary they stand for. A step test reads the jobs
+  (`HubsStore::take_jobs`) or answers them (`refuse_jobs_for_test`).

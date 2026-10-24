@@ -543,13 +543,13 @@ fi
 
 # hubs-owner: Home's hub catalog model (`PmsState`) and its rotated worker mailbox/minter
 # (`Arc<PmsAdapter>`) belong to one `HubsStore` per Bridge (`app/bridge.rs`'s `hubs_run`/
-# `hubs_snapshot`, `app/bootstrap.rs`'s `HomeIo::hubs_with_directory`). Zero tolerance, no
+# `hubs_snapshot` and its controlled Home arms). Zero tolerance, no
 # allowlist: any free process-wide selector or module-level dispatcher reconnects those owners and
 # lets an unaddressed reset or landing cross the Bridge boundary — exactly the pre-port shape
 # `crate::stores::hubs::apply`/`apply_with_directory`/`controlled`/`controlled_with_directory` had,
 # each a free function reading/writing process-wide `pms.rs` statics instead of one owner's
 # `PmsState`/`Arc<PmsAdapter>` pair. `hubs_snapshot`/`run`/`run_with_directory`/
-# `land_with_directory`/`tick_with_directory`/`controlled_work`/`controlled_work_with_directory`
+# `land_with_directory`/`tick_with_directory`/`controlled_work`
 # are deliberately NOT listed: `pms.rs` keeps the current explicit-parameter architecture, taking
 # `state`/`adapter` in, exactly like search's own `reset(state, adapter)`.
 hubs_facades='apply|apply_with_directory|controlled|controlled_with_directory'
