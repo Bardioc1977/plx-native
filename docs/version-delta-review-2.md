@@ -48,3 +48,24 @@ VERDICT: REJECT (one blocking item, small).
    the first row is harmless until S11 because nothing is ticked yet and every row plays.
 4. `info_panel::audio_badge` still omits `dca-ma` (pre-existing, outside U8).
 5. `docs/parity-gaps.md` still says "two or more versions" (S13's).
+
+---
+
+# Round 2 (HEAD `b39a76ff`, fixes `8b0a6052` and `6e935b0c`)
+
+VERDICT: APPROVAL
+
+- **U5 scope.** `arm_play_resume` has one caller (`app/playback.rs` `prepare_start`, the card/page start; Up Next,
+  season-list successors, previews and a resume from the start carry no armed point). It tags the generation in
+  `PLAY_RESUME_CARD`; `request_play_inner` (every retry, rescue, quality/track re-resolve) never does, and generations
+  are monotonic, so a retry's gen never matches. The contract-changed re-entry clamps the card's point against the
+  discarded plan's version, then the second landing reads it as a retry's: clamped once, never twice, and `cancel_play`
+  resets the tag. Mutations: `if true || card_point` -> `a_retry_of_the_picked_version_keeps_the_live_playhead_...`
+  FAILED (`left: Some(0) right: Some(5280000000000)`); `if false && card_point` -> `a_cards_resume_point_is_still_clamped_...`
+  and `a_resume_point_past_the_end_...` FAILED. Restored.
+- **Fit.** Fuzz again, two new seeds (exotic ids, 8 languages x 1500 lists): 120 units gave 0 failures; 125 gave 6 and 1.
+  Cost with a realistic vocabulary: 5% fewer sub-line facts shown (72330 vs 76425 separators over 35931 rows). Acceptable.
+- **Gates (HEAD):** plx_media 1750, plx_appkit 349, plx_screens 1708, hostsim plx_media 1912 passed; lint, check-nodef,
+  check-deps, module-layers, list-caps green; test_harness Ran 543 OK; `ci/` and `tests/` untouched.
+- Non-blocking: if the first plan of a contract re-entry is an early-exit plan (`played_dur_ms == 0`) the card's point is
+  not clamped at all; rare, and no worse than before S8a.
