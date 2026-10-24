@@ -7707,6 +7707,20 @@ struct PlayLanding {
     rk: String,
 }
 static PLAY_SLOT: Mutex<Option<PlayLanding>> = Mutex::new(None);
+/// The start point a landing hands the player. Only a point that came from the card or page (the
+/// item's stored `viewOffset`, judged by the UI against version 0's length) is re-judged against the
+/// length of the version that plays ([`plx_data::metadata::resume_ns_for`]); a retry's point is the
+/// LIVE playhead, the only truthful position (`confirm_resume_presented`), and stands as it is.
+fn landing_start_ns(resume_ns: i64, card_point: bool, played_dur_ms: i64) -> i64 {
+    if card_point {
+        plx_data::metadata::resume_ns_for(resume_ns, played_dur_ms)
+    } else {
+        resume_ns
+    }
+}
+/// The resolve generation whose resume point came from the card or page ([`arm_play_resume`]); a
+/// retry's point (`request_play_inner`'s `retry.resume_ns`) never sets it. 0 = none.
+static PLAY_RESUME_CARD: AtomicU32 = AtomicU32::new(0);
 /// Resume intents are tagged with the resolve generation that owns them.  A BACK/cancel or a
 /// later Play can therefore never donate an old movie's position to the next landing.
 static PLAY_RESUME: Mutex<Option<(u32, i64)>> = Mutex::new(None);
@@ -7790,6 +7804,7 @@ pub fn arm_play_resume(ps: &mut PlaybackSession, resume_ns: i64) -> bool {
     }
     let gen = PLAY_GEN.load(Ordering::SeqCst);
     *PLAY_RESUME.lock().unwrap_or_else(|e| e.into_inner()) = Some((gen, resume_ns));
+    PLAY_RESUME_CARD.store(gen, Ordering::SeqCst);
     { let s = &mut *ps; s.requested_resume_ns = resume_ns };
     true
 }
@@ -8310,6 +8325,7 @@ pub fn cancel_play(ps: &mut PlaybackSession) {
     PLAY_BUSY.store(false, Ordering::SeqCst);
     let abandoned = PLAY_SLOT.lock().unwrap_or_else(|e| e.into_inner()).take();
     *PLAY_RESUME.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    PLAY_RESUME_CARD.store(0, Ordering::SeqCst);
     // …and the refusal, because this is the statement that the withdrawn RESOLVE is over. Do not
     // clear the playback trace here: background suspend calls this to prevent a late plan landing,
     // then resumes the same playback without a new `requested`; only the true exit ritual ends the
@@ -8362,6 +8378,9 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
             let mut resume = PLAY_RESUME.lock().unwrap_or_else(|e| e.into_inner());
             take_resume_for(&mut resume, gen)
         };
+        // The card's point stays the card's point across this re-resolve, but the second landing
+        // reads it as a retry's: judge it against the discarded plan's version now.
+        let resume_ns = landing_start_ns(resume_ns, PLAY_RESUME_CARD.load(Ordering::SeqCst) == gen, plan.played_dur_ms);
         let request = ps.request.clone();
         let retry = current_retry_context(ps, resume_ns);
         retire_abandoned_plan(plan);
@@ -8429,7 +8448,7 @@ pub fn pump_play(ps: &mut PlaybackSession, meta: &mut plx_data::stores::metadata
             warm(item_sid(cur_sid(ps)), &u.thumb);
         }
     }
-    let start_ns = plx_data::metadata::resume_ns_for(resume_ns, played_dur_ms);
+    let start_ns = landing_start_ns(resume_ns, PLAY_RESUME_CARD.load(Ordering::SeqCst) == gen, played_dur_ms);
     if start_ns != resume_ns {
         // a retry reads the same point: it must not reopen on the credits either
         { let s = &mut *ps; s.requested_resume_ns = start_ns };

@@ -650,3 +650,59 @@ fn a_default_play_reads_the_decision_body_exactly_as_before() {
         assert_eq!(plan.url.contains("start.mkv"), !direct, "{mode}: {}", plan.url);
     }
 }
+
+// ---- only the card's or page's resume point is clamped, never a retry's live playhead ---------------
+
+/// **U5, scope of the clamp.** `resume_ns_for` repairs the item's STORED `viewOffset`, which was judged
+/// against version 0's length. A retry (a quality or track re-resolve, a rescue) carries the LIVE
+/// playhead, the only truthful position (`confirm_resume_presented`), and a viewer 88 minutes into a
+/// 90-minute pick must come back at 88, not at 0. Driven the way the existing re-entry test is: a
+/// refused first landing, then `retry_current_play` with the playhead.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_retry_of_the_picked_version_keeps_the_live_playhead_past_its_95_percent_mark() {
+    let min = |m: i64| m * 60 * 1_000_000_000;
+    let mut w = world(&two_lengths(), MDE_DIRECTPLAY);
+    let mut meta = plx_data::stores::metadata::MetadataStore::default();
+    assert!(w.request_play(&mut meta, Some(PICKED)));
+    assert!(wait_resolve_workers_for_test(std::time::Duration::from_secs(10)));
+    {
+        let mut slot = PLAY_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_mut().expect("the first resolve landed").plan = Plan { direct_play_mode: DirectPlayMode::Auto, ..Default::default() };
+    }
+    assert_eq!(pump_play(&mut w.ps, &mut meta), None, "a refused first landing");
+    assert!(retry_current_play(&mut w.ps, &mut meta, min(88), None, crate::player::report::AttemptOrigin::UserRetry));
+    assert!(wait_resolve_workers_for_test(std::time::Duration::from_secs(10)));
+    assert_eq!(pump_play(&mut w.ps, &mut meta), Some(min(88)), "the live playhead is not a stored viewOffset");
+    assert_eq!(unpresented_resume_ns(&w.ps), min(88));
+    w.finish();
+}
+
+/// **U5, scope of the clamp.** The card's point survives the "desired contract changed in flight"
+/// re-resolve as the card's point: it is still clamped when the second resolve lands.
+#[test]
+#[cfg(feature = "devtriggers")]
+fn a_cards_resume_point_is_still_clamped_after_a_contract_changed_re_resolve() {
+    let mut w = world(&two_lengths(), MDE_DIRECTPLAY);
+    let mut meta = plx_data::stores::metadata::MetadataStore::default();
+    assert!(w.request_play(&mut meta, Some(PICKED)));
+    assert!(arm_play_resume(&mut w.ps, 95 * 60 * 1_000_000_000));
+    assert!(wait_resolve_workers_for_test(std::time::Duration::from_secs(10)));
+    let edit = begin_user_contract_boundary();
+    assert_eq!(pump_play(&mut w.ps, &mut meta), None, "the stale plan is not installed");
+    assert!(wait_resolve_workers_for_test(std::time::Duration::from_secs(10)));
+    drop(edit);
+    assert_eq!(pump_play(&mut w.ps, &mut meta), Some(0), "past the picked version's end: from the start");
+    w.finish();
+}
+
+/// The pure decision: only a point that came from the card or page is judged against the length of
+/// the version that plays.
+#[test]
+fn only_a_card_point_is_clamped_to_the_played_length() {
+    let min = |m: i64| m * 60 * 1_000_000_000;
+    assert_eq!(landing_start_ns(min(95), true, 90 * 60_000), 0);
+    assert_eq!(landing_start_ns(min(88), true, 90 * 60_000), 0);
+    assert_eq!(landing_start_ns(min(88), false, 90 * 60_000), min(88), "a retry's playhead stands");
+    assert_eq!(landing_start_ns(min(88), true, 0), min(88), "a default play is judged by the page");
+}
