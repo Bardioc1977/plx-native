@@ -329,6 +329,34 @@ mod tests {
         )
     }
 
+    /// **U7: the hero's Play Version panel fits its worst row**, in every shipped language, on the
+    /// same fixtures the item menu's page is graded on.
+    #[test]
+    fn the_panel_fits_its_worst_row_in_every_language() {
+        use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+        let measure = plx_base::fontcov::advances::ShippedMeasure;
+        let anchor = [500.0f32, 600.0, 64.0, 64.0].map(f32::to_bits);
+        let mut out = Vec::new();
+        for language in SHIPPED {
+            let _guard = language_on_this_thread_for_test(language);
+            for (name, versions) in [
+                ("worst", plx_appkit::version_list::worst_case()),
+                ("edge", plx_appkit::version_list::edge_case()),
+            ] {
+                let panel = VersionsPanelScreen::new(
+                    EntryId(3),
+                    VersionsArg { host: InstanceId(9), sid: ServerId::from_raw(1), rk: "42".into(), anchor },
+                    &versions,
+                );
+                let tag = format!("{} versions panel {name}", language.tag());
+                out.extend(panel.form.table.menu_cap_failure(&measure, &tag));
+                out.extend(panel.form.table.app_fit_failures(plx_ui::table::MENU_MAX_W, &tag));
+                out.extend(panel.form.table.app_fit_failures_hugged(&tag));
+            }
+        }
+        plx_ui::table::assert_no_fit_failures(&out);
+    }
+
     /// OK on a row closes the panel and reports THAT version to the page that opened it.
     #[test]
     fn a_row_reports_its_version_to_the_host_page() {

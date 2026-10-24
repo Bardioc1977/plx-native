@@ -100,7 +100,10 @@ to `MediaVersion`:
   entry's position in `Media[]` before any row is dropped; nothing may use a list position as identity
   or as "Default". With a Part-less `Media[0]` no row has index 0.
 - A `Media` is a version row only when it has a playable Part: `Part[0].key` non-empty. Rows without
-  one are dropped (the delta's U6); fewer than two playable rows means no list.
+  one are dropped (the delta's U6). A list is offered by the one gate `pms::offers_versions`: two or
+  more playable rows, or exactly one playable row that is not the Default (a Part-less `Media[0]` plus
+  one playable other still gets a one-row list, so that version stays reachable); a lone Default, or
+  nothing playable, is no list.
 - `MediaVersion.plays` marks the row a bare Play takes for this profile: the remembered id if it is
   listed, else the row at wire index 0 if it is listed, else no row (`pms::mark_plays`, set by the
   application at the menu captures, never by the data layer).

@@ -5337,6 +5337,20 @@ fn a_picked_version_plays_it_resuming_like_play() {
     }
 }
 
+/// The hero's disc follows the one `pms::offers_versions` gate: a lone version that is not the
+/// Default (Part-less `Media[0]`) is a choice, a lone Default is not.
+#[test]
+fn a_lone_version_that_is_not_the_default_gets_the_disc() {
+    for (index, offered) in [(1u32, true), (0, false)] {
+        let mut d = versioned("movie", 1);
+        d.versions[0].index = index;
+        let _guard = install(d);
+        let screen = bare(&_guard, ServerId::UNSET, "leaf");
+        assert_eq!(screen.hero_set(test_store().view()).version, offered, "index {index}");
+        clear();
+    }
+}
+
 /// On a show page the disc offers the versions of the episode the hero's Play plays (the on-deck
 /// one once the show is started), and a pick plays THAT episode in that version.
 #[test]

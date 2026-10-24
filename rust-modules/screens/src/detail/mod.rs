@@ -4218,7 +4218,7 @@ impl DetailScreen {
         // `!hero_set().trailer` and then drive `ELEM_TRAILER` directly to prove `activate_hero`'s
         // handling stays correct even though the disc itself is never shown.)
         hero::HeroSet {
-            version: self.detail(meta).is_some_and(|d| hero_versions(d).len() >= 2),
+            version: self.detail(meta).is_some_and(|d| plx_data::pms::offers_versions(hero_versions(d))),
             restart,
             trailer: false,
             alt: self.alt_available(meta),

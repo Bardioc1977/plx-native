@@ -2624,6 +2624,21 @@ mod tests {
     use plx_media::player::TrackNames;
     use plx_ui::table::TableView;
 
+    /// **U8:** the track menu's descriptor and the version list name a DTS-HD MA track the same way,
+    /// because both read the ONE codec map (`metadata::friendly_codec`): `dca-ma` is "DTS-HD MA",
+    /// not the upper-cased id.
+    #[test]
+    fn the_track_menu_and_the_version_list_name_dts_hd_ma_alike() {
+        let _g = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+        let stream = metadata::Stream { codec: "dca-ma".into(), channels: 8, layout: "7.1".into(), ..Default::default() };
+        assert_eq!(audio_descriptor(&stream), "DTS-HD MA 7.1");
+        let versions = [
+            plx_data::pms::MediaVersion { acodec: "dca-ma".into(), channels: 8, ..Default::default() },
+            plx_data::pms::MediaVersion { acodec: "eac3".into(), channels: 6, ..Default::default() },
+        ];
+        assert_eq!(crate::version_list::labels(&versions)[0].1, "DTS-HD MA 7.1");
+    }
+
     /// The focus element of the `i`-th Audio row — a test names a row by its identity, never by
     /// where it happens to sit.
     fn audio_key(i: usize) -> u32 {

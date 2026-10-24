@@ -123,8 +123,13 @@ accepted limits of the version feature, so nobody re-investigates them.
 - **A Part-less `Media[0]` has no way back to the Default.** The Default is the `Media` at wire index
   0; without a playable Part it cannot play, so no row stands for it, a bare Play with nothing
   remembered is refused as before, and a remembered pick of `Media[1]` stays until its id vanishes.
-- **A Part-less `Media[0]` with exactly one playable other version offers no list** (fewer than two
-  playable rows), so that version is unreachable, as before Play Version.
+- **A Part-less `Media[0]` with exactly one playable other version offers a one-row list** (the
+  shared `pms::offers_versions` gate: a single playable version that is not the Default is a choice),
+  so that version stays reachable; the Default itself still cannot play.
+- **The list's sub-line drops its lowest-priority facts when it would not fit** (size first, then
+  container, then audio, for every row alike; the rate and resolution label is never dropped). The
+  cut is an estimate of the glyph widths (`version_list::weight`), pinned by a fit test over the
+  shipped languages.
 - **Stacked versions play `Part[0]`.** A version with several `Part`s (also a single-version stacked
   item today) plays its first Part only; `partIndex` stays 0 and there is no timeline across Parts.
 - **The Info card runtime on a picked play** is version 0's length (`NowPlaying.dur_ms`); only the

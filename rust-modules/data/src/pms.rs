@@ -170,8 +170,9 @@ pub struct PmsMovie {
     /// `addedAt`, seconds since the epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_at: Option<i64>,
-    /// Every version of a leaf that has more than one (`Media[]`, in the server's order), for the
-    /// item menu's Play Version row; empty for a single-version item.
+    /// The playable versions of a leaf that has a choice (`Media[]`, in the server's order, each
+    /// with its wire `index`; `versions_of`), for the item menu's Play Version row; empty for a
+    /// single-version item.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub versions: Vec<MediaVersion>,
 }
@@ -184,6 +185,12 @@ fn is_false(b: &bool) -> bool { !*b }
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MediaVersion {
     pub id: plx_plex::plex::MediaId,
+    /// The entry's position in the item's `Media[]` on the wire, counted BEFORE any unplayable
+    /// entry is dropped (`mediaIndex`'s own unit). **The Default is the row whose `index` is 0**
+    /// (what a bare Play takes), never "the first row": with a Part-less `Media[0]` the first row is
+    /// `Media[1]`. Nothing downstream may use a list position as an identity or as the Default.
+    #[serde(default)]
+    pub index: u32,
     /// Whole-file bitrate, kbps.
     pub kbps: i64,
     /// PMS's resolution class (`4k`, `1080`), with the frame size as its fallback.
@@ -201,18 +208,42 @@ pub struct MediaVersion {
     pub hdr: bool,
 }
 
-/// The versions worth a picker: every `Media[]` entry with an id when there are at least two,
-/// else none.
+/// Can this `Media` be played at all? It needs a `Part` with a key: that key is what the player
+/// opens, and a version without one would play an empty Part key. THE rule for both the list
+/// ([`versions_of`]) and a pick ([`crate::metadata::playing_version_from`]).
+pub fn is_playable(m: &plx_plex::plex::Media) -> bool {
+    m.part.first().is_some_and(|p| !p.key.is_empty())
+}
+
+/// Is there a choice to offer? The ONE gate every surface (the item menu's row, the episode menu's
+/// row, the hero's disc) and [`versions_of`] share: two or more playable versions, or a single
+/// playable one that is NOT the Default (a Part-less `Media[0]` leaves `Media[1]` reachable only
+/// through the list). A lone Default is no choice.
+pub fn offers_versions(versions: &[MediaVersion]) -> bool {
+    match versions {
+        [] => false,
+        [only] => only.index != 0,
+        _ => true,
+    }
+}
+
+/// The versions worth a picker: the playable `Media[]` entries ([`is_playable`]), each carrying its
+/// wire [`index`](MediaVersion::index), when the item lists at least two entries with ids and
+/// [`offers_versions`] says the survivors are a choice; else none.
 pub fn versions_of(it: &plx_plex::plex::Metadata) -> Vec<MediaVersion> {
     if it.media.len() < 2 || it.media.iter().any(|m| m.id.0 == 0) {
         return Vec::new();
     }
-    it.media
+    let rows: Vec<MediaVersion> = it
+        .media
         .iter()
-        .map(|m| {
+        .enumerate()
+        .filter(|(_, m)| is_playable(m))
+        .map(|(index, m)| {
             let part = m.part.first();
             MediaVersion {
                 id: m.id,
+                index: index as u32,
                 kbps: m.bitrate,
                 resolution: clean(&m.video_resolution),
                 width: m.width,
@@ -225,7 +256,8 @@ pub fn versions_of(it: &plx_plex::plex::Metadata) -> Vec<MediaVersion> {
                 hdr: part.is_some_and(|p| p.stream.iter().any(|s| s.stream_type == 1 && s.is_hdr())),
             }
         })
-        .collect()
+        .collect();
+    if offers_versions(&rows) { rows } else { Vec::new() }
 }
 
 impl PmsMovie {

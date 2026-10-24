@@ -428,6 +428,91 @@ fn versions_are_listed_only_when_there_is_a_choice() {
     assert!(crate::pms::versions_of(&one).is_empty());
 }
 
+/// Three `Media`, the Default (wire index 0) without a `Part` and two playable others: the shape
+/// that makes "the first row" and "the Default" different things.
+fn partless_default() -> plx_plex::plex::Metadata {
+    serde_json::from_value(serde_json::json!({ "type": "movie", "Media": [
+        { "id": 10, "bitrate": 9000, "videoResolution": "1080" },
+        { "id": 11, "bitrate": 25000, "videoResolution": "4k",
+          "Part": [{ "key": "/p/11", "size": 3000, "Stream": [{ "id": 1, "streamType": 1 }] }] },
+        { "id": 12, "bitrate": 6000, "videoResolution": "1080",
+          "Part": [{ "key": "/p/12", "size": 2000 }] }
+    ] })).unwrap()
+}
+
+fn media_of(parts: &[&str]) -> plx_plex::plex::Metadata {
+    let media: Vec<_> = parts.iter().enumerate().map(|(n, key)| match *key {
+        "" => serde_json::json!({ "id": 100 + n }),
+        "empty" => serde_json::json!({ "id": 100 + n, "Part": [{ "key": "" }] }),
+        key => serde_json::json!({ "id": 100 + n, "Part": [{ "key": key }] }),
+    }).collect();
+    serde_json::from_value(serde_json::json!({ "type": "movie", "Media": media })).unwrap()
+}
+
+/// **U6.** A version with no playable `Part` (no `Part`, or an empty `Part[0].key`) cannot play, so
+/// it is not a row; every surviving row keeps the WIRE position of its `Media`, because the Default
+/// is the entry at wire index 0 and dropping a Part-less `Media[0]` makes `Media[1]` the first row,
+/// not the Default.
+#[test]
+fn an_unplayable_version_is_not_a_row_and_each_survivor_keeps_its_wire_index() {
+    let rows = crate::pms::versions_of(&partless_default());
+    assert_eq!(rows.iter().map(|v| (v.id.0, v.index)).collect::<Vec<_>>(), [(11, 1), (12, 2)],
+        "the Part-less Media[0] is dropped; Media[1] and Media[2] keep indices 1 and 2");
+    assert!(rows.iter().all(|v| v.index != 0), "no row is the Default: it cannot play");
+
+    let rows = crate::pms::versions_of(&two_versions());
+    assert_eq!(rows.iter().map(|v| v.index).collect::<Vec<_>>(), [0, 1], "a full list: positions");
+
+    let rows = crate::pms::versions_of(&media_of(&["/p/a", "empty", "/p/c"]));
+    assert_eq!(rows.iter().map(|v| (v.id.0, v.index)).collect::<Vec<_>>(), [(100, 0), (102, 2)],
+        "an empty Part key is as unplayable as no Part, and the gap stays in the indices");
+}
+
+/// **U6, the single gate.** A list is offered for two or more playable versions, and also for ONE
+/// playable version that is not the Default (a Part-less `Media[0]` plus exactly one playable
+/// other: that version is reachable only through the list). A lone Default, or nothing playable, is
+/// no choice. `versions_of` and every surface read this one predicate.
+#[test]
+fn a_list_is_offered_for_two_playable_versions_or_one_that_is_not_the_default() {
+    let offers = |m: &plx_plex::plex::Metadata| {
+        let v = crate::pms::versions_of(m);
+        (crate::pms::offers_versions(&v), v.len())
+    };
+    assert_eq!(offers(&media_of(&["/p/a", "/p/b"])), (true, 2));
+    assert_eq!(offers(&partless_default()), (true, 2));
+    assert_eq!(offers(&media_of(&["", "/p/b"])), (true, 1), "the only playable one is Media[1]");
+    assert_eq!(offers(&media_of(&["/p/a", ""])), (false, 0), "a lone Default is no choice");
+    assert_eq!(offers(&media_of(&["", "empty"])), (false, 0), "nothing plays");
+    assert_eq!(offers(&media_of(&["/p/a"])), (false, 0), "one version");
+    assert!(!crate::pms::offers_versions(&[]));
+}
+
+/// **U6.** A pick whose `Media` is listed but has no playable `Part` is a version the item cannot
+/// play: it answers like a version the item lost (no played version, the default's item), never a
+/// played version with an empty Part key.
+#[test]
+fn a_listed_version_without_a_part_is_not_a_playable_pick() {
+    let it = partless_default();
+    let (item, played) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(10)));
+    assert!(played.is_none(), "Media 10 has no Part: no played version, not one with `part: \"\"`");
+    let (_, empty_key) = playing_version_from(SRV_A, "42", Some(&media_of(&["/p/a", "empty"])),
+        Some(plx_plex::plex::MediaId(101)));
+    assert!(empty_key.is_none(), "an empty Part key is unplayable too");
+    let (_, played) = playing_version_from(SRV_A, "42", Some(&it), Some(plx_plex::plex::MediaId(11)));
+    let played = played.expect("a playable Media[1]");
+    assert_eq!((played.index, played.part.as_str()), (1, "/p/11"));
+    let _ = item;
+}
+
+/// **U8.** PMS spells DTS-HD Master Audio `dca-ma`; the ONE codec map names it, so the version list
+/// and the Track information sheet say "DTS-HD MA" instead of the upper-cased id.
+#[test]
+fn dts_hd_master_audio_has_a_friendly_name() {
+    assert_eq!(friendly_codec("dca-ma"), "DTS-HD MA");
+    assert_eq!(friendly_codec("DCA-MA"), "DTS-HD MA", "the lookup is case-blind like the others");
+    assert_eq!(friendly_codec("dca"), "DTS", "plain DTS keeps its name");
+}
+
 /// `PlayingItem.hdr` is the played leaf's video HDR flag (PQ or HLG transfer), the fact the
 /// player's HDR overlay dim reads; an SDR leaf and an absent item are not HDR.
 #[test]

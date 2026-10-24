@@ -251,7 +251,7 @@ pub enum ItemRow {
     WatchlistRemove,
     /// Add to Watchlist (movie) / Add Show to Watchlist (episode, catalog page menu).
     WatchlistAdd,
-    /// Play Version… (a leaf with two or more versions).
+    /// Play Version… (a leaf with a choice of versions: `pms::offers_versions`).
     PlayVersion,
     /// One version on the Play Version page, by its position in the list captured at open.
     Version(u16),
@@ -414,7 +414,7 @@ fn build_card(
         &m.rk,
         plx_ui::widgets::row_watch_state(&tile_facts::of(m)),
         leaf,
-        leaf && m.versions.len() >= 2,
+        leaf && plx_data::pms::offers_versions(&m.versions),
         trailer.filter(|_| m.kind == 0 || m.kind == 1),
         &m.title,
     );
@@ -551,7 +551,7 @@ fn state_rows(
 /// divider only exists when there is a group above it). An episode is a LEAF, so all three states are
 /// reachable and a part-watched one gets the pair, exactly as a shelf card does.
 fn build_episode(rk: &str, mark: PosterMark, versions: &[MediaVersion], face: Option<&watchlist::Face>) -> ItemForm {
-    let sec = state_rows(FormSection::new(""), rk, mark, true, versions.len() >= 2, None, "");
+    let sec = state_rows(FormSection::new(""), rk, mark, true, plx_data::pms::offers_versions(versions), None, "");
     Form::new().section(watchlist::push_face(sec, face))
 }
 
@@ -790,7 +790,7 @@ impl ItemMenuScreen {
         fx.push(Fx::Nav(NavOp::Dismiss(self.entry)));
     }
 
-    /// The versions this menu's item was opened with (empty when it has fewer than two).
+    /// The versions this menu's item was opened with (empty when there is no choice, `pms::offers_versions`).
     fn versions(&self) -> &[MediaVersion] {
         match &self.arg.kind {
             ItemMenuKind::Card { row, .. } => &row.versions,
@@ -2291,6 +2291,46 @@ mod tests {
 
     fn versioned(kind: c_int) -> PmsMovie {
         PmsMovie { versions: sample_versions(), ..item(kind, PosterMark::None) }
+    }
+
+    /// A lone version that is not the Default is a choice (a Part-less `Media[0]` leaves it
+    /// reachable only through the list); a lone Default is not. Cards and the filmstrip's episode
+    /// menu read the one `pms::offers_versions` gate.
+    #[test]
+    fn a_lone_version_that_is_not_the_default_is_offered() {
+        let lone = |index: u32| vec![MediaVersion { index, ..sample_versions()[1].clone() }];
+        for kind in [0, 3] {
+            let card = |index| PmsMovie { versions: lone(index), ..item(kind, PosterMark::None) };
+            assert!(build(&card(1), false).offers(ItemRow::PlayVersion), "kind {kind}: Media[1] alone");
+            assert!(!build(&card(0), false).offers(ItemRow::PlayVersion), "kind {kind}: the Default alone");
+        }
+        assert!(built(super::build_episode("1", PosterMark::None, &lone(1), None)).offers(ItemRow::PlayVersion));
+        assert!(!built(super::build_episode("1", PosterMark::None, &lone(0), None)).offers(ItemRow::PlayVersion));
+    }
+
+    /// **U7: the Play Version page fits its worst row.** The page the menu turns into
+    /// ([`build_versions`], not compact, as `show_versions` seats it) is graded on a list whose
+    /// sub-lines carry all four facts at their longest, in every shipped language.
+    #[test]
+    fn the_play_version_page_fits_its_worst_row_in_every_language() {
+        use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+        let measure = plx_base::fontcov::advances::ShippedMeasure;
+        let mut out = Vec::new();
+        for language in SHIPPED {
+            let _guard = language_on_this_thread_for_test(language);
+            for (name, versions) in [
+                ("worst", plx_appkit::version_list::worst_case()),
+                ("edge", plx_appkit::version_list::edge_case()),
+            ] {
+                let mut menu = built(super::build_versions("42", &versions));
+                menu.0.table.compact = false;
+                let tag = format!("{} item menu versions {name}", language.tag());
+                out.extend(menu.0.table.menu_cap_failure(&measure, &tag));
+                out.extend(menu.0.table.app_fit_failures(MENU_MAX_W, &tag));
+                out.extend(menu.0.table.app_fit_failures_hugged(&tag));
+            }
+        }
+        plx_ui::table::assert_no_fit_failures(&out);
     }
 
     /// The row exists exactly when there is a choice: a movie or episode with two or more

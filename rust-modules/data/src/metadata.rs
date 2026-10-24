@@ -301,6 +301,7 @@ pub fn friendly_codec(codec: &str) -> String {
         "eac3" | "ec-3" => "Dolby Digital Plus".to_string(),
         "ac3" => "Dolby Digital".to_string(),
         "dts" | "dca" => "DTS".to_string(),
+        "dca-ma" => "DTS-HD MA".to_string(),
         "aac" => "AAC".to_string(),
         "flac" => "FLAC".to_string(),
         "opus" => "Opus".to_string(),
@@ -946,7 +947,7 @@ pub struct Episode {
     pub rating: String,
     pub vcodec: String, // Media[0].videoCodec (for the direct-play/transcode decision)
     pub acodec: String, // Media[0].audioCodec
-    /// Every version, when the episode has more than one (`pms::versions_of`).
+    /// The playable versions, when the episode has a choice of them (`pms::versions_of`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub versions: Vec<crate::pms::MediaVersion>,
 }
@@ -1712,8 +1713,8 @@ pub struct Detail {
     /// Rating key of the picker winner inside [`Self::extras`]. Empty when there is none.
     #[serde(default)]
     pub trailer_rk: String,
-    /// Every version of a movie or episode that has more than one (`pms::versions_of`), for the
-    /// hero's Play Version disc; empty for a single-version item and for a show or season.
+    /// The playable versions of a movie or episode that has a choice of them (`pms::versions_of`),
+    /// for the hero's Play Version disc; empty for a single-version item and for a show or season.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub versions: Vec<crate::pms::MediaVersion>,
 }
@@ -2757,7 +2758,10 @@ pub fn playing_version_from(
     it: Option<&plx_plex::plex::Metadata>,
     want: Option<plx_plex::plex::MediaId>,
 ) -> (PlayingItem, Option<PlayedVersion>) {
-    let picked = want.and_then(|id| it.and_then(|it| it.media_version(Some(id))));
+    // a version the item lists but cannot play (no `Part` key) is as good as a lost one
+    let picked = want
+        .and_then(|id| it.and_then(|it| it.media_version(Some(id))))
+        .filter(|(_, m)| crate::pms::is_playable(m));
     let media = picked.map(|(_, m)| m).or_else(|| it.and_then(|it| it.media_version(None)).map(|(_, m)| m));
     let played = picked.map(|(index, m)| PlayedVersion {
         index,
