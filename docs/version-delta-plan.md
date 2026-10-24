@@ -635,3 +635,13 @@ Deviations and findings, appended to as each step lands.
   The new docs cite `docs/version-delta-plan.md`, which lives on this branch only; whoever squashes decides
   whether it lands (plan O4 says plan and challenge files stay on the branch), and the three citations in
   `docs/pms-api.md`, `docs/version-selection-spec.md` and `docs/known-issues.md` then need repointing.
+- **S1.** Nothing to commit: `origin/main` is `fba7a811`, an ancestor of this branch, so the merge is a no-op.
+  Baseline on the clean tree: `make test-crate C=plx_media T=version_tests` gave `test result: ok. 5
+  passed; 0 failed`. S0's `make check` aborts at its first failing branch (the known environmental
+  `ci/test_disk_preflight.py`), which stops the cargo branch too, so the S0 gate was run as its two halves:
+  `make check-python-harness` (`Ran 543 tests ... OK (skipped=1)`) and the 108-step python/shell branch
+  (107 green, only `test_disk_preflight` red). The cargo half (`make check-cargo`) is run once on the
+  batch's last commit.
+- **S2.** Done, by `git cherry-pick -n ac28dfd7` (one conflict: the `mod` line in `decision.rs`) plus the
+  new `media_index` argument at the two `mde_decision*` calls in the transcoder goldens. No golden bytes
+  changed, i.e. upstream's `media_index` plumbing left the default transcript identical to our branch's.

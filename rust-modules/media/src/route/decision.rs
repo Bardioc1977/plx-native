@@ -10920,6 +10920,10 @@ mod plan_tests;
 mod version_tests;
 
 #[cfg(test)]
+#[path = "decision_version_default_tests.rs"]
+mod version_default_tests;
+
+#[cfg(test)]
 #[path = "decision_quality_recovery_tests.rs"]
 mod quality_recovery_tests;
 

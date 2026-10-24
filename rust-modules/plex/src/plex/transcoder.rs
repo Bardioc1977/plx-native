@@ -1768,4 +1768,129 @@ mod tests {
             assert!(!with_none.contains("normalizeLoudness"), "{with_none}");
         }
     }
+
+    // ---- the DEFAULT bytes, pinned before the version delta moves anything (docs/version-delta-plan.md, S2) ----
+    //
+    // `mediaIndex` is written in two places (`transcode_query`, which reads a `TranscodeSpec`,
+    // and `mde_decision_with_profile`, which takes it as an argument). These goldens are the proof
+    // that the default path (index 0) keeps emitting exactly today's bytes whatever the delta
+    // changes around it. The device-profile blob (`X-Plex-Client-Profile-Extra`) comes from the
+    // process-global device table, not from this change, so it is masked.
+
+    /// The query with the profile blob replaced by a marker.
+    fn masked(q: &str) -> String {
+        const KEY: &str = "X-Plex-Client-Profile-Extra=";
+        match q.find(KEY) {
+            None => q.to_owned(),
+            Some(at) => {
+                let from = at + KEY.len();
+                let to = q[from..].find('&').map_or(q.len(), |n| from + n);
+                format!("{}<profile>{}", &q[..from], &q[to..])
+            }
+        }
+    }
+
+    fn golden_spec<'a>(remux: bool, delivery: TranscodeDelivery) -> TranscodeSpec<'a> {
+        let mut s = spec(remux, false);
+        s.session = "sess-1";
+        s.encoder_session = "enc-1";
+        s.audio_stream_id = 11;
+        s.contract.delivery = delivery;
+        s
+    }
+
+    /// The default progressive REMUX (container copy), the default progressive RE-ENCODE and the
+    /// fixed-HLS rendition, byte for byte.
+    #[test]
+    fn the_default_transcode_query_is_pinned_byte_for_byte() {
+        let c = a_client();
+        let remux = masked(&c.transcode_query(&golden_spec(true, TranscodeDelivery::ProgressiveMkv)));
+        let reencode =
+            masked(&c.transcode_query(&golden_spec(false, TranscodeDelivery::ProgressiveMkv)));
+        let hls = masked(&c.transcode_query(&golden_spec(
+            false,
+            TranscodeDelivery::FixedHls { seconds_per_segment: 2 },
+        )));
+        assert_eq!(remux, GOLDEN_REMUX);
+        assert_eq!(reencode, GOLDEN_REENCODE);
+        assert_eq!(hls, GOLDEN_HLS);
+    }
+
+    /// The decision and the start URL are built from the one query, so they carry the same
+    /// `mediaIndex` (and the start URL keeps today's endpoint and token placement).
+    #[test]
+    fn the_default_start_urls_are_pinned_byte_for_byte() {
+        let c = a_client();
+        let mkv = masked(
+            &c.transcode_start_url(&golden_spec(false, TranscodeDelivery::ProgressiveMkv)).to_url(),
+        );
+        let m3u8 = masked(
+            &c.transcode_start_url(&golden_spec(
+                false,
+                TranscodeDelivery::FixedHls { seconds_per_segment: 2 },
+            ))
+            .to_url(),
+        );
+        assert_eq!(mkv, GOLDEN_START_MKV);
+        assert_eq!(m3u8, GOLDEN_START_M3U8);
+        for q in [&mkv, &m3u8] {
+            assert_eq!(q.matches("mediaIndex=").count(), 1, "{q}");
+            assert!(q.contains("mediaIndex=0&partIndex=0&"), "{q}");
+        }
+    }
+
+    /// The request line a `mde_decision*` call sends, captured on a loopback server.
+    #[cfg(feature = "devtriggers")]
+    fn mde_request_line(call: impl FnOnce(&Client)) -> String {
+        use std::io::{BufRead, BufReader, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port() as i32;
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept decision");
+            let mut line = String::new();
+            BufReader::new(&socket)
+                .read_line(&mut line)
+                .expect("request line");
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .expect("response");
+            line
+        });
+        let client = Client::new(
+            ServerId::from_raw(1),
+            "mach",
+            Origin::http("127.0.0.1", port),
+            "tok",
+            "cid",
+        );
+        call(&client);
+        server.join().unwrap().trim_end().to_owned()
+    }
+
+    /// `mde_decision` and `mde_decision_forced` (the two MDE handshakes), byte for byte.
+    #[cfg(feature = "devtriggers")]
+    #[test]
+    fn the_default_mde_decision_is_pinned_byte_for_byte() {
+        let plain = masked(&mde_request_line(|c| {
+            let _ = c.mde_decision("5", 0, "s1", 11, 22);
+        }));
+        let forced = masked(&mde_request_line(|c| {
+            let _ = c.mde_decision_forced("5", 0, "s1", 11, 22);
+        }));
+        assert_eq!(plain, GOLDEN_MDE);
+        assert_eq!(forced, GOLDEN_MDE_FORCED);
+    }
+
+    const GOLDEN_REMUX: &str = "path=%2Flibrary%2Fmetadata%2F5&mediaIndex=0&partIndex=0&protocol=http&directPlay=0&directStream=1&directStreamAudio=1&audioStreamID=11&session=enc-1&X-Plex-Session-Identifier=sess-1&X-Plex-Client-Identifier=cid&X-Plex-Product=PlxNative&X-Plex-Version=0.0.0-test&X-Plex-Platform=webOS&X-Plex-Platform-Version=4.5&X-Plex-Device=LG%20webOS%20TV&X-Plex-Device-Name=PlxNative%20%28LG%20TV%29&X-Plex-Model=LG%20webOS%20TV&X-Plex-Provides=player&X-Plex-Client-Profile-Name=Generic&X-Plex-Client-Profile-Extra=<profile>";
+    const GOLDEN_REENCODE: &str = "path=%2Flibrary%2Fmetadata%2F5&mediaIndex=0&partIndex=0&protocol=http&directPlay=0&directStream=1&videoResolution=3840x2160&maxVideoBitrate=60000&audioStreamID=11&session=enc-1&X-Plex-Session-Identifier=sess-1&X-Plex-Client-Identifier=cid&X-Plex-Product=PlxNative&X-Plex-Version=0.0.0-test&X-Plex-Platform=webOS&X-Plex-Platform-Version=4.5&X-Plex-Device=LG%20webOS%20TV&X-Plex-Device-Name=PlxNative%20%28LG%20TV%29&X-Plex-Model=LG%20webOS%20TV&X-Plex-Provides=player&X-Plex-Client-Profile-Name=Generic&X-Plex-Client-Profile-Extra=<profile>";
+    const GOLDEN_HLS: &str = "path=%2Flibrary%2Fmetadata%2F5&mediaIndex=0&partIndex=0&protocol=hls&directPlay=0&directStream=0&videoResolution=3840x2160&maxVideoBitrate=60000&videoBitrate=60000&peakBitrate=60000&autoAdjustQuality=0&secondsPerSegment=2&videoQuality=100&mediaBufferSize=20971&fastSeek=1&directStreamAudio=0&audioStreamID=11&session=enc-1&X-Plex-Session-Identifier=sess-1&X-Plex-Client-Identifier=cid&X-Plex-Product=PlxNative&X-Plex-Version=0.0.0-test&X-Plex-Platform=webOS&X-Plex-Platform-Version=4.5&X-Plex-Device=LG%20webOS%20TV&X-Plex-Device-Name=PlxNative%20%28LG%20TV%29&X-Plex-Model=LG%20webOS%20TV&X-Plex-Provides=player&X-Plex-Client-Profile-Name=Generic&X-Plex-Client-Profile-Extra=<profile>";
+    const GOLDEN_START_MKV: &str = "http://10.0.0.1:32400/video/:/transcode/universal/start.mkv?path=%2Flibrary%2Fmetadata%2F5&mediaIndex=0&partIndex=0&protocol=http&directPlay=0&directStream=1&videoResolution=3840x2160&maxVideoBitrate=60000&audioStreamID=11&session=enc-1&X-Plex-Session-Identifier=sess-1&X-Plex-Client-Identifier=cid&X-Plex-Product=PlxNative&X-Plex-Version=0.0.0-test&X-Plex-Platform=webOS&X-Plex-Platform-Version=4.5&X-Plex-Device=LG%20webOS%20TV&X-Plex-Device-Name=PlxNative%20%28LG%20TV%29&X-Plex-Model=LG%20webOS%20TV&X-Plex-Provides=player&X-Plex-Client-Profile-Name=Generic&X-Plex-Client-Profile-Extra=<profile>&X-Plex-Token=tok";
+    const GOLDEN_START_M3U8: &str = "http://10.0.0.1:32400/video/:/transcode/universal/start.m3u8?path=%2Flibrary%2Fmetadata%2F5&mediaIndex=0&partIndex=0&protocol=hls&directPlay=0&directStream=0&videoResolution=3840x2160&maxVideoBitrate=60000&videoBitrate=60000&peakBitrate=60000&autoAdjustQuality=0&secondsPerSegment=2&videoQuality=100&mediaBufferSize=20971&fastSeek=1&directStreamAudio=0&audioStreamID=11&session=enc-1&X-Plex-Session-Identifier=sess-1&X-Plex-Client-Identifier=cid&X-Plex-Product=PlxNative&X-Plex-Version=0.0.0-test&X-Plex-Platform=webOS&X-Plex-Platform-Version=4.5&X-Plex-Device=LG%20webOS%20TV&X-Plex-Device-Name=PlxNative%20%28LG%20TV%29&X-Plex-Model=LG%20webOS%20TV&X-Plex-Provides=player&X-Plex-Client-Profile-Name=Generic&X-Plex-Client-Profile-Extra=<profile>&X-Plex-Token=tok";
+    #[cfg(feature = "devtriggers")]
+    const GOLDEN_MDE: &str = "GET /video/:/transcode/universal/decision?path=%2Flibrary%2Fmetadata%2F5&mediaIndex=0&partIndex=0&protocol=http&hasMDE=1&directPlay=1&directStream=1&directStreamAudio=1&mediaBufferSize=20971&session=s1&X-Plex-Session-Identifier=s1&audioStreamID=11&subtitleStreamID=22&subtitles=none&X-Plex-Client-Identifier=cid&X-Plex-Product=PlxNative&X-Plex-Version=0.0.0-test&X-Plex-Platform=webOS&X-Plex-Platform-Version=4.5&X-Plex-Device=LG%20webOS%20TV&X-Plex-Device-Name=PlxNative%20%28LG%20TV%29&X-Plex-Model=LG%20webOS%20TV&X-Plex-Provides=player&X-Plex-Client-Profile-Name=Generic&X-Plex-Client-Profile-Extra=<profile>&X-Plex-Token=tok HTTP/1.1";
+    #[cfg(feature = "devtriggers")]
+    const GOLDEN_MDE_FORCED: &str = "GET /video/:/transcode/universal/decision?path=%2Flibrary%2Fmetadata%2F5&mediaIndex=0&partIndex=0&protocol=http&hasMDE=1&directPlay=1&directStream=0&directStreamAudio=0&mediaBufferSize=20971&session=s1&X-Plex-Session-Identifier=s1&audioStreamID=11&subtitleStreamID=22&subtitles=none&X-Plex-Client-Identifier=cid&X-Plex-Product=PlxNative&X-Plex-Version=0.0.0-test&X-Plex-Platform=webOS&X-Plex-Platform-Version=4.5&X-Plex-Device=LG%20webOS%20TV&X-Plex-Device-Name=PlxNative%20%28LG%20TV%29&X-Plex-Model=LG%20webOS%20TV&X-Plex-Provides=player&X-Plex-Client-Profile-Name=Generic&X-Plex-Client-Profile-Extra=<profile>&X-Plex-Token=tok HTTP/1.1";
 }
