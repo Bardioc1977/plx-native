@@ -241,6 +241,12 @@ Default behaviour unchanged. Acceptance: on a two-version item the viewer picks 
 
 ## 8. UNVERIFIED facts to probe in phase 0
 
+The owner allows testing against the real PMS as long as nothing is written to it (rules and the
+reasons in `docs/playlists-spec.md` §7). Probes 1 and 2 need `/video/:/transcode/universal/*`, which
+starts a server transcode session, and probe 3 needs a play queue: both create server-side state, so
+they run on `tests/mock_pms.py` or with the owner's explicit OK for that session. Probes 4 to 6 are
+plain `GET`s and may run on the real server. Replay fixtures stay synthetic (closed alphabet).
+
 1. Does `/video/:/transcode/universal/decision?mediaIndex=N&...` decide on `Media[N]`, and does its
    response list only that `Media` (affects `decision_codecs`, `mde_verdict`)?
 2. Does `/video/:/transcode/universal/start` with `mediaIndex=N` stream that version?
