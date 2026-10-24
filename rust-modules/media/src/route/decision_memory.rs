@@ -5,6 +5,8 @@
 //! * **Scope and recall**: [`memory_scope`] (whose memory) and the two reads a resolve takes
 //!   ([`recalled_track_memory`], [`remembered_subtitle_offset`]) with the offset's one write
 //!   ([`persist_subtitle_offset`]).
+//! * **The version choice** ([`recalled_version`], [`remember_version`]): which `Media[]` version of
+//!   an item the profile chose, through the same door (`docs/version-selection-spec.md` section 4.3).
 //! * **The write-back** (W6, WB): the remembered choice a landing applied that the server does not
 //!   have yet, parked on the session and sent once on the first decoded frame
 //!   ([`ParkedWriteBack`], [`send_parked_write_back`], [`on_decoded_frame`]).
@@ -17,7 +19,7 @@
 //! declared; this file sees them as a child module of it.
 
 use super::*;
-use plx_plex::plex::session::prefs::{AudioMemo, SubtitleMemo, TrackMemoryEntry};
+use plx_plex::plex::session::prefs::{AudioMemo, SubtitleMemo, TrackMemoryEntry, VersionMemoryEntry};
 use plx_plex::plex::session::SubtitleOffsetEntry;
 use super::super::track_memory::{forced_only_shown, memory_show, rematch_with_names, subtitle_pick_changed};
 
@@ -45,6 +47,36 @@ pub(super) fn recalled_track_memory(sid: ServerId) -> Vec<TrackMemoryEntry> {
         .into_iter()
         .filter(|e| e.machine_id == machine_id)
         .collect()
+}
+
+/// **The version of `rk` this profile chose to play on `sid`'s server**, as a `Media.id` - the read
+/// half of [`remember_version`], through the memory door's mirror ([`recall`]), so a pick made a
+/// moment ago is found whether or not its file write has landed. MAIN THREAD, like the rest of the
+/// snapshot: the resolve worker must not read the mirror (`request_play_inner` reads it once and
+/// puts the answer on the request). `None` for no pick, an unseated boot or a dev token (the door's
+/// seat gate), a profile that never picked, another server's item with the same `ratingKey`, and a
+/// server that is not (yet) registered. The id may name a version the server no longer lists; the
+/// landing then plays the default and forgets it (`VersionLookup::Gone`).
+pub fn recalled_version(sid: ServerId, rk: &str) -> Option<plx_plex::plex::MediaId> {
+    let (profile, machine_id) = memory_scope(sid)?;
+    recall::<VersionMemoryEntry>(&profile, &(machine_id, rk.to_string()))
+        .map(|e| e.media_id)
+        .filter(|id| *id > 0)
+        .map(plx_plex::plex::MediaId)
+}
+
+/// **Remember (`Some(id)`) or forget (`None`) which version of `rk` this profile plays** on `sid`'s
+/// server, through the memory door ([`remember`]): the mirror takes it now, on this thread, and the
+/// file write is queued on the storage worker with the account stamp. A landing of the Default (the
+/// `Media` at wire index 0) forgets, because the Default needs no record. Returns whether the door
+/// took it, which it does not for an unseated boot, a mirror nobody restored, or a server that has
+/// not said its machine id (a pick still plays that session: it rides the request).
+pub fn remember_version(sid: ServerId, rk: &str, media_id: Option<plx_plex::plex::MediaId>) -> bool {
+    let Some((user, machine_id)) = memory_scope(sid) else {
+        return false;
+    };
+    let entry = media_id.map(|id| VersionMemoryEntry::new(&machine_id, rk, id.0));
+    remember::<VersionMemoryEntry>(&user, (machine_id, rk.to_string()), move |_| entry.clone())
 }
 
 /// This profile's remembered subtitle sync-timing correction for `rk` on `sid`'s server, if this

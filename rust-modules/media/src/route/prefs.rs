@@ -43,7 +43,7 @@ use plx_plex::plex::session::{
     UnderPostersPref,
 };
 use plx_plex::plex::session::prefs::{
-    MemoryEntry, ProfileKeyed, ProfileList, ProfileMemory, ProfileRecords, SettingsWrite, TrackMemoryEntry,
+    MemoryEntry, ProfileKeyed, ProfileList, ProfileMemory, ProfileRecords, SettingsWrite, TrackMemoryEntry, VersionMemoryEntry,
 };
 use plx_plex::plex::session::{self, Seat, Session, SubtitleOffsetEntry};
 use plx_plex::plex::AudioEnhancements;
@@ -584,10 +584,12 @@ fn reseed_mirror<E: MemoryTenant>(record: &Session) {
 }
 
 /// Every tenant of the memory door, once. (The profiles' own player values are reseeded beside them.)
-pub const MEMORY_ROWS: &[MemoryRow] = &[MemoryRow::of::<SubtitleOffsetEntry>(), MemoryRow::of::<TrackMemoryEntry>()];
+pub const MEMORY_ROWS: &[MemoryRow] =
+    &[MemoryRow::of::<SubtitleOffsetEntry>(), MemoryRow::of::<TrackMemoryEntry>(), MemoryRow::of::<VersionMemoryEntry>()];
 
 static SUBTITLE_OFFSETS: MemoryMirror<SubtitleOffsetEntry> = MemoryMirror::new();
 static TRACK_MEMORY: MemoryMirror<TrackMemoryEntry> = MemoryMirror::new();
+static VERSION_MEMORY: MemoryMirror<VersionMemoryEntry> = MemoryMirror::new();
 
 impl MemoryTenant for SubtitleOffsetEntry {
     fn mirror() -> &'static MemoryMirror<Self> {
@@ -619,7 +621,7 @@ impl MemoryTenant for SubtitleOffsetEntry {
 /// published"; the memory door asks the seat instead, so a run that never seated anybody (a dev
 /// token, a replay) cannot write to the owner's record of whatever account is on disk.
 ///
-/// Both tenants are account-bound, so the mirror write and the queued file write carry the account
+/// All three tenants are account-bound, so the mirror write and the queued file write carry the account
 /// stamp (the mirror's, and the file's own `account_key`) and [`recall`] reads under it. `track_memory`
 /// is read through [`recall`] and [`recall_all`] and written here, by `commit_audio_pick` and
 /// `commit_subtitle_pick` (the track menu's pick) and by nothing else but the harness's
@@ -659,6 +661,15 @@ impl MemoryTenant for TrackMemoryEntry {
     }
     fn log_label() -> &'static str {
         "track memory"
+    }
+}
+
+impl MemoryTenant for VersionMemoryEntry {
+    fn mirror() -> &'static MemoryMirror<Self> {
+        &VERSION_MEMORY
+    }
+    fn log_label() -> &'static str {
+        "version memory"
     }
 }
 

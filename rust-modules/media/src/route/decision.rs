@@ -32,7 +32,8 @@ use super::track_memory::{SubMode, TrackContext};
 mod memory;
 pub use memory::{
     commit_audio_pick, commit_forced_only_and_sidecar, commit_forced_only_pick, commit_subtitle_and_sidecar, commit_subtitle_pick,
-    on_decoded_frame, persist_subtitle_offset, rematch_subtitle_with_names, repoint_parked_subtitle, send_parked_write_back,
+    on_decoded_frame, persist_subtitle_offset, recalled_version, rematch_subtitle_with_names, remember_version,
+    repoint_parked_subtitle, send_parked_write_back,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use memory::{park_write_back_for_test, write_back_parked};
@@ -10957,6 +10958,10 @@ mod plan_tests;
 #[cfg(test)]
 #[path = "decision_version_tests.rs"]
 mod version_tests;
+
+#[cfg(test)]
+#[path = "decision_version_memory_tests.rs"]
+mod version_memory_tests;
 
 #[cfg(test)]
 #[path = "decision_version_default_tests.rs"]
