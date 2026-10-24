@@ -785,6 +785,38 @@ fn trackmemory_arm_forgets_the_first_seated_profiles_shows() {
     plx_media::route::unseed_memory_for_test::<TrackMemoryEntry>();
 }
 
+/// **The dev version-memory clear runs at the first seat, beside the track-memory one.**
+/// `plxnative-versionmemory=clear` forgets the version picks the SEATED profile remembered, so the
+/// harness's seated cases start from empty memory (a Play Version pick of one case would otherwise be
+/// the next case's starting file). Same trigger, same once-only seat, same door as the track memory.
+#[test]
+fn versionmemory_arm_forgets_the_first_seated_profiles_picks() {
+    use plx_plex::plex::session::prefs::VersionMemoryEntry;
+    let _serial = plx_base::testlock::serial();
+    assert!(plx_base::devtrig::ENABLED, "this test arms a dev trigger, which a build without devtriggers cannot");
+    let stored = record("guest", &["profile-b"]);
+    let _fixture = Fixture::new("a0c-versionmemory-arm", &stored);
+    let held = |uuid: &str| plx_media::route::recall_all::<VersionMemoryEntry>(uuid).len();
+
+    plx_base::devtrig::with_private_triggers(|| {
+        std::fs::write(plx_base::devtrig::path("versionmemory"), "clear").unwrap();
+        crate::app::boot::restore_player_preferences(&session::load(), false);
+        // Something remembered before the boot's seat, as an earlier case's pick would have left it.
+        seat_globally("guest");
+        assert!(plx_media::route::remember::<VersionMemoryEntry>("guest", (MACHINE.into(), "movie-1".into()),
+            |_| Some(VersionMemoryEntry::new(MACHINE, "movie-1", 7_000_002))));
+        assert_eq!(held("guest"), 1, "setup: the guest remembered a version");
+
+        let (rig, _d) = resume(&stored);
+        assert_eq!(rig.seat_watch.restored, seat_of("guest"), "the stored boot seated the guest");
+        assert_eq!(held("guest"), 0, "and the seat trigger ran the clear for the profile it seated");
+        plx_base::storage_worker::drain_for_test();
+        assert!(session::load().prefs.version_memory.iter().all(|list| list.items.is_empty()),
+            "the file forgot it too");
+    });
+    plx_media::route::unseed_memory_for_test::<VersionMemoryEntry>();
+}
+
 /// **A republication of the same seat restores nothing (plan 3.8.5).** A roster refresh or a
 /// rediscovery publishes the profile again while a pick is in flight; the pick is not clobbered. The
 /// cell's publish counter is the oracle: the value alone could not tell a restore of the same record

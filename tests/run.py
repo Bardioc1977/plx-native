@@ -1161,6 +1161,11 @@ def triggers_for_case(case, url_base=None):
     # runs once at the first seat (`app::bridge::SeatWatch`); a dev-token boot never seats, writes no
     # memory, and so has nothing to clear.
     files.append(("plxnative-trackmemory", "clear"))
+    # Version memory (the per-title Play Version pick, written for the SEATED profile): forgotten at
+    # the seat on EVERY case for the same reason, so a case that picks a version cannot start the next
+    # case on that file. `dev::scenarios::arm_version_memory` runs beside the track-memory arm at the
+    # first seat; a dev-token or `--guest` boot never seats, remembers nothing and has nothing to clear.
+    files.append(("plxnative-versionmemory", "clear"))
     # Arbitrary extra dev triggers, `{"name": content}` → `plxnative-<name>` in the runtime root
     # (`null` for a bare flag). For the one-run experiments a trigger exists for — `sinkmax`,
     # `nofps` — without teaching the harness a key per knob; the case's own triggers above win on

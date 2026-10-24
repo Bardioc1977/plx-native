@@ -432,7 +432,7 @@ pub(crate) fn arm_audio_enhancements() {
 /// `Unseated` to `Seated` change and beside `arm_audio_enhancements`, with the profile it seated: a
 /// stored-session boot (the harness's seated cases) or a picker boot.
 pub(crate) fn arm_track_memory(user: &str) {
-    use plx_plex::plex::session::prefs::{MemoryEntry, TrackMemoryEntry};
+    use plx_plex::plex::session::prefs::TrackMemoryEntry;
     let Some(v) = plx_base::devtrig::read("trackmemory") else { return };
     let v = v.trim();
     if let Some(count) = v.strip_prefix("fill") {
@@ -444,14 +444,43 @@ pub(crate) fn arm_track_memory(user: &str) {
         plx_base::eventlog::log(&format!("trackmemory: unrecognised value {v:?} — ignored"));
         return;
     }
-    let cleared = plx_media::route::recall_all::<TrackMemoryEntry>(user)
-        .into_iter()
-        .filter(|entry| plx_media::route::remember::<TrackMemoryEntry>(user, entry.key(), |_| None))
-        .count();
+    let cleared = forget_all_memory::<TrackMemoryEntry>(user);
     #[cfg(feature = "devtriggers")]
     plx_base::eventlog::log(&format!("trackmemory: cleared {cleared} shows by /tmp/plxnative-trackmemory"));
     #[cfg(not(feature = "devtriggers"))]
     let _ = cleared;
+}
+
+/// `/tmp/plxnative-versionmemory=clear` — forget every version pick the seated profile remembered,
+/// harness-only. The twin of [`arm_track_memory`]'s `clear`, for the same reason: the Play Version
+/// list's pick is remembered per title (`route::remember_version`), so without it the next case that
+/// plays the same title would start from the previous case's version. `tests/run.py` writes `clear`
+/// for every case beside `plxnative-trackmemory`; the seat trigger (`app::bridge::SeatWatch`) runs it
+/// once at the first seat, through the same memory door, so an unseated boot (a dev token, `--guest`)
+/// neither remembers a pick nor has any to clear. An unrecognised value is ignored.
+pub(crate) fn arm_version_memory(user: &str) {
+    use plx_plex::plex::session::prefs::VersionMemoryEntry;
+    let Some(v) = plx_base::devtrig::read("versionmemory") else { return };
+    if v.trim() != "clear" {
+        #[cfg(feature = "devtriggers")]
+        plx_base::eventlog::log(&format!("versionmemory: unrecognised value {v:?} — ignored"));
+        return;
+    }
+    let cleared = forget_all_memory::<VersionMemoryEntry>(user);
+    #[cfg(feature = "devtriggers")]
+    plx_base::eventlog::log(&format!("versionmemory: cleared {cleared} picks by /tmp/plxnative-versionmemory"));
+    #[cfg(not(feature = "devtriggers"))]
+    let _ = cleared;
+}
+
+/// Remove every entry of memory list `E` the seated profile holds, through the memory door
+/// (`route::recall_all`, then `route::remember` with a removal: the same refusal, the same queued
+/// delta, never a write around the door). Returns how many entries the door took back.
+fn forget_all_memory<E: plx_media::route::MemoryTenant>(user: &str) -> usize {
+    plx_media::route::recall_all::<E>(user)
+        .into_iter()
+        .filter(|entry| plx_media::route::remember::<E>(user, entry.key(), |_| None))
+        .count()
 }
 
 /// `/tmp/plxnative-trackmemory=fill[:N]` — give the seated profile `N` (default and ceiling: the
@@ -950,6 +979,52 @@ mod track_memory_arm_tests {
         });
         plx_base::storage_worker::drain_for_test();
         assert_eq!(filed(), 0, "and the file forgot them through the same queued update");
+        unseed_memory_for_test::<TrackMemoryEntry>();
+    }
+
+    /// **`plxnative-versionmemory=clear` forgets the SEATED profile's version picks, through the
+    /// door, and nothing else.** Armed with `clear` only; an unrecognised value is ignored; another
+    /// profile's seat clears nothing of this one's; the track memory beside it is untouched; the
+    /// file loses the picks too.
+    #[test]
+    fn versionmemory_clear_forgets_the_seated_profiles_picks_and_nothing_else() {
+        use plx_plex::plex::session::prefs::VersionMemoryEntry;
+        let _serial = plx_base::testlock::serial();
+        assert!(plx_base::devtrig::ENABLED, "this test arms a dev trigger, which a build without devtriggers cannot");
+        let session = TempSession::new("arm-version-memory");
+        session::save(&Session { client_id: "cid-1".into(), account_token: "acct".into(), ..Default::default() });
+        session.seated("", "acct");
+        seed_memory_for_test::<VersionMemoryEntry>(&session::peek());
+        seed_memory_for_test::<TrackMemoryEntry>(&session::peek());
+        let versions = || recall_all::<VersionMemoryEntry>("").len();
+        for rk in ["100", "200"] {
+            assert!(remember::<VersionMemoryEntry>("", (MACHINE.to_string(), rk.to_string()),
+                move |_| Some(VersionMemoryEntry::new(MACHINE, rk, 7_000_002))));
+        }
+        assert!(remember::<TrackMemoryEntry>("", (MACHINE.to_string(), "100".to_string()), |_| Some(entry("100"))));
+        plx_base::storage_worker::drain_for_test();
+        assert_eq!((versions(), held("")), (2, 1), "setup: two picks and one show remembered");
+
+        plx_base::devtrig::with_private_triggers(|| {
+            super::arm_version_memory("");
+            assert_eq!(versions(), 2, "nothing is armed, so nothing is forgotten");
+
+            std::fs::write(plx_base::devtrig::path("versionmemory"), "keep").unwrap();
+            super::arm_version_memory("");
+            assert_eq!(versions(), 2, "an unrecognised value is ignored, not guessed at");
+
+            std::fs::write(plx_base::devtrig::path("versionmemory"), "clear").unwrap();
+            super::arm_version_memory("kid");
+            assert_eq!(versions(), 2, "a profile that is not the seated one clears nothing");
+
+            super::arm_version_memory("");
+            assert_eq!(versions(), 0, "armed with clear, the seated profile's picks are forgotten");
+            assert_eq!(held(""), 1, "and the track memory is the other arm's, untouched");
+        });
+        plx_base::storage_worker::drain_for_test();
+        assert_eq!(session::load().prefs.version_memory.iter().map(|list| list.items.len()).sum::<usize>(), 0,
+            "and the file forgot them through the same queued update");
+        unseed_memory_for_test::<VersionMemoryEntry>();
         unseed_memory_for_test::<TrackMemoryEntry>();
     }
 

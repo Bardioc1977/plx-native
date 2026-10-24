@@ -958,6 +958,16 @@ note line. Serve `--transcode-fixture <the mockverify mkv>` so the remux's start
 plan demotes the remux to a burn re-encode, which draws the remembered subtitle in the picture and
 leaves nothing to note.
 
+**Version memory.** A pick on the Play Version list (the hold menu's page or the detail hero's panel) is
+remembered per title by the SEATED profile, and the next Play (the page's, a card's, Up Next's) starts
+that file; picking the row at wire index 0, the Default, forgets it. So `run.py` also arms
+`plxnative-versionmemory=clear` for every case, written beside `plxnative-trackmemory` and run once at
+the first seat by the same seat trigger: a case's starting version is the manifest's, not the previous
+case's pick. The same boot rule holds: a token boot (`--guest` included) never seats, so it remembers
+nothing and has nothing to clear, and the pick of such a boot rides the Play request alone. A case that
+grades the memory across a relaunch must boot seated (`tools/tv-session.sh up --mock-plextv=PORT
+--screen login`).
+
 **Forced only.** The Subtitles tab's second row (right after Off) is the third remembered subtitle
 state: the forced track in the language of the audio that plays, or nothing. `mock_pms.py --media DIR
 --media-forced-subtitle` flags the verification episodes' English subtitle forced on the wire (the

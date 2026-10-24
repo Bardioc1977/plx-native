@@ -1980,6 +1980,9 @@ class PipelineTier(unittest.TestCase):
             # track memory: EVERY case forgets what a menu pick on an episode remembered -- see
             # test_every_case_forgets_track_memory_at_the_seat.
             ("plxnative-trackmemory", "clear"),
+            # version memory: the same, for the Versions pick -- see
+            # test_every_case_forgets_version_memory_at_the_seat.
+            ("plxnative-versionmemory", "clear"),
         ])
 
     def test_an_integration_case_can_explicitly_grade_auto(self):
@@ -3582,6 +3585,20 @@ class AbrTraceMetrics(unittest.TestCase):
         pipeline = run.triggers_for_case({"fixture": "x.mkv", "operations": [{"op": "play"}]},
                                          url_base="http://192.0.2.10:8020")
         self.assertIn(("plxnative-trackmemory", "clear"), pipeline)
+
+    def test_every_case_forgets_version_memory_at_the_seat(self):
+        """A pick on the Play Version list is remembered per title by the SEATED profile; without a
+        per-case `clear` the next case that plays the same title would start on the previous case's
+        file. Both tiers write it, and a case cannot opt out of it."""
+        for case in ({"rk": "1", "operations": [{"op": "play"}]},
+                     {"rk": "1", "operations": [{"op": "play"}, {"op": "subtitle", "tab": 1, "track": 0}]},
+                     {"rk": "1", "triggers": {"versions": None}, "operations": [{"op": "play"}]}):
+            files = run.triggers_for_case(case)
+            self.assertEqual([f for f in files if f[0] == "plxnative-versionmemory"],
+                             [("plxnative-versionmemory", "clear")], case)
+        pipeline = run.triggers_for_case({"fixture": "x.mkv", "operations": [{"op": "play"}]},
+                                         url_base="http://192.0.2.10:8020")
+        self.assertIn(("plxnative-versionmemory", "clear"), pipeline)
 
     def test_audio_enhancement_op_grades_applied_remux_and_ac3(self):
         """A live Normalize Loudness pick that took effect: the server ran the DSP params
