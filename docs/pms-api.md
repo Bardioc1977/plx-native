@@ -816,9 +816,10 @@ Episode entry (verified, trimmed):
 ```
 
 Note: episodes can have **multiple `Media[]` versions** (this one: 4K HDR + 1080p).
-The picker must iterate `Media[]` and choose by codec/resolution, not take `[0]` blindly: the client
-now does (the item menu's Play Version page and the Detail hero's panel list every `Media[]`
-entry, identified by `Media.id`; see "Multi-version items" below).
+The picker must iterate `Media[]`, not take `[0]` blindly: the client does (the item menu's Play
+Version page and the Detail hero's panel list every PLAYABLE `Media[]` entry, one with a `Part` key,
+identified by `Media.id`; a bare Play takes the profile's remembered version, else `Media[0]`; see
+"Multi-version items" below).
 Episode container metadata also carries `grandparentTitle`/`grandparentThumb` at the
 `MediaContainer` level for header rendering.
 
@@ -829,7 +830,7 @@ every movie/episode row of one owner library, section listings paged by 200, two
 `/library/metadata/{rk}` fetches per multi-version item, `/children`, hubs, on-deck,
 continue-watching and recently-added. No `decision`, `start` or `playQueues` call was made, so
 what `mediaIndex=N` does on the real server is **UNVERIFIED** (mock-verified only, see
-`docs/version-delta-plan.md`).
+`docs/known-issues.md`).
 
 | # | fact | value |
 |---|---|---|

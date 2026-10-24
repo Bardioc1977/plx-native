@@ -2,16 +2,20 @@
 
 Spec for choosing WHICH `Media[]` version of an item plays.
 
-Status: implemented upstream (#955 Play Version) + delta (docs/version-delta-plan.md); sections 3,
-4.1 and the label of section 3 are superseded by #955's list; 4.2, 4.3, 5-9 stand as amended below.
+Status: implemented upstream (#955 Play Version) + the delta: remembered pick and defect fixes.
+Sections 3, 4.1 and the label of section 3 are superseded by #955's list; 4.2, 4.3 and 5-10 stand as
+amended below.
 
 This file was written before #955 landed. #955 built the picker surfaces and the id-based wire
 (`MediaId`, `Metadata::media_version`, `PlayedVersion`, `PlaybackSession::cur_media_index`); what
-this spec still governs is the delta on top of it, whose design is `docs/version-delta-plan.md`
-(the plan holds the file-level design, this spec the behaviour). A section that #955 replaced keeps
-a one-line "superseded by #955: <symbol>" pointer instead of a rewrite. The earlier independent
-implementation lives on the branch `version-selection` (tags `version-selection-archive` and
-`version-selection-final`), with its plan, challenger and reviewer files.
+this spec still governs is the delta on top of it: the per-profile remembered pick (4.3), the tick on
+the version a bare Play takes, and the fixes for eight defects of the first version of the list (the
+playing file's own rate and Part, the subtitle scope, the `/decision` body, the resume point, unplayable
+rows, the worst row's fit, the `dca-ma` name). A section that #955 replaced keeps a one-line
+"superseded by #955: <symbol>" pointer instead of a rewrite. An earlier independent implementation of
+the same behaviour (with its own picker surface, not carried over) lives on the branch
+`version-selection` (tags `version-selection-archive` and `version-selection-final`), with its plan,
+challenger and reviewer files.
 
 **Scope: movies and TV episodes on a user's own PMS.** Not the Watchlist/Discover catalog, and not
 "Also available" (`screens/src/alt_sources.rs`), which chooses between *servers*, not between files
@@ -264,8 +268,8 @@ to a real household record (AGENTS.md).
 **Phase 0 - probes (no product code).** Done: the redacted counts F1-F14 are in `docs/pms-api.md`.
 
 **Phase 1 - explicit choice.** Built by #955 (the surfaces, the id on the wire, the picked version's
-Part, codecs and tracks). The delta (`docs/version-delta-plan.md`) adds the per-profile memory, the
-tick, and the fixes U1-U8. Default behaviour unchanged. Acceptance: on a two-version item the viewer
+Part, codecs and tracks). The delta adds the per-profile memory, the tick, and the fixes named in
+the status line. Default behaviour unchanged. Acceptance: on a two-version item the viewer
 picks version 1, it plays (direct and transcoded), the choice survives a relaunch, and a one-version
 item shows no new UI.
 
@@ -277,8 +281,8 @@ item shows no new UI.
 - Carry the chosen class (resolution + codec family) to the next episode of a show, including the
   Up Next successor, with a defined tie-break. (Until then the successor recalls its own episode's
   pick, per episode.)
-- The Detail page's chips, About and Track information following the remembered version (option B of
-  the plan's O2: a fetch-time projection).
+- The Detail page's chips, About and Track information following the remembered version (a fetch-time
+  projection of `Detail`; today they stay version 0's, `docs/known-issues.md`).
 
 ## 8. UNVERIFIED facts to probe in phase 0
 
@@ -317,5 +321,29 @@ as "let the server choose". Replay fixtures stay synthetic (closed alphabet).
 
 ## 10. Prose this change makes false (for `doc-claim-auditor`)
 
-The audit targets are listed in `docs/version-delta-plan.md` section 7 (`docs/agent-reference.md` and
-`AGENTS.md` mention none).
+The sentences below said something true before the delta and are false (or were reworded) after it.
+An audit looks for contradictions only, never for missing documentation. `AGENTS.md` and
+`docs/agent-reference.md` mention none of this.
+
+- `PlaybackRequest.version`, `ResolveEnv.version` and `request_play`'s docs in `media/src/route/decision.rs`
+  and `plan.rs`: `None` means "the remembered version, else the default", not "the default".
+  `request_env`'s comment "Both describe the default version" and every claim that the quality
+  ceiling source rate is zeroed for a picked version.
+- `data/src/pms.rs`: the docs of `versions_of` (unplayable entries are dropped; a list needs two playable
+  rows or one that is not the Default), `MediaVersion.hdr`, `MediaVersion.index` and `MediaVersion.plays`;
+  `data/src/metadata.rs`: `Detail.versions` and the "PRIMARY version" blocks.
+- `screens/src/versions_panel.rs` and `screens/src/item_menu.rs`: "the first row" is not the Default and
+  not where the cursor opens (it opens on the ticked row).
+- `rust-modules/plex/src/plex/CLAUDE.md`: the preference inventory (four account-bound memory lists),
+  the `ACCOUNT_BOUND_PREFERENCES` description and the document guard's shed order (`version_memory`
+  last).
+- `docs/parity-gaps.md`: the three LANDED entries for Play Version ("next-episode autoplay plays the
+  default", "Still open: the device has not played a picked version yet", the "two or more versions"
+  gate) and the nearby lines on the hero chips.
+- `docs/architecture-review-2026-07-26.md` (the paragraph on a version picker) and `docs/pms-api.md`
+  ("The picker must iterate `Media[]`", the notes on `mediaIndex` and on `Media.selected`).
+- `tests/README.md`: the mock flags (`--multi-version` and `--version-decision` replace a second flag).
+- This spec itself: the status line, 3, 4.1, 4.2 item 6 and 4.3.
+
+Not audit targets: `docs/plex-api.md` and `docs/plex-api-catalog.md`, which describe `mediaIndex` only as
+a query parameter.

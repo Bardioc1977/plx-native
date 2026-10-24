@@ -112,17 +112,19 @@ correction above for why that claim needs a fresh device session before being tr
 
 ## Multi-version items: what the Play Version delta leaves open
 
-Design: `docs/version-delta-plan.md`, behaviour: `docs/version-selection-spec.md`. These are the
+Behaviour: `docs/version-selection-spec.md`. These are the
 accepted limits of the version feature, so nobody re-investigates them.
 
 - **Detail page facts describe version 0, also while another version is remembered.** The hero chips,
   About and Track information read `Detail`'s flat fields, which are `Media[0]`'s. With a remembered
   pick the page can show a 4K chip while the 1080p copy plays; the tick in the version list says which
   version a bare Play takes. Following the remembered version would be a fetch-time projection of
-  `Detail` (a follow-up, the plan's O2 option B).
+  `Detail` (a follow-up, not built).
 - **A Part-less `Media[0]` has no way back to the Default.** The Default is the `Media` at wire index
-  0; without a playable Part it cannot play, so no row stands for it, a bare Play with nothing
-  remembered is refused as before, and a remembered pick of `Media[1]` stays until its id vanishes.
+  0; without a playable Part it cannot play, so no row stands for it and no row is ticked unless a
+  pick is remembered. A bare Play with nothing remembered is refused (nothing happens, as before); with
+  a remembered pick it plays that version, which the list ticks; a row picked in the list plays too.
+  A remembered pick of `Media[1]` stays until its id vanishes.
 - **A Part-less `Media[0]` with exactly one playable other version offers a one-row list** (the
   shared `pms::offers_versions` gate: a single playable version that is not the Default is a choice),
   so that version stays reachable; the Default itself still cannot play.
@@ -131,13 +133,13 @@ accepted limits of the version feature, so nobody re-investigates them.
   cut is an estimate of the glyph widths (`version_list::weight`), pinned by a fit test over the
   shipped languages.
 - **Stacked versions play `Part[0]`.** A version with several `Part`s (also a single-version stacked
-  item today) plays its first Part only; `partIndex` stays 0 and there is no timeline across Parts.
+  item today) plays its first Part only; `partIndex` stays 0 and there is no timeline across Parts. The size line of its row in the list is that first Part's too, so a stacked version reads smaller than its neighbours.
 - **The Info card runtime on a picked play** is version 0's length (`NowPlaying.dur_ms`); only the
   resume clamp at the landing knows the played length.
 - **HDR is absent from card-menu version rows.** A listing row carries no `Stream[]` (F5), so only
   the single-item fetch can say HDR; the rows show rate, resolution, codec, audio, container and size.
 - **`mediaIndex` and `selected` on the real PMS are mock-verified only.** No `decision`, `start` or
-  play queue was ever sent to a real server for a version other than the first (decision D10), so what
-  PMS answers for `mediaIndex=N` (and whether it flags the chosen `Media` `selected`) is UNVERIFIED;
+  play queue was ever sent to a real server for a version other than the first (an owner decision:
+  the real server is only read), so what PMS answers for `mediaIndex=N` (and whether it flags the chosen `Media` `selected`) is UNVERIFIED;
   the client is correct under every answer the mock models. Device verification of a picked version
   has not happened.

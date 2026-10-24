@@ -65,6 +65,9 @@ itself. (In this capture the frame under it was decoded by the simulator.)
 - **Everything you expect while watching**: resume, seek and scrub, chapters, audio and subtitle
   tracks (including image subtitles), Skip Intro, Skip Credits, Up Next with auto-advance, and
   progress reported back to your server.
+- **Choose the version to play** when a title has several (a 4K and a 1080p copy, MKV or MP4): the
+  hold menu and the detail page list them, and the one you pick is remembered per title for each
+  profile; a title with one version looks exactly as before.
 
 ## Will it work on my television?
 
