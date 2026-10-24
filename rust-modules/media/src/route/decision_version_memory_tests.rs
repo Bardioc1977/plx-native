@@ -225,7 +225,7 @@ fn a_mirror_nobody_restored_refuses_a_write_and_answers_nothing() {
 //
 // `request_play_inner` recalls the profile's pick into `request.version` ONCE, so both re-entries of
 // the resolve (`pump_play`'s contract change and `retry_current_play`) re-send it; `pump_play` settles
-// the memory at a playable landing of a fresh play (docs/version-delta-plan.md, N3). The Default is
+// the memory at a playable landing of a fresh play (`docs/version-selection-spec.md` section 4.3). The Default is
 // the `Media` at WIRE index 0: playing it forgets, whatever the list shows first.
 
 #[cfg(feature = "devtriggers")]

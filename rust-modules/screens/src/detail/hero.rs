@@ -108,8 +108,9 @@ pub enum HeroCtl {
     /// SECOND (right after Play/Resume); a circle that never unfurls and carries no name, focused or
     /// not: an icon-only control is its glyph and its focus fill
     Watchlist,
-    /// the Play Version disc, present only while the loaded movie or episode has two or more
-    /// versions; it opens the list of them (`screens::versions_panel`)
+    /// the Play Version disc, present only while the loaded movie or episode offers a choice of
+    /// versions (`pms::offers_versions`: two or more playable, or one playable that is not the
+    /// Default); it opens the list of them (`screens::versions_panel`)
     Version,
 }
 
@@ -156,7 +157,8 @@ impl HeroCtl {
 pub struct HeroSet {
     /// the item carries a `plex://movie|show` guid the Watchlist takes — the bookmark disc exists only then
     pub watchlist: bool,
-    /// the loaded movie or episode has two or more versions — the Play Version disc exists only then
+    /// the loaded movie or episode offers a choice of versions (`pms::offers_versions`) — the Play
+    /// Version disc exists only then
     pub version: bool,
     pub restart: bool,
     pub trailer: bool,

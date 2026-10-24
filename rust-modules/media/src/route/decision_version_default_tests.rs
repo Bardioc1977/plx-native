@@ -1,5 +1,5 @@
 //! What the resolve asks PMS for when NO version was chosen, pinned before the version delta
-//! (`docs/version-delta-plan.md`, S2) changes any of the code underneath.
+//! (`docs/version-selection-spec.md` section 6) changes any of the code underneath.
 //!
 //! `build_stream` is run against a loopback PMS for the four shapes a default play takes (direct
 //! play, container remux, re-encode, fixed HLS) and the transcript of what it asked for, plus the

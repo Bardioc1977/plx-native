@@ -558,7 +558,7 @@ fn a_resume_point_past_the_end_of_the_picked_version_starts_over() {
 
 // ---- a /decision body about another version is never judged as the pick's ---------------------------
 //
-// MOCK-MODELLED ONLY (docs/version-delta-plan.md, O3 and decision D10): what a real PMS lists for
+// MOCK-MODELLED ONLY (`docs/version-selection-spec.md` section 4.2 item 6, `docs/known-issues.md`): what a real PMS lists for
 // `mediaIndex=N`, and whether it flags the chosen `Media` `selected`, has never been measured. These
 // tests pin that the client is safe under every answer the mock models.
 

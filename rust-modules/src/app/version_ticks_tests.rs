@@ -1,4 +1,4 @@
-//! **The tick on "the version a bare Play takes"** (`docs/version-delta-plan.md`, N4): every capture
+//! **The tick on "the version a bare Play takes"** (`docs/version-selection-spec.md` section 3): every capture
 //! of a version list (a card's menu, the filmstrip episode's menu, the hero's Play Version panel)
 //! ticks the profile's remembered version, else the Default (the row at WIRE index 0), else nothing.
 //! The data layer cannot name the memory, so the application sets it when it captures the list.

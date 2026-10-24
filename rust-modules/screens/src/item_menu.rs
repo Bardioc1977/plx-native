@@ -2342,9 +2342,10 @@ mod tests {
         plx_ui::table::assert_no_fit_failures(&out);
     }
 
-    /// The row exists exactly when there is a choice: a movie or episode with two or more
-    /// versions, on a card and on the filmstrip. One version, or a show or season (which plays a
-    /// leaf it has not chosen yet), offers none.
+    /// The row exists exactly when there is a choice (`pms::offers_versions`): a movie or episode
+    /// with two or more playable versions, or one that is not the Default, on a card and on the
+    /// filmstrip. A lone Default, or a show or season (which plays a leaf it has not chosen yet),
+    /// offers none.
     #[test]
     fn play_version_is_offered_only_for_a_leaf_with_a_choice() {
         for kind in [0, 3] {

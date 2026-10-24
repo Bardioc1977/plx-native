@@ -441,7 +441,8 @@ pub enum ItemMenuKind {
     /// The detail page's episode filmstrip. `mark` is resolved by the page through the same
     /// `ep_state` that draws the still's own state line, so the tile and the menu opened on it
     /// cannot describe one episode two ways.
-    /// `versions` is the episode's (two or more for the Play Version row), captured at open.
+    /// `versions` is the episode's playable versions (the Play Version row exists when
+    /// `pms::offers_versions` says there is a choice), captured at open.
     Episode { mark: plx_ui::widgets::PosterMark, versions: Vec<plx_data::pms::MediaVersion> },
     /// The detail page's season tabs. `show_rk` is the show the page has loaded and `index` the
     /// tab's season number (`Season::index`): together the address of the season's episodes, which

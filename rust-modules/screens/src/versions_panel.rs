@@ -9,8 +9,9 @@
 //!
 //! The rows are `plx_appkit::version_list`, the same builder the item menu's Play Version page
 //! draws, captured when the panel opens: a refetch landing behind an open list does not move a
-//! row under the cursor. It opens on the version Play takes unasked, the server's first
-//! (`plx_plex::plex::Metadata::media_version(None)`).
+//! row under the cursor. It opens on the version Play takes unasked: the ticked row (the remembered
+//! version, else the `Media` at wire index 0 when that one is listed; `plx_data::pms::mark_plays`), or the
+//! first row when none is ticked.
 
 use std::borrow::Cow;
 use std::convert::Infallible;

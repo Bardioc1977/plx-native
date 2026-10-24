@@ -1800,7 +1800,7 @@ mod tests {
         }
     }
 
-    // ---- the DEFAULT bytes, pinned before the version delta moves anything (docs/version-delta-plan.md, S2) ----
+    // ---- the DEFAULT bytes, pinned before the version delta moves anything (`docs/version-selection-spec.md` section 6) ----
     //
     // `mediaIndex` is written in two places (`transcode_query`, which reads a `TranscodeSpec`,
     // and `mde_decision_with_profile`, which takes it as an argument). These goldens are the proof
