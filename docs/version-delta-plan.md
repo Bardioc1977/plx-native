@@ -877,3 +877,71 @@ committed tree with `git status --short` empty before and after; ledgers untouch
 - **Open for later steps.** S12 mock; S13 doc-claim audit must also see `PlaybackRequest.version`/`ResolveEnv.version`
   (already reworded in S10b), `Detail.versions`' doc ("`plays`"), the `plex/CLAUDE.md` memory-door paragraph; the
   `docs/known-issues.md` entry "Part-less `Media[0]` has no way back" is now also visible as "no row ticked".
+
+## Implementation notes, batch 4 (S12-S15)
+
+Commits: S12 `de443afb`, simulator-found fix `23ca5414`, S13 docs `f0aaf1eb`, S13 comments `5f2fb32f`. The gates of S14 ran
+on the tree at `5f2fb32f` with `git status --short` empty before and after; this note is the only change after them. S15 was
+run BEFORE S13/S14 (a defect found in the simulator changes the tree the gates must grade); the simulator leg is
+simulator-only, no TV, no tv-session, no deploy.
+
+- **S12 (N6).** `git cherry-pick -n f3faef59` and a hand merge: `--multi-version` is the only flag (`--version-fixture`
+  does not exist); upstream's 4K second version of the first movie and episode stays (ids from 9900000) and the
+  reserved block 940001+ is added after the `--media` block. Choices: `version_items` is every item with more than one
+  `Media`, so upstream's two items answer `mediaIndex` like ours; the first movie's and episode's own `Media[0]` take a
+  `Media.id` of 7010000+ratingKey (the generated one is the ratingKey, which would hide a client that confuses the two);
+  940005 now has THREE `Media` (Part-less `Media[0]`, two playable); the decision modes are `chosen`, `all`,
+  `all-unflagged`, `ignore` with `Media.selected` as the unit (the chosen entry flagged; `all-unflagged` flags none).
+  Tests: class `MultiVersion` in `tests/test_mock_pms_library.py`, `_selftest_versions`, README merged. Gates:
+  `python3 tests/test_mock_pms_library.py` `Ran 103 tests ... OK (skipped=8)`, `python3 tests/mock_pms.py --selftest`
+  `mock_pms selftest: ok`, `python3 tests/test_harness.py` `Ran 544 tests ... OK (skipped=1)`.
+- **Defect found by S15 (commit `23ca5414`, not in the plan).** In the simulator against 940005 (Part-less `Media[0]`, two
+  playable others) a row picked in the list did NOTHING, on the card's Play Version page and on the hero panel: the page
+  and the card hold a catalog row whose `part` is empty, and `request_play_movie` returned false on `m.part.is_empty()`
+  before the pick (or the memory) was read. The S7 claim "that version stays reachable" and the tick's claim "a bare Play
+  takes it" were therefore false at the application, though the media tests (which call `request_play`) were green.
+  Observed with temporary log lines (removed): `play_hero version=Some(..) selected=true`, then no request. Fix: the guard
+  refuses only a card with no Part, no pick and nothing remembered. Red-first, `make test-hostsim C=plx_media`:
+  `a_pick_plays_from_a_card_whose_default_has_no_part` (`the pick is not refused`) and
+  `a_bare_play_on_a_partless_default_takes_the_remembered_version_else_is_refused` (`the remembered pick plays`);
+  both green after. Not changed: a bare Play with nothing remembered is still refused, silently. If the remembered id
+  has vanished, the bare Play now starts and plays the default with the empty card Part (a read-out, and the stale id
+  is forgotten at that landing); review `request_play_movie` if that edge matters.
+- **S13.** README bullet; the spec has the final status line, no pointer to this file and the section 10 list inlined
+  (rewritten from the plan's section 7); five code comments repointed; `pms-api.md`, `parity-gaps.md` (three entries)
+  and `known-issues.md` reworded; `versions_panel.rs` module doc (opens on the ticked row). The `doc-claim-auditor`
+  found two drifts, both fixed: "two or more versions" in the hero, registry and item-menu docs (now
+  `pms::offers_versions`) and the pms-api sentence "list every `Media[]` entry". Its note that `known-issues.md` cited
+  "decision D10" (a plan-only name) was fixed too. Gate: `grep -rn version-delta docs rust-modules ci tests README.md`
+  (excluding `target*` build output, whose dependency files carry this worktree's path) is empty outside
+  `docs/version-delta-*.md`. A stacked version's size line in the list is its first Part's (the stacked entry reads
+  smaller than its neighbours in the simulator); recorded in `known-issues.md`.
+- **S14 (tree `5f2fb32f`, clean before and after).** `make check-cargo` exit 0 (e.g. `plx_data` `test result: ok. 1223
+  passed`, `plx_plex` 748, `plx_platform` 281, `plx_appkit` 350 incl. in the 328/295 group, `plx_screens` 1710,
+  `plx_media` 1779, application crate 1007); `make check-python-harness` `Ran 544 tests ... OK (skipped=1)`;
+  `make test-hostsim` `test result: ok. 1121 passed; 0 failed`; `make test-hostsim C=plx_media` `test result: ok. 1941
+  passed; 0 failed; 64 ignored`; `make check-nodef`, `make lint`, `ci/check-deps.sh` ("all gates green"; ledgers
+  untouched, 16/78/58/11), `ci/check-module-layers.py`, `ci/check-list-caps.py` (288 sites) green; `make check-replay`
+  `3 fixtures, 6 replays, 0 failures` (all `verdict=SAME`). The whole `make check` was not run (its known
+  `ci/test_disk_preflight.py` free-space assertion stops it); the halves above stand in. No `SHAPE` string and no
+  `SCREEN_SHAPES_PIN` moved in the branch, so S16 does not apply.
+- **S15, simulator leg (macOS simulator, `PLXNATIVE_WIN=1280x720`, `tests/mock_pms.py --multi-version`, no `--media`, so a
+  play lands on the failure read-out; the mock's request log shows the `mediaIndex` sent).** (1) Part-less `Media[0]`
+  (940005), unseated: the hero panel and the card menu's Play Version page list the two playable rows (4.0 Mbps 1080p, 2.5
+  Mbps 720p), no row ticked, cursor on the first; a bare Play from the hero does nothing (refused as before); before
+  `23ca5414` a picked row also did nothing, after it the mock saw `mediaIndex=1`. (2) Nine versions (940002): nine rows,
+  every label distinct by rate (24.0 ... 4.0 Mbps), size line below, the Default row (wire index 0) ticked, all nine fit
+  the panel without scrolling. (3) Seated (QR sign-in through the mock's plex.tv, `--authorize-after 2`, profile restored
+  on the next boot): picked row 2 of 940005 -> `mediaIndex=2` -> relaunch -> the panel and the card menu open with the
+  tick and the cursor on that row, and a bare Play from the hero asks the mock for `mediaIndex=2`. (4) Hold-menu cursor
+  when the focused row vanishes: the only way a row vanishes in a live hold menu is the page swap to Play Version
+  (rows are built once at Mount, `build_rows`), and there focus lands on the ticked row (3); a destructive-row menu
+  (Watchlist Remove) and a face arriving after open could not be produced in the simulator, so review remark 2 stays a
+  host-level claim. The simulator drew a purple "main thread hang" banner on some captures (the dev watchdog, a
+  1280x720 Retina capture costing ~0.3-1 s); no crash.
+- **Claims verified only in the simulator or on the host, none on a device:** everything about `mediaIndex`/`selected`
+  against a real PMS (mock only), the direct-play and remux/transcode legs of a picked version (the simulator reaches the
+  decision and the start URL, never decodes), U1 (fixed rung with a 1080p pick), U2, U5, U4 (host and mock), the
+  remembered pick across a relaunch on the set (the simulator restores a seated session; the device needs the
+  `--mock-plextv` boot), the label fit on LG's rasterizer (the fit tests use the host metric), and frame pacing of the
+  panel.
