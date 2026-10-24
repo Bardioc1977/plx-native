@@ -453,6 +453,49 @@ mod settle {
         w.finish();
     }
 
+    /// The catalog row of an item whose Default (`Media[0]`) has no Part: its `part` is empty, as
+    /// `Metadata::default_part` leaves it.
+    fn partless_card(w: &World) -> plx_data::pms::PmsMovie {
+        plx_data::pms::PmsMovie { sid: w.sid, rk: RK.to_owned(), title: "Movie".to_owned(), ..Default::default() }
+    }
+
+    /// **The card's Play Version row on an item whose Default cannot play.** The card has no Part
+    /// key (`Media[0]` has none), but the row names a version that does: `request_play_movie` used
+    /// to refuse on the empty card Part before the pick was read, so the one version the list
+    /// offers did nothing. Found in the simulator against the mock's 940005 (S15).
+    #[test]
+    fn a_pick_plays_from_a_card_whose_default_has_no_part() {
+        let item = item_of(&[(3086, None), (3082, Some(3130)), (3090, Some(3140))]);
+        let mut w = world(&item, MDE_DIRECT);
+        let _seat = Seat::owner();
+        let mut meta = store();
+        let card = partless_card(&w);
+        assert!(request_play_movie(&mut w.ps, &mut meta, &card, "", Some(PICKED)), "the pick is not refused");
+        assert!(land(&mut w, &mut meta).is_some(), "and it plays");
+        assert_eq!(cur_media_index(&w.ps), 1);
+        assert_eq!(stored(&w), Some(PICKED));
+        w.finish();
+    }
+
+    /// A bare Play on that card takes the remembered version (the list ticks it), and is refused as
+    /// before while nothing is remembered: the Default cannot play.
+    #[test]
+    fn a_bare_play_on_a_partless_default_takes_the_remembered_version_else_is_refused() {
+        let item = item_of(&[(3086, None), (3082, Some(3130)), (3090, Some(3140))]);
+        let mut w = world(&item, MDE_DIRECT);
+        let _seat = Seat::owner();
+        let mut meta = store();
+        let card = partless_card(&w);
+        assert!(!request_play_movie(&mut w.ps, &mut meta, &card, "", None), "nothing remembered: refused");
+        assert!(w.pms.requests().is_empty(), "and nothing was asked of the server");
+        assert!(remember_version(w.sid, RK, Some(PICKED)));
+        assert!(request_play_movie(&mut w.ps, &mut meta, &card, "", None), "the remembered pick plays");
+        assert!(land(&mut w, &mut meta).is_some());
+        assert_eq!(cur_media_index(&w.ps), 1);
+        assert_eq!(stored(&w), Some(PICKED));
+        w.finish();
+    }
+
     // -- stale ids ----------------------------------------------------------------------------------------
 
     /// A remembered id the item no longer lists plays the Default and is forgotten at that landing.

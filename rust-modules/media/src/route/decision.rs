@@ -8286,7 +8286,14 @@ pub fn request_play_movie(
     ctx: &str,
     version: Option<plx_plex::plex::MediaId>,
 ) -> bool {
-    if m.part.is_empty() {
+    // **A card without a Part is playable only through a version.** Its Default (`Media[0]`) has
+    // no file, so the card's Part key is empty; a version the viewer picked, or one the profile
+    // remembers (which the list ticks as "the version a bare Play takes"), carries its own Part and
+    // the resolve plays that. Nothing picked and nothing remembered: refused, as before.
+    if m.part.is_empty()
+        && version.is_none()
+        && recalled_version(item_sid(m.sid), &m.rk).is_none()
+    {
         return false;
     }
     // **The ITEM's server, not the browsed one.** This passed `surface_sid()` — i.e. whichever
