@@ -3030,14 +3030,10 @@ impl DetailScreen {
                 }
                 ctl => {
                     let icon = match ctl {
-                        hero::HeroCtl::Restart => plx_ui::icons::Icon::Restart,
-                        hero::HeroCtl::Trailer => plx_ui::icons::Icon::Trailer,
-                        hero::HeroCtl::MarkWatched => plx_ui::icons::Icon::Check,
-                        hero::HeroCtl::MarkUnwatched => plx_ui::icons::Icon::Minus,
                         // At either rest the plain face; only a flip in flight layers the fill.
                         hero::HeroCtl::Watchlist => plx_appkit::watchlist_disc::paint(self.watchlist.pos()).0,
-                        hero::HeroCtl::Version => hero::VERSION_ICON,
-                        _ => unreachable!(),
+                        // The row's one table of marks, which the distinctness test reads too.
+                        ctl => hero::disc_icon(ctl).expect("only the two pills draw no disc mark"),
                     };
                     let mut button = CircleButton::new(c"".as_ptr())
                         .icon(icon)
@@ -4226,6 +4222,7 @@ impl DetailScreen {
             alt: self.alt_available(meta),
             mark,
             watchlist: self.detail(meta).is_some_and(|d| plx_plex::plex::catalog_hex_of_guid(&d.guid).is_some()),
+            go_show: self.detail(meta).is_some_and(|d| hero::show_target(d).is_some()),
         }
     }
 
@@ -4418,9 +4415,17 @@ impl DetailScreen {
                 if let Some(d) = self.detail(meta) {
                     if let Some(act) = hero::press(&d.guid, self.watchlist.membership()).filter(|_| self.watchlist_hex.is_some()) {
                         self.watchlist.press();
-                        fx.push(Fx::App(AppFx::ItemMenu(crate::registry::ItemMenuReq {
-                            act, sid: d.sid, item: None, season: None, loaded_episode: false, from_home: false,
-                        })));
+                        Self::item_action(fx, d.sid, act);
+                    }
+                }
+            }
+            // The Go to Show disc: the item menu's own "Go to Show" row, so the application opens
+            // the show on the episode's season through the one route the menu already uses
+            // (`apply_item_action` -> `open_detail`); the episode's page stays under it for BACK.
+            hero::HeroCtl::GoToShow => {
+                if let Some(d) = self.detail(meta) {
+                    if let Some((show_rk, season)) = hero::show_target(d) {
+                        Self::item_action(fx, d.sid, crate::registry::ItemMenuAction::GoToShow(show_rk.to_string(), season));
                     }
                 }
             }
@@ -4445,6 +4450,14 @@ impl DetailScreen {
                 }
             }
         }
+    }
+
+    /// A hero control's press that is an item-menu action on the page's own item: the application
+    /// performs it (`app::input::apply_item_action`) on the server `sid` names.
+    fn item_action<H: ContentLike>(fx: &mut Effects<'_, H>, sid: ServerId, act: crate::registry::ItemMenuAction) {
+        fx.push(Fx::App(AppFx::ItemMenu(crate::registry::ItemMenuReq {
+            act, sid, item: None, season: None, loaded_episode: false, from_home: false,
+        })));
     }
 
     /// Play what the hero is about. `version` is a pick off the Play Version panel

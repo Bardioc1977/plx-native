@@ -1240,6 +1240,7 @@ fn hero_focus_survives_a_control_appearing_in_the_middle_of_the_row() {
         trailer: false,
         alt: false,
         mark: PosterMark::None,
+        go_show: false,
     };
     let after = hero::HeroSet {
         watchlist: true,
@@ -1407,11 +1408,12 @@ fn a_pointer_lands_on_the_capsule_the_unfurl_drew() {
         trailer: false,
         alt: false,
         mark: PosterMark::InProgress,
+        go_show: false,
     };
     let index = hero::watch_index(set).unwrap();
     assert_eq!(hero::ctl_at(set, index - 1), Some(hero::HeroCtl::Restart));
     for unfurl in [0.2, 0.6, 1.0] {
-        let disc = hero::disc_caps_at(set, 230.0, 0.0, [0.0, 0.0, unfurl, 0.0], [201.0, 0.0, 267.0, 0.0]);
+        let disc = hero::disc_caps_at(set, 230.0, 0.0, [0.0, 0.0, unfurl, 0.0, 0.0], [201.0, 0.0, 267.0, 0.0, 0.0]);
         let widths = hero::HeroWidths {
             pill: 230.0,
             alt: 0.0,
@@ -1483,12 +1485,12 @@ fn hero_action_row_hit_matches_the_drawn_controls_at_every_set_size() {
                     assert_eq!(n, 3 + usize::from(restart) + usize::from(alt));
                     sizes.insert(n);
                     for unfurl in [
-                        [0.0, 0.0, 0.0, 0.0],
-                        [0.0, 0.0, 1.0, 0.0],
-                        [0.0, 1.0, 0.0, 0.0],
-                        [0.3, 0.0, 0.7, 0.0],
-                        [1.0, 0.0, 0.0, 0.0],
-                        [0.0, 1.0, 1.0, 0.0],
+                        [0.0, 0.0, 0.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0, 0.0],
+                        [0.3, 0.0, 0.7, 0.0, 0.0],
+                        [1.0, 0.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 1.0, 0.0, 0.0],
                     ] {
                         screen.disc_unfurl = unfurl.map(Spring::at);
                         for scroll in [0.0, 48.0] {
@@ -4959,6 +4961,39 @@ fn item_menu_acts(effects: &[plx_machine::machine::Stamped<TestHost>]) -> Vec<cr
         .collect()
 }
 
+/// **The page offers the Go to Show disc exactly when it can say where it goes**: an episode page
+/// that names its show has it (last in the row, a disc with the 5th unfurl slot's verb), and a
+/// movie, a show, a season, an episode that names no show and a page whose item is not the one
+/// loaded do not.
+#[test]
+fn only_an_episode_page_that_names_its_show_has_the_go_to_show_disc() {
+    let sid = ServerId::from_raw(1);
+    let set_of = |d: Detail| {
+        let rk = d.rk.clone();
+        let _guard = install(d);
+        let screen = bare(&_guard, sid, &rk);
+        let set = screen.hero_set(test_store().view());
+        let (ctls, n) = hero::hero_ctls(set);
+        let row = ctls[..n].to_vec();
+        clear();
+        (set.go_show, row)
+    };
+    let (go_show, row) = set_of(episode_of(sid, "show-7", 3));
+    assert!(go_show);
+    assert_eq!(row.last(), Some(&hero::HeroCtl::GoToShow), "last in the row");
+    assert_eq!(row.iter().filter(|c| **c == hero::HeroCtl::GoToShow).count(), 1);
+    for (what, d) in [
+        ("an episode that names no show", episode_of(sid, "", 3)),
+        ("a movie", Detail { sid, rk: "m".into(), kind: "movie".into(), show_rk: "show-7".into(), ..Default::default() }),
+        ("a show", Detail { sid, rk: "s".into(), is_show: true, kind: "show".into(), ..Default::default() }),
+        ("a season", Detail { sid, rk: "se".into(), kind: "season".into(), parent_rk: "show-7".into(), index: 2, ..Default::default() }),
+    ] {
+        let (go_show, row) = set_of(d);
+        assert!(!go_show, "{what}");
+        assert!(!row.contains(&hero::HeroCtl::GoToShow), "{what}");
+    }
+}
+
 /// A title the service cannot key (a local agent, personal media) gets NO disc: not drawn, not
 /// focusable, and its element is not placeable in the row.
 #[test]
@@ -4994,9 +5029,6 @@ fn the_bookmark_disc_press_emits_the_item_menu_write() {
 
 // ---- the Go to Show disc on an episode's page (issue #879) -----------------------------------
 
-/// The Go to Show disc's elem id (`hero::ELEM_GO_SHOW`).
-const GO_SHOW_ELEM: u32 = 8;
-
 fn episode_of(sid: ServerId, show_rk: &str, season: i64) -> Detail {
     Detail {
         sid,
@@ -5023,7 +5055,7 @@ fn an_episode_page_go_to_show_press_asks_for_the_shows_season() {
         let rk = d.rk.clone();
         let _guard = install(d);
         let mut screen = bare(&_guard, sid, &rk);
-        let (_, fx) = step(&mut screen, &ScreenEvent::Activate(GO_SHOW_ELEM), Some(GO_SHOW_ELEM));
+        let (_, fx) = step(&mut screen, &ScreenEvent::Activate(hero::ELEM_GO_SHOW), Some(hero::ELEM_GO_SHOW));
         let reqs: Vec<_> = fx.iter().filter_map(|e| match &e.fx {
             Fx::App(AppFx::ItemMenu(req)) => Some((req.act.clone(), req.sid)),
             _ => None,

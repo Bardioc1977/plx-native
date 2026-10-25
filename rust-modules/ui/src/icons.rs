@@ -118,12 +118,34 @@ pub enum Icon {
     Backspace,
     /// A screen with a play triangle — the item menu's "Go to Episode" leading glyph.
     Episode,
-    /// A stack of layers — the item menu's "Go to Show" leading glyph (a series of episodes).
+    /// A stack of layers — the item menu's "Go to Show" leading glyph (a series of episodes), and
+    /// the detail hero's Play Version disc (several copies of one title).
+    ///
+    /// The detail hero's own *Go to Show* disc does NOT wear it: it wears [`Icon::EpisodeList`].
+    /// The menu row and the hero disc are one destination drawn twice on purpose, split by SURFACE
+    /// exactly as [`Icon::PlayStart`] and [`Icon::Restart`] are — the row has the words beside its
+    /// mark, the disc sits next to the Play Version disc, which has this one.
     Show,
     /// A portrait card with a second one behind it — a COLLECTION, drawn by the neutral tile of a
     /// collection that has no artwork of its own (`ui::collection_tile`). Two stroked elements
     /// that never touch (a unit of air between them), so rule 1's crease cannot form.
     Collection,
+    /// Three rows, each with a leading dot — "the episodes of the show": **the detail hero's Go to
+    /// Show disc, and only that** (an episode's page names its show, and the disc opens it on the
+    /// episode's season).
+    ///
+    /// It is the same destination as the item menu's "Go to Show" row, which wears [`Icon::Show`],
+    /// and the two marks differ deliberately, the way [`Icon::Restart`] and [`Icon::PlayStart`] do:
+    /// discriminability WITHIN A ROW beats cross-surface consistency. The hero's Play Version disc
+    /// already wears `Show` (`detail::hero::VERSION_ICON`), the two discs are adjacent on an episode
+    /// with two or more versions, and in a row too narrow to unfurl any verb (several languages,
+    /// with *Also available* present) neither shows a word, so the glyph is all that tells them
+    /// apart. The menu row has the words beside it and keeps `Show`. Read [`Icon::Restart`] before
+    /// reconciling them.
+    ///
+    /// One `<path>` of six subpaths, none touching (the dots clear the bars by 2 units), so rule 1's
+    /// crease cannot form.
+    EpisodeList,
     /// A play triangle behind a leading bar — **"Play from Start"** (restart, not resume), worn by
     /// the card menu's row of that name and by nothing else.
     ///
@@ -269,6 +291,8 @@ pub const fn ink_x(id: Icon) -> (f32, f32) {
         // The bookmark pair share one silhouette, so one entry (the fill is the outline's own shape).
         Icon::Bookmark | Icon::BookmarkFill => (4.4 / 24.0, 19.6 / 24.0),
         Icon::Clock | Icon::ServerSlash | Icon::CircleSlash => (1.9 / 24.0, 22.1 / 24.0),
+        // Path x 4..20.5 plus the 2-unit stroke's 1 each side (`the_episode_list_ink_matches_its_asset`).
+        Icon::EpisodeList => (3.0 / 24.0, 21.5 / 24.0),
         _ => (0.0, 1.0),
     }
 }
@@ -317,6 +341,7 @@ fn src(id: Icon) -> &'static str {
         Icon::Episode => include_str!("../../../assets/icons/episode.svg"),
         Icon::Show => include_str!("../../../assets/icons/show.svg"),
         Icon::Collection => include_str!("../../../assets/icons/collection.svg"),
+        Icon::EpisodeList => include_str!("../../../assets/icons/episode-list.svg"),
         Icon::PlayStart => include_str!("../../../assets/icons/play-start.svg"),
         Icon::Close => include_str!("../../../assets/icons/close.svg"),
         Icon::More => include_str!("../../../assets/icons/more.svg"),
@@ -539,6 +564,7 @@ mod ink_tests {
             Icon::ChevronDown,
             Icon::ChevronUp,
             Icon::Check,
+            Icon::EpisodeList,
         ] {
             let (l, r) = ink_x(id);
             assert!(
@@ -568,6 +594,44 @@ mod ink_tests {
         assert!(src(Icon::ChevronUp).contains(r#"d="M6 15l6-6 6 6""#));
         let (l, r) = ink_x(Icon::ChevronDown);
         assert!((l - (6.0 - 1.5) / 24.0).abs() < 1e-6 && (r - (18.0 + 1.5) / 24.0).abs() < 1e-6);
+    }
+
+    /// The Go to Show disc's mark: its `ink_x` is the asset's own bounds (path x 4..20.5, stroke 2,
+    /// so 1 unit each side), it stays inside the NanoSVG subset as ONE path, and it is not a copy of
+    /// the Play Version disc's `Show` (the pairwise check across the hero's discs is
+    /// `detail::hero`'s `no_two_controls_of_a_row_share_a_mark`).
+    #[test]
+    fn the_episode_list_ink_matches_its_asset() {
+        let svg = src(Icon::EpisodeList);
+        assert_eq!(svg.matches("<path").count(), 1, "one path, so no composite crease");
+        for unsupported in ["<filter", "feDropShadow", "<image", "<foreignObject", "<circle", "<rect"] {
+            assert!(!svg.contains(unsupported), "the asset uses {unsupported}");
+        }
+        assert!(svg.contains(r#"stroke-width="2""#) && svg.contains(r##"stroke="#ffffff""##));
+        assert!(svg.contains(r#"d="M9 6.5h11.5M9 12h11.5M9 17.5h11.5M4 6.5h.8M4 12h.8M4 17.5h.8""#));
+        let (l, r) = ink_x(Icon::EpisodeList);
+        assert!((l - (4.0 - 1.0) / 24.0).abs() < 1e-6, "ink left {l}");
+        assert!((r - (9.0 + 11.5 + 1.0) / 24.0).abs() < 1e-6, "ink right {r}");
+        assert_ne!(svg, src(Icon::Show));
+    }
+
+    /// The Go to Show mark rasterizes at the disc glyph size the hero draws and at 4x: full opacity
+    /// reached, no ink on the border (the module doc's grade for a new mark).
+    #[test]
+    fn the_episode_list_mark_rasterizes_clean_at_its_disc_size() {
+        for px in [icon_raster_px(32), icon_raster_px(128)] {
+            let rgba = plx_gfx::svg::rasterize(src(Icon::EpisodeList), px, px)
+                .unwrap_or_else(|| panic!("EpisodeList failed to rasterize at {px}px"));
+            assert_eq!(rgba.len(), (px * px * 4) as usize, "wrong buffer size at {px}px");
+            let alpha = |x: i32, y: i32| rgba[((y * px + x) * 4 + 3) as usize];
+            let max_alpha = (0..px).flat_map(|y| (0..px).map(move |x| alpha(x, y))).max().unwrap();
+            assert_eq!(max_alpha, 255, "never reaches full opacity at {px}px");
+            for i in 0..px {
+                for (x, y) in [(i, 0), (i, px - 1), (0, i), (px - 1, i)] {
+                    assert_eq!(alpha(x, y), 0, "ink on the border at {px}px ({x},{y})");
+                }
+            }
+        }
     }
 
     #[test]

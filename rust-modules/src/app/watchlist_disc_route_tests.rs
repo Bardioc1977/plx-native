@@ -288,7 +288,7 @@ fn the_watchlists_sort_and_filter_lifts_its_pill_while_the_menu_is_up() {
 /// the disc focused. The seed is read the frame the request is performed, before the mount spends it.
 #[test]
 fn an_episode_pages_go_to_show_disc_opens_the_show_on_the_episodes_season_and_back_returns_to_it() {
-    use plx_platform::i18n::msg::browse_menu_go_show;
+    use plx_platform::i18n::msg::browse_detail_go_show;
     // `detail::hero::ELEM_GO_SHOW`: the hero is private to the screens crate, and a hero control's
     // elem is its own engine key.
     const GO_SHOW: u32 = 8;
@@ -307,7 +307,7 @@ fn an_episode_pages_go_to_show_disc_opens_the_show_on_the_episodes_season_and_ba
     assert_eq!(w.elem(), Some(GO_SHOW), "two Rights from Play reach the Go to Show disc");
     w.frames(90);
     let drawn = w.drawn();
-    let verb = browse_menu_go_show().to_string();
+    let verb = browse_detail_go_show().to_string();
     assert_eq!(drawn.words.iter().filter(|(text, _)| *text == verb).count(), 1,
         "the unfurled capsule draws the verb once: {:?}", drawn.words);
     let row_bottom = play.y + play.h * 0.5 + plx_appkit::hero_layout::CD * 0.5;

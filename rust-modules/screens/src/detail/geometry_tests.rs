@@ -447,6 +447,78 @@ fn detail_focus_places_and_hit_map_agree_for_all_three_scrolled_strips() {
     clear();
 }
 
+/// An episode page that names its show: the hero row is Play, the watch disc and Go to Show.
+fn episode_fixture(sid: ServerId) -> Detail {
+    Detail {
+        sid,
+        rk: "ep-5".into(),
+        kind: "episode".into(),
+        title: "Episode".into(),
+        show_rk: "show-7".into(),
+        show_title: "Show".into(),
+        season: 3,
+        index: 5,
+        part: "/library/parts/ep-5".into(),
+        ..Default::default()
+    }
+}
+
+/// **The Go to Show disc is one rect to the focus engine, the drawer and the pointer**, at rest and
+/// with its verb unfurled: `place` (the rect focus and the hit map are built from) equals the rect
+/// `draw_buttons` paints (`hero_btn_rect_at` over the same widths), a click anywhere inside it
+/// resolves to the disc, and the gutter beside it resolves to nothing. The Magic Remote path has no
+/// code of its own, so this is what proves it reaches the new control.
+#[test]
+fn the_go_to_show_disc_places_draws_and_hits_one_rect_at_rest_and_unfurled() {
+    let sid = ServerId::UNSET;
+    let _guard = install(episode_fixture(sid));
+    let mut screen = bare(sid, "ep-5");
+    let measure = plx_ui::fixture::FixtureMeasure;
+    let meta = test_store().view();
+    let set = screen.hero_set(meta);
+    assert!(set.go_show, "premise: the episode names its show");
+    let (controls, n) = hero::hero_ctls(set);
+    assert_eq!(controls[n - 1], hero::HeroCtl::GoToShow, "premise: last in the row");
+    let context = cx(&measure, None);
+    let mut resting_w = 0.0;
+    for open in [0.0, 1.0] {
+        screen.disc_unfurl[4] = Spring::at(open);
+        let widths = hero::hero_widths(&measure, set, set.restart, screen.disc_unfurl.map(|s| s.pos), screen.named_show(meta));
+        let mut drawn = hero::hero_btn_rect_at(set, n - 1, screen.hero_chain(&measure, meta).btn_y, widths);
+        drawn.y -= screen.scroll.pos;
+        let placed: Vec<_> = controls[..n].iter().map(|ctl| {
+            let elem = screen.engine_key(ctl.elem()).expect("a hero control is its own engine key");
+            let placed = Focusable::<TestHost>::place(&screen, &elem, &context, At::Drawn)
+                .unwrap_or_else(|| panic!("{ctl:?} must place"));
+            (FocusKey { entry: EntryId(8), elem }, placed)
+        }).collect();
+        let (disc, at) = *placed.last().unwrap();
+        assert_eq!(disc.elem, hero::ELEM_GO_SHOW);
+        assert_eq!([at.rect.x, at.rect.y, at.rect.w, at.rect.h].map(f32::to_bits),
+            [drawn.x, drawn.y, drawn.w, drawn.h].map(f32::to_bits),
+            "open {open}: the placed rect is the drawn rect");
+        if open == 0.0 {
+            assert_eq!(at.rect.w, hero::CD, "at rest the disc is a circle");
+            resting_w = at.rect.w;
+        } else {
+            assert!(at.rect.w > resting_w, "unfurled, the capsule is wider than the circle ({})", at.rect.w);
+        }
+        let mut hit = HitMap::new();
+        hit.fill(placed.iter().map(|(key, placed)| stop(*key, *placed)).collect());
+        hit.swap();
+        for x in [at.rect.x + 1.0, at.rect.cx(), at.rect.x + at.rect.w - 1.0] {
+            let resolved = hit.resolve(Some(disc.entry), PointerKind::Click, x, at.rect.cy(), None);
+            assert_eq!(resolved.hit, Some(disc), "open {open}: a click at x={x} lands on the disc");
+            assert_eq!(resolved.activate.map(|(hit, _)| hit), Some(disc));
+        }
+        let gutter = hit.resolve(Some(disc.entry), PointerKind::Click, at.rect.x + at.rect.w + plx_appkit::hero_layout::CGAP * 0.5, at.rect.cy(), None);
+        assert_eq!(gutter.hit, None, "open {open}: right of the disc is not a stop");
+        let left = placed[n - 2].1.rect;
+        assert!(left.x + left.w + plx_appkit::hero_layout::CGAP <= at.rect.x + 0.01, "open {open}: the disc clears its left neighbour by the row gap");
+    }
+    clear();
+}
+
 /// A fixture with several seasons whose tabs, being short, cluster on the left of the strip —
 /// far from where the filmstrip's later episode columns sit. Reproduces
 /// <https://reddit.com> field report: UP out of the filmstrip must land on the *selected*
