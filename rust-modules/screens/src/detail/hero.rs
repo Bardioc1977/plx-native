@@ -1706,11 +1706,12 @@ mod tests {
         assert!(opened, "the sweep must exercise a real open capsule");
     }
 
-    /// **The widest row with all four discs** (bookmark, Play Version, Restart, Alt, the watch
+    /// **The widest row without Go to Show** (bookmark, Play Version, Restart, Alt, the watch
     /// toggle, Trailer drawn as well): every real verb, measured, either unfurls inside the People
-    /// column or the row stays circles. Never across.
+    /// column or the row stays circles. Never across. (The widest episode row, with Go to Show, is
+    /// `the_widest_episode_row_never_crosses_the_people_column_in_any_language`.)
     #[test]
-    fn four_discs_never_cross_the_people_column_in_any_language() {
+    fn the_widest_row_without_go_to_show_never_crosses_the_people_column_in_any_language() {
         use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
         let measure = plx_base::fontcov::advances::ShippedMeasure;
         let wide = HeroSet {
@@ -2152,7 +2153,7 @@ mod tests {
     /// **No two controls of a row share a mark, and no disc wears a pill's.** `disc_icon` is the one
     /// table the draw reads, so this is a test of what is drawn: the next control to reuse a mark
     /// fails here. (The item menu's Go to Show ROW wears `Icon::Show`, the Play Version disc's, on
-    /// purpose, the words being beside it: `Icon::EpisodeList`.)
+    /// purpose, the words being beside it; the hero's Go to Show disc wears `Icon::EpisodeList`.)
     #[test]
     fn no_two_controls_of_a_row_share_a_mark() {
         use plx_ui::icons::Icon;
