@@ -994,10 +994,61 @@ fn audio_payload_codec(codec: &str) -> Option<(&'static str, u8)> {
         "eac3" => Some(("AC3 PLUS", 2)),
         "aac" => Some(("AAC", 3)),
         "dts" => Some(("DTS", 4)),
+        // SMP's Opus: raw packets plus `contents.opusInfo` ([`with_opus_info`]), as ss4s feeds it.
+        "opus" => Some(("OPUS", 6)),
         // decoded in the app (`ff::PcmDecoder`) and fed as PCM: libpf has no FLAC input
         "flac" => Some(("PCM", 5)),
         _ => None,
     }
+}
+
+/// RFC 7845 §5.1 `OpusHead` as libopus's surround encoder writes it: mapping family 0 for mono and
+/// stereo, family 1 (Vorbis channel order) for 3-8 channels, pre-skip 312, 48 kHz, 0 dB gain.
+/// The Load is built before the demuxer opens the file, so the file's own CodecPrivate is not
+/// available here; a 5.1 Opus track of a real library carries exactly this header (see the test).
+fn opus_head(channels: i64) -> Option<Vec<u8>> {
+    // (streams, coupled streams, channel mapping) for 3..=8 channels — libopus `vorbis_mappings`.
+    const FAMILY1: [(u8, u8, &[u8]); 6] = [
+        (2, 1, &[0, 2, 1]),
+        (2, 2, &[0, 1, 2, 3]),
+        (3, 2, &[0, 4, 1, 2, 3]),
+        (4, 2, &[0, 4, 1, 2, 3, 5]),
+        (4, 3, &[0, 4, 1, 2, 3, 5, 6]),
+        (5, 3, &[0, 6, 1, 2, 3, 4, 5, 7]),
+    ];
+    let ch = u8::try_from(channels).ok().filter(|c| (1..=8).contains(c))?;
+    let mut head = b"OpusHead".to_vec();
+    head.extend_from_slice(&[1, ch]);
+    head.extend_from_slice(&312u16.to_le_bytes());
+    head.extend_from_slice(&48_000u32.to_le_bytes());
+    head.extend_from_slice(&0u16.to_le_bytes());
+    if ch <= 2 {
+        head.push(0);
+    } else {
+        let (streams, coupled, mapping) = FAMILY1[usize::from(ch) - 3];
+        head.extend_from_slice(&[1, streams, coupled]);
+        head.extend_from_slice(mapping);
+    }
+    Some(head)
+}
+
+/// The `contents.opusInfo` node an `OPUS` Load needs: SMP has no in-band way to learn a
+/// multistream layout, so the channel count and the identification header travel in the payload
+/// (`streamHeader` is standard padded base64, as ss4s sends it).
+/// `None` when the count cannot be described or the payload has no `contents` anchor: the caller
+/// refuses the Load rather than declaring a layout the stream does not have.
+fn with_opus_info(p: &str, channels: i64) -> Option<String> {
+    let head = opus_head(channels)?;
+    let anchor = r#""provider":"plxnative""#;
+    p.contains(anchor).then(|| {
+        p.replace(
+            anchor,
+            &format!(
+                r#"{anchor},"opusInfo":{{"channels":{channels},"sampleRate":48,"streamHeader":"{}"}}"#,
+                plx_base::b64::encode(&head)
+            ),
+        )
+    })
 }
 
 /// **Who owns the PCM a Load declares.** Audio the app decodes at 1x (FLAC, `ff_pcm`) declares its
@@ -1687,7 +1738,19 @@ fn start_bufferfeed_inner(
             // path and is false here for every streamed HEVC playback (device-measured 2026-09-03:
             // three HEVC cells declared FHD before this read the right flag).
             sink_env = sink_envelope_now(ps, lv);
-            stream_payload = build_av_payload(ps, lv.payload_name(), ac, sink_env);
+            let av = build_av_payload(ps, lv.payload_name(), ac, sink_env);
+            stream_payload = if ac == "OPUS" {
+                let channels = crate::route::stream_achannels(ps);
+                let Some(p) = with_opus_info(&av, channels) else {
+                    log(&format!("start_bufferfeed: no Opus layout for {channels} channel(s); refusing the Load"));
+                    SHARED.demux_failed.store(true, Ordering::Release);
+                    return Err(crate::route::RouteStartResult::StartFailed);
+                };
+                log(&format!("start_bufferfeed: opusInfo channels={channels}"));
+                p
+            } else {
+                av
+            };
             &stream_payload
         }
     } else if is_h265 {
@@ -6587,6 +6650,44 @@ mod sink_envelope_tests {
         c.h264_row = h264;
         c.hevc_row = hevc;
         c
+    }
+    /// The synthesized header is byte-for-byte the CodecPrivate of a real 5.1 Opus MKV track
+    /// (`ffprobe -show_entries stream=extradata`, libopus surround layout), and stereo is the
+    /// 19-byte family-0 form; a width SMP cannot be told about is refused, not guessed.
+    #[test]
+    fn opus_head_matches_a_real_surround_track_and_refuses_unknown_widths() {
+        let real_51: [u8; 27] = [
+            0x4f, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64, 0x01, 0x06, 0x38, 0x01, 0x80, 0xbb,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x04, 0x02, 0x00, 0x04, 0x01, 0x02, 0x03, 0x05,
+        ];
+        assert_eq!(opus_head(6).unwrap(), real_51);
+        let stereo = opus_head(2).unwrap();
+        assert_eq!(stereo.len(), 19);
+        assert_eq!(&stereo[8..10], &[1, 2]);
+        assert_eq!(stereo[18], 0, "mapping family 0");
+        for channels in 1..=8 {
+            let h = opus_head(channels).unwrap();
+            assert_eq!(h.len(), if channels <= 2 { 19 } else { 21 + channels as usize });
+        }
+        for bad in [0, -1, 9, 255] {
+            assert_eq!(opus_head(bad), None);
+        }
+    }
+
+    /// An OPUS Load declares the codec and carries exactly one `opusInfo` inside `contents`, and
+    /// the result is still one valid JSON document.
+    #[test]
+    fn an_opus_load_carries_one_opus_info_node() {
+        assert_eq!(audio_payload_codec("opus"), Some(("OPUS", 6)));
+        let ps = crate::route::PlaybackSession::IDLE;
+        let p = with_opus_info(&build_av_payload(&ps, "AV1", "OPUS", ENVELOPE_FHD60), 6).unwrap();
+        assert_eq!(p.matches(r#""opusInfo""#).count(), 1);
+        let v: serde_json::Value = serde_json::from_str(&p).expect("valid JSON");
+        let contents = &v["args"][0]["option"]["externalStreamingInfo"]["contents"];
+        assert_eq!(contents["codec"]["audio"], "OPUS");
+        assert_eq!(contents["opusInfo"]["channels"], 6);
+        assert_eq!(contents["opusInfo"]["streamHeader"], plx_base::b64::encode(&opus_head(6).unwrap()));
+        assert_eq!(with_opus_info(&p, 0), None);
     }
 
     /// The speed menu offers only what the Load can declare: on a set whose measured H.264 row is
