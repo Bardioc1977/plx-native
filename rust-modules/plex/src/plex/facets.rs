@@ -59,6 +59,11 @@ pub fn valid_facet_name(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
 }
 
+/// STUB (red commit): may `name` be a filter TERM? Not yet different from [`valid_facet_name`].
+pub fn valid_term_name(name: &str) -> bool {
+    valid_facet_name(name)
+}
+
 /// One `Filter[]` element as the wire has it. Lenient: every field is optional and any scalar
 /// shape folds to a string. `key` is not here on purpose (module doc).
 #[derive(Deserialize, Default)]
@@ -110,6 +115,8 @@ pub struct FacetPage {
     /// list has no `Directory` and no total, and a window shorter than asked for ends the list on
     /// its own.
     pub total: Option<i64>,
+    /// STUB (red commit of the paging fix): the rows the server sent.
+    pub fetched: usize,
 }
 
 impl FacetPage {
@@ -117,7 +124,7 @@ impl FacetPage {
     /// ONE value (a raw comma splits it, a control character is not a character of any tag, an
     /// over-long one is not worth a request line), is skipped; an empty title falls back to the key.
     pub fn from_container(mc: MediaContainer) -> FacetPage {
-        let rows = mc
+        let rows: Vec<FacetValue> = mc
             .directory
             .into_iter()
             .filter(|row| {
@@ -131,6 +138,7 @@ impl FacetPage {
                 FacetValue { title: if title.is_empty() { row.key.clone() } else { title }, key: row.key }
             })
             .collect();
-        FacetPage { rows, total: (mc.total_size > 0).then_some(mc.total_size) }
+        let fetched = rows.len();
+        FacetPage { rows, total: (mc.total_size > 0).then_some(mc.total_size), fetched }
     }
 }

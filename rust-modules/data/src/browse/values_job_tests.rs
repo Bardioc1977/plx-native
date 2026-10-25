@@ -293,3 +293,63 @@ fn a_failed_value_read_backs_off_and_is_asked_again() {
     ask(&mut browse, sid, "studio", 50);
     assert!(job_left(&mut browse).is_some(), "…and asked for again once the back-off is spent");
 }
+
+/// A window like [`window`], but its row 5 has a key no request line carries (120 bytes: a studio
+/// name encoded twice costs five bytes a byte), so `FacetPage` skips it from the rows.
+fn window_with_a_long_key(prefix: &str, start: usize, n: usize, total: Option<usize>) -> MediaContainer {
+    let rows: Vec<String> = (start..start + n)
+        .map(|i| if i == start + 5 { format!(r#"{{"key":"{}","title":"long"}}"#, "k".repeat(120)) }
+            else { format!(r#"{{"key":"{prefix}{i}","title":"T {prefix}{i}"}}"#) })
+        .collect();
+    let total = total.map(|t| format!(r#","totalSize":{t},"offset":{start}"#)).unwrap_or_default();
+    serde_json::from_str(&format!(r#"{{"size":{}{total},"Directory":[{}]}}"#, n, rows.join(","))).unwrap()
+}
+
+#[test]
+fn a_skipped_row_does_not_shift_the_next_window() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_source_at(9, SecKind::Movie);
+    ask(&mut browse, sid, "studio", 1000);
+    land_next(&mut browse, client, Some(window_with_a_long_key("s", 0, VALUE_PAGE, Some(250))));
+    assert_eq!(rows_of(&browse, "studio").len(), 99, "the row no request can carry is not offered");
+    ask(&mut browse, sid, "studio", 1000);
+    let (job, port) = job_left(&mut browse).expect("the next window is owed");
+    assert_eq!(job.req.start(), 100, "…but the server's next window starts after the 100 rows it sent");
+    land(&mut browse, client, (job, port), Some(window("s", 100, VALUE_PAGE, Some(250))));
+    ask(&mut browse, sid, "studio", 1000);
+    let (job, port) = job_left(&mut browse).unwrap();
+    assert_eq!(job.req.start(), 200);
+    land(&mut browse, client, (job, port), Some(window("s", 200, 50, Some(250))));
+    let list = browse.state.states()[0].value_list("studio").unwrap();
+    assert!(list.complete, "250 rows were consumed, whatever of them were offered");
+    let keys = rows_of(&browse, "studio");
+    assert_eq!(keys.len(), 249);
+    assert_eq!(keys.iter().collect::<std::collections::BTreeSet<_>>().len(), keys.len(), "no value twice");
+}
+
+#[test]
+fn a_skipped_row_does_not_end_a_list_that_reports_no_total() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_source_at(9, SecKind::Movie);
+    ask(&mut browse, sid, "studio", 1000);
+    land_next(&mut browse, client, Some(window_with_a_long_key("s", 0, VALUE_PAGE, None)));
+    let list = browse.state.states()[0].value_list("studio").unwrap();
+    assert_eq!(list.rows.len(), 99);
+    assert!(!list.complete, "a window of 100 rows asked for and 100 sent is not a short page");
+    ask(&mut browse, sid, "studio", 1000);
+    let (job, _port) = job_left(&mut browse).expect("the list goes on");
+    assert_eq!(job.req.start(), 100);
+}
+
+#[test]
+fn a_switch_and_a_request_parameter_are_refused_by_name_before_the_menu_has_landed() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, _client) = loopback_source_at(9, SecKind::Movie);
+    assert!(!browse.state.states()[0].facets_known, "premise: no Meta yet, so no facet is known to be boolean");
+    for name in ["unwatched", "unwatchedLeaves", "type", "sort", "includeMeta"] {
+        ask(&mut browse, sid, name, 50);
+        assert!(job_left(&mut browse).is_none(), "{name}: its key answers a whole listing or is the request's own");
+    }
+    ask(&mut browse, sid, "studio", 50);
+    assert!(job_left(&mut browse).is_some());
+}

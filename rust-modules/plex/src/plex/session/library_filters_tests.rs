@@ -233,3 +233,25 @@ fn a_real_shape_view_keeps_the_legacy_fields_beside_the_new_one() {
     let joined = join_canonical(&public, &protected).unwrap();
     assert_eq!(joined.views_for("u").and_then(|views| views.get("m", 2)), Some(&view));
 }
+
+#[test]
+fn a_reserved_facet_name_drops_its_term() {
+    // `type`, `sort` and `includeMeta` are parameters of the request itself; the Unwatched switch is
+    // not a term (its key answers a whole listing)
+    let mut views = LibraryViews::default();
+    views.set(view_with(vec![
+        term("", "type", &["1"]), term("", "sort", &["x"]), term("", "includeMeta", &["1"]),
+        flag("", "unwatched"), flag("", "unwatchedLeaves"), term("", "genre", &["2"]),
+    ]));
+    let kept: Vec<&str> = views.get("machine", 3).unwrap().filters.iter().map(|t| t.facet.as_str()).collect();
+    assert_eq!(kept, ["genre"]);
+}
+
+#[test]
+fn one_key_over_the_bound_drops_the_whole_term_not_just_the_value() {
+    let mut views = LibraryViews::default();
+    let long = "k".repeat(LibraryViews::MAX_FILTER_KEY + 1);
+    views.set(view_with(vec![term("", "actor", &["1", &long, "3"]), term("", "genre", &["2"])]));
+    let kept: Vec<(&str, usize)> = views.get("machine", 3).unwrap().filters.iter().map(|t| (t.facet.as_str(), t.values.len())).collect();
+    assert_eq!(kept, [("genre", 1)], "a term with a value missing would mean something else than the viewer chose");
+}

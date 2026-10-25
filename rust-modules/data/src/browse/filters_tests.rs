@@ -108,3 +108,13 @@ fn the_value_path_is_the_listings_type_terms_for_picker_and_restore() {
         assert_eq!(value_type_terms(listing, kind), listing.type_terms(kind), "{listing:?} of {kind:?}");
     }
 }
+
+#[test]
+fn a_reserved_or_unsafe_name_is_no_term() {
+    let set = FilterSet::from_terms([
+        term("type", &["1"]), term("sort", &["x"]), term("includeMeta", &["1"]), flag("unwatched"),
+        flag("unwatchedLeaves"), term("a/b", &["1"]), term("", &["1"]), term("genre", &["7"]),
+    ]);
+    assert_eq!(set.terms().iter().map(|t| t.facet.as_str()).collect::<Vec<_>>(), ["genre"],
+        "the request's own parameters and the Unwatched switch are not facets a viewer narrows by");
+}

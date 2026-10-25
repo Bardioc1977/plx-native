@@ -315,3 +315,26 @@ fn a_selected_key_a_complete_list_does_not_hold_is_forgotten_by_the_record_too()
     assert_eq!(held.filters[0].values.iter().map(|v| (v.key.as_str(), v.title.as_str())).collect::<Vec<_>>(),
         [("s1", "Studio One")], "the stale key is gone and the title is the server's");
 }
+
+#[test]
+fn a_genre_list_with_a_skipped_row_is_not_taken_for_complete() {
+    let _g = plx_base::testlock::serial();
+    let mut view = view_of(vec![]);
+    view.genre = "gone".into();
+    let _session = remembered("filters-vouch-skipped", "u-filters", view);
+    let _cleanup = RegisteredCleanup;
+    // a full window of 500 rows, one of them with a key no request carries, and no total: 500 were sent
+    // and 500 asked for, so the list may go on and the missing key is not condemned
+    let rows: Vec<String> = (0..500)
+        .map(|i| if i == 5 { format!(r#"{{"key":"{}","title":"long"}}"#, "k".repeat(120)) } else { format!(r#"{{"key":"g{i}","title":"G{i}"}}"#) })
+        .collect();
+    let list: &'static str = Box::leak(format!(r#"{{"MediaContainer":{{"size":500,"Directory":[{}]}}}}"#, rows.join(",")).into_boxed_str());
+    let pms = loopback_pms("filter-machine", vec![list, MOVIE_PAGE]);
+    let mut browse = movies_on(&pms, "filter-machine");
+    pump_until_landed(&mut browse);
+    assert!(browse.state.cur_state().unwrap().genre().is_none(), "opened unfiltered");
+    switch_unwatched_on(&mut browse, &pms);
+    let held = stored_view("u-filters", "filter-machine").expect("the record is still there");
+    assert_eq!(held.genre, "gone", "a key that may be on the next window is unresolved, not condemned");
+    let _ = requests(&pms, 2);
+}

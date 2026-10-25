@@ -310,9 +310,9 @@ mod tests {
         let live = ViewSnapshot { unwatched: true, ..shown(LibraryType::Episodes, vec![term("episodes", "year", &["2024", "2023"])]) };
         let view = merge(Some(&before), "m", 1, &live, ViewField::Unwatched);
         let facets: Vec<(&str, &str)> = view.filters.iter().map(|t| (t.listing.as_str(), t.facet.as_str())).collect();
-        assert_eq!(facets, [("", "actor"), ("seasons", "hdr"), ("episodes", "year")],
-            "the primary listing's and the seasons' terms are untouched, the shown listing's are live");
-        assert_eq!(view.filters.last().unwrap().values.len(), 2);
+        assert_eq!(facets, [("episodes", "year"), ("", "actor"), ("seasons", "hdr")],
+            "the shown listing's terms are live and FIRST, the others' are untouched behind them");
+        assert_eq!(view.filters.first().unwrap().values.len(), 2);
     }
 
     #[test]
@@ -340,5 +340,34 @@ mod tests {
         let live = shown(LibraryType::Primary, vec![term("", "actor", &["1"])]);
         assert!(!merge(None, "m", 1, &live, ViewField::Filters).is_default());
         assert!(merge(None, "m", 1, &shown(LibraryType::Primary, vec![]), ViewField::Filters).is_default());
+    }
+
+    #[test]
+    fn a_stale_own_genre_copy_is_stripped_whichever_listing_is_shown() {
+        let mut before = stored();
+        before.filters = vec![term("", "genre", &["28"]), term("", "actor", &["1"]), term("seasons", "genre", &["5"])];
+        let live = shown(LibraryType::Episodes, vec![term("episodes", "year", &["2024"])]);
+        let view = merge(Some(&before), "m", 1, &live, ViewField::Filters);
+        let mut facets: Vec<(&str, &str)> = view.filters.iter().map(|t| (t.listing.as_str(), t.facet.as_str())).collect();
+        facets.sort();
+        assert_eq!(facets, [("", "actor"), ("episodes", "year"), ("seasons", "genre")][..],
+            "only the PRIMARY listing's genre copy goes (the legacy field is its store); the rest stays");
+        assert!(view.filters.iter().all(|t| !(t.listing.is_empty() && t.facet == "genre")));
+    }
+
+    #[test]
+    fn the_byte_budget_spares_the_listing_the_viewer_is_editing() {
+        let fat = |listing: &str, facet: &str| StoredFilter {
+            listing: listing.into(), facet: facet.into(), flag: false,
+            values: (0..8).map(|i| StoredValue { key: format!("{i}{}", "k".repeat(80)), title: String::new() }).collect(),
+        };
+        let mut before = stored();
+        before.listing = "episodes".into();
+        before.filters = vec![fat("", "actor"), fat("seasons", "studio")];
+        let live = shown(LibraryType::Episodes, vec![fat("episodes", "director")]);
+        let view = merge(Some(&before), "m", 1, &live, ViewField::Filters).sanitized();
+        let kept: Vec<(&str, &str)> = view.filters.iter().map(|t| (t.listing.as_str(), t.facet.as_str())).collect();
+        assert!(kept.contains(&("episodes", "director")), "the term just edited is the last to go: {kept:?}");
+        assert!(kept.len() < 3, "the premise: the three do not fit the budget: {kept:?}");
     }
 }

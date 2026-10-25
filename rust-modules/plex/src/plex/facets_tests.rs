@@ -231,3 +231,33 @@ fn a_value_page_is_read_into_rows() {
     assert!(page.rows.is_empty());
     assert_eq!(page.total, None, "an empty list has no Directory key and no total");
 }
+
+#[test]
+fn a_skipped_row_is_still_a_consumed_row() {
+    // The window the server sent is what the NEXT window starts after: a row that could not travel
+    // as one value (over-long, a comma, a control character) is skipped from the rows but not from
+    // the count, or the next ask would start one row early and list a value twice.
+    let long = "k".repeat(120);
+    let mc: MediaContainer = serde_json::from_str(&format!(
+        r#"{{"size":4,"totalSize":250,"Directory":[{{"key":"1","title":"a"}},{{"key":"{long}","title":"long"}},
+            {{"key":"x,y","title":"comma"}},{{"key":"2","title":"b"}}]}}"#,
+    ))
+    .unwrap();
+    let page = FacetPage::from_container(mc);
+    assert_eq!(page.rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), ["1", "2"]);
+    assert_eq!(page.fetched, 4, "four rows were consumed from the server's list");
+}
+
+#[test]
+fn a_reserved_name_is_no_term() {
+    use super::facets::valid_term_name;
+    for ok in ["genre", "actor", "show.genre", "hdr"] {
+        assert!(valid_term_name(ok), "{ok}");
+    }
+    // names the request already carries, and the Unwatched switch, which is not a term and whose key
+    // answers the whole listing
+    for bad in ["type", "sort", "includeMeta", "unwatched", "unwatchedLeaves", "a/b", ""] {
+        assert!(!valid_term_name(bad), "{bad}");
+    }
+    assert!(valid_facet_name("unwatched"), "…while it is still a facet the server may advertise");
+}
