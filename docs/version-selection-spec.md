@@ -192,7 +192,7 @@ item, as a **memory-door list**, following the "contract for a new setting" in
   256 KiB document guard test is extended. Proposed bounds: 128 entries per profile, 24 KiB
   household.
 - Read ONCE in `request_play_inner` (fresh plays of a film or episode only) and stored on the request.
-  A remembered `media_id` that is no longer in `Media[]` is ignored (version 0 plays) and the stale
+  A remembered `media_id` that is no longer in `Media[]` is ignored (the Default plays, section 4.4) and the stale
   entry is dropped at that landing. An explicit pick never consults the memory.
 - A harness setup, an unseated boot, `--guest` and a dev token write nothing, as for `track_memory`.
 - With a Part-less `Media[0]` the Default cannot play, so there is no way back to it and a remembered
@@ -203,7 +203,10 @@ item, as a **memory-door list**, following the "contract for a new setting" in
 ### 4.4 Edge cases
 
 - **One version:** no control, no row, no memory entry.
-- **The remembered version vanished:** play version 0, no error, no toast.
+- **The remembered version vanished:** play the Default (the `Media` at wire index 0), no error, no
+  toast, and drop the stale entry. When `Media[0]` has no Part there is no Default to play: the play is
+  refused on a movie card and otherwise starts the resolve of a Default without a file
+  (`docs/known-issues.md`).
 - **Chosen version cannot play** (undecodable, server refuses): the existing error read-out names
   the cause, and its OK opens the quality ladder as today; the viewer can reopen the version list
   from the item menu or the detail page. No automatic fall-back to another version in phase 1, and a
@@ -253,6 +256,14 @@ The regression-critical tests are written first and observed failing (AGENTS.md)
 - Screens: the tick sits on `plays` and the cursor opens on it; no row is ticked when the Default is
   unplayable; the worst row of the list fits in every shipped language (U7).
 - Subtitle search: the scope follows the playing Part (U3).
+
+Labels used in code and test comments: **U1** the quality ceiling judged against the played file's own video
+rate; **U2** the side reader names the played Part; **U3** the subtitle search scope; **U4** the `/decision`
+body narrowed by wire index; **U5** the resume clamp against the played version's length; **U6** unplayable
+rows dropped and the Default as wire index 0; **U7** the worst row's fit in every language; **U8** `dca-ma`
+reads "DTS-HD MA"; **N1** the `version_memory` list; **N2** the media door; **N3** recall once and settle at
+the landing; **N4** the tick on the version a bare Play takes; **N5** the harness `clear` arm; **B1** the
+remembered pick must survive a re-resolve and a retry (it is read once into the request).
 
 Simulator (`ui-sim`): the list on `tests/mock_pms.py --multi-version` (the nine-version item, the
 tick on the remembered row).

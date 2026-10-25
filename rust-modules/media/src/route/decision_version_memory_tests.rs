@@ -462,7 +462,7 @@ mod settle {
     /// **The card's Play Version row on an item whose Default cannot play.** The card has no Part
     /// key (`Media[0]` has none), but the row names a version that does: `request_play_movie` used
     /// to refuse on the empty card Part before the pick was read, so the one version the list
-    /// offers did nothing. Found in the simulator against the mock's 940005 (S15).
+    /// offers did nothing. Found in the simulator against the mock's 940005 (`tests/mock_pms.py --multi-version`).
     #[test]
     fn a_pick_plays_from_a_card_whose_default_has_no_part() {
         let item = item_of(&[(3086, None), (3082, Some(3130)), (3090, Some(3140))]);

@@ -122,8 +122,11 @@ accepted limits of the version feature, so nobody re-investigates them.
   `Detail` (a follow-up, not built).
 - **A Part-less `Media[0]` has no way back to the Default.** The Default is the `Media` at wire index
   0; without a playable Part it cannot play, so no row stands for it and no row is ticked unless a
-  pick is remembered. A bare Play with nothing remembered is refused (nothing happens, as before); with
-  a remembered pick it plays that version, which the list ticks; a row picked in the list plays too.
+  pick is remembered. A bare Play with nothing remembered is refused (nothing happens, as before) on a movie
+  card and on the Detail hero when the page holds its catalog row; on an episode, and on a hero opened
+  without a catalog row, it is not refused but starts the resolve of the Default, which has no Part to
+  play. With a remembered pick it plays that version, which the list ticks; a row picked in the list
+  plays too.
   A remembered pick of `Media[1]` stays until its id vanishes.
 - **A Part-less `Media[0]` with exactly one playable other version offers a one-row list** (the
   shared `pms::offers_versions` gate: a single playable version that is not the Default is a choice),
