@@ -58,3 +58,24 @@ fn an_answer_without_agent_stays_movies() {
         [SecKind::Movie, SecKind::Show, SecKind::Movie],
     );
 }
+
+/// Both spellings of both halves are Other Videos, and only that pair is (the exhaustive rule table
+/// is `LibrarySection::is_other_videos`'s own test; this is its projection).
+#[test]
+fn the_current_and_the_legacy_spellings_both_project_as_other_videos() {
+    assert_eq!(one_movie_type_section("tv.plex.agents.none", "Plex Video Files"), SecKind::Video);
+    assert_eq!(one_movie_type_section("com.plexapp.agents.none", "Plex Video Files Scanner"), SecKind::Video);
+    assert_eq!(one_movie_type_section("TV.PLEX.AGENTS.NONE", " plex video files "), SecKind::Video);
+}
+
+/// Types the product has no level for are still dropped, and a Plex type that happens to spell the
+/// app's own code for the new kind is not a library of it.
+#[test]
+fn types_without_a_level_are_dropped_and_the_apps_own_code_is_not_a_plex_type() {
+    let json = r#"{"MediaContainer":{"Directory":[
+      {"key":"1","type":"artist","title":"Music","agent":"tv.plex.agents.music","scanner":"Plex Music"},
+      {"key":"2","type":"photo","title":"Photos"},
+      {"key":"3","type":"video","title":"Odd"},
+      {"key":"x","type":"movie","title":"Unkeyed","agent":"tv.plex.agents.none","scanner":"Plex Video Files"}]}}"#;
+    assert!(project(json).is_empty());
+}

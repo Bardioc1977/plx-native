@@ -3254,19 +3254,16 @@ fn ensure_sections_with(
 /// projection, shared by the blocking discovery above and the worker below, so the two can never
 /// disagree about which sections exist.
 ///
-/// `artist`/`photo` are KEPT. They used to be dropped here as "not browsable", and that quietly
-/// disabled the one growth case the tab projection is written for: a friend sharing a type you do
-/// not own can only add a pill if that type reaches the table at all. They browse like any other
-/// section (the listing, its server-driven sorts and the A–Z rail are type-agnostic), and this
-/// account's own `/hubs` already puts a *Recently Added Music* shelf on Home, so the content was at
-/// the top level before it had a tab. What is still missing is the level BELOW the grid — an artist
-/// opens the movie detail page, which has nothing to play — and that belongs to whoever builds the
-/// music level, not to the strip.
+/// A section's kind is [`SecKind::of_section`]: its Plex `type`, and for a `movie` library its agent
+/// and scanner, which tell Plex's Other Videos from a Movies library. A `type` this product has no
+/// level for (`artist`, `photo`, everything else) is dropped here: it would otherwise reach the
+/// strip, the Sources panel and the grid as a library that opens the movie detail page, which has
+/// nothing to play (see [`SecKind`]).
 fn project_sections(mc: &plx_plex::plex::MediaContainer) -> Vec<(i64, String, SecKind)> {
     mc.directory
         .iter()
         .filter_map(|d| {
-            let kind = SecKind::from_wire(&d.kind)?; // a type this product has no level for at all
+            let kind = SecKind::of_section(d)?; // a type this product has no level for at all
             d.key
                 .parse::<i64>()
                 .ok()
@@ -3307,6 +3304,20 @@ pub enum SecKind {
 }
 
 impl SecKind {
+    /// The kind of a `/library/sections` row, or `None` for a type this product draws no level for.
+    /// The Plex `type` decides `show`; a `movie` library is Other Videos when it is filed the way
+    /// Plex files that library (no metadata agent, the Plex Video Files scanner: see
+    /// [`LibrarySection::is_other_videos`](plx_plex::plex::LibrarySection::is_other_videos)) and
+    /// Movies otherwise, so a row that does not say (an older server) is Movies, as before. This is
+    /// the one classification point; [`from_wire`](Self::from_wire) reads the app's own codes only.
+    pub fn of_section(section: &plx_plex::plex::LibrarySection) -> Option<SecKind> {
+        match section.kind.as_str() {
+            "movie" if section.is_other_videos() => Some(SecKind::Video),
+            "movie" => Some(SecKind::Movie),
+            "show" => Some(SecKind::Show),
+            _ => None,
+        }
+    }
     /// The app's closed code for a kind, back to the kind — NOT the Plex `Directory.type`: Other
     /// Videos has the wire type `movie` and is classified by [`of_section`](Self::of_section)
     /// instead. This reads what the app itself wrote ([`wire`](Self::wire)): the remembered library
