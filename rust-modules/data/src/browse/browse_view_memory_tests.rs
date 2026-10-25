@@ -595,3 +595,7 @@ fn unwatched_and_genre_survive_a_restart() {
     assert!(pms.requests.recv_timeout(std::time::Duration::from_millis(200)).is_err(),
         "no third request");
 }
+
+#[cfg(feature = "devtriggers")]
+#[path = "filter_restore_tests.rs"]
+mod filter_restore;
