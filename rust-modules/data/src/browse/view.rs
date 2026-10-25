@@ -243,6 +243,11 @@ impl<'a> ListingView<'a> {
         data.library_type.filters().then_some(())?;
         data.genre.as_deref()
     }
+    /// STUB (red commit of the term state): the selection AS APPLIED.
+    pub fn filters(self) -> &'a super::filters::FilterSet {
+        static NONE: std::sync::OnceLock<super::filters::FilterSet> = std::sync::OnceLock::new();
+        NONE.get_or_init(Default::default)
+    }
     /// The Unwatched filter AS APPLIED — `false` while collections are listed, even though the
     /// section keeps the switch for when its own type is listed again.
     pub fn unwatched(self) -> bool {

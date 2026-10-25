@@ -586,6 +586,14 @@ struct SecState {
     sort_desc: bool,
     unwatched: bool,
     genre: Option<Arc<GenreEntry>>,
+    /// STUB (red commit of the term state): the selection, not yet consulted.
+    #[allow(dead_code)]
+    filters: Arc<filters::FilterSet>,
+    /// STUB: the facets the server offers for this listing, not yet consulted.
+    #[allow(dead_code)]
+    facets: Arc<Vec<plx_plex::plex::Facet>>,
+    #[allow(dead_code)]
+    facets_known: bool,
     // menus (kept across re-queries)
     sorts: Arc<Vec<SortEntry>>,
     genres: Arc<Vec<GenreEntry>>,
@@ -814,6 +822,9 @@ impl Default for SecState {
             sort_desc: false,
             unwatched: false,
             genre: None,
+            filters: Arc::default(),
+            facets: Arc::default(),
+            facets_known: false,
             sorts: Arc::default(),
             genres: Arc::default(),
             genres_done: false,
@@ -1371,6 +1382,11 @@ impl BrowseState {
         state.genre_resolved = true;
         self.requery();
         true
+    }
+    /// STUB (red commit of the term state): replaces the selection with `set`. Never lands yet.
+    #[allow(dead_code)]
+    fn set_filters(&mut self, _set: filters::FilterSet) -> bool {
+        false
     }
     fn set_genre(&mut self, index: Option<usize>) {
         let current = self.cur();
@@ -4237,6 +4253,9 @@ mod library_type_tests;
 
 #[cfg(test)]
 mod filters_tests;
+
+#[cfg(test)]
+mod filter_state_tests;
 
 #[cfg(test)]
 mod listing_job_tests;
