@@ -83,7 +83,7 @@ state/adapter/notice, `HubsStore`'s `PmsState`/`Arc<PmsAdapter>`/notice, `Search
 state/adapter/notice, `MetadataStore`'s state/`Arc<MetadataAdapter>`/notice and `ViewStateStore`'s
 queue, flight, retry and refresh state, worker adapter and notice are per-instance. The Browse
 adapter holds Browse's source-discovery mailbox and single-flight flag, and a `Fetch` (claim,
-mailbox and refusal list) for each of the page, the genre list, the letter list and the section
+mailbox and refusal list) for each of the page, the facet value lists, the letter list and the section
 hubs (one for both the list and the row reads); those four reads are started by the app's runner
 (`StoreJob::{BrowsePage,BrowseDirectory,BrowseHubs}`), not by the store. Person's adapter keeps the recorded fetch numbering (`slot * 3 + kind` for
 servers 0..15, the two global fetches at 48 and 49, then `50 + (slot - 16) * 3 + kind`; see

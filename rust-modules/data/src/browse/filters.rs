@@ -190,7 +190,7 @@ pub fn value_type_terms(listing: LibraryType, kind: SecKind) -> Vec<(String, Str
 
 // ---- the stored form, and what a page's Meta does to the selection ----------------------------
 
-use plx_plex::plex::session::StoredFilter;
+use plx_plex::plex::session::{StoredFilter, StoredValue};
 use plx_plex::plex::{Facet, FacetKind};
 
 impl FilterSet {
@@ -214,6 +214,25 @@ impl FilterSet {
                         .collect(),
                 }),
         )
+    }
+
+    /// This selection as the record stores it for `listing`, without the own listing's genre (the
+    /// legacy `genre` field is its one store).
+    pub(super) fn to_stored(&self, listing: LibraryType) -> Vec<StoredFilter> {
+        self.terms
+            .iter()
+            .filter(|term| !(listing == LibraryType::Primary && term.facet == "genre"))
+            .map(|term| StoredFilter {
+                listing: listing.wire().to_owned(),
+                facet: term.facet.clone(),
+                flag: term.flag,
+                values: term
+                    .values
+                    .iter()
+                    .map(|value| StoredValue { key: value.id.clone(), title: value.title.clone() })
+                    .collect(),
+            })
+            .collect()
     }
 }
 

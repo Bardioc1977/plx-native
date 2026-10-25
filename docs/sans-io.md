@@ -485,11 +485,12 @@ from `data/src/metadata.rs`. The household's watch-state writes are the eleventh
   when the branch or the drain is removed (`app/adapters/stores.rs`, `app/browse_hubs_drain_tests.rs`).
 - **The listing lanes.** The Library's filter menus and grid read through two more kinds on
   `BrowseStore`'s outbox (`data/src/browse/listing_jobs.rs`):
-  `StoreJob::BrowseDirectory(Job<BrowseDirectoryReq>, BrowseDirectoryPort)` is one value list of
-  a section (`which`: the genres or the first letters) and
+  `StoreJob::BrowseDirectory(Job<BrowseDirectoryReq>, BrowseDirectoryPort)` is one window of a
+  facet's value list (`which`: `Values`, the genre list among them, or the first letters) and
   `StoreJob::BrowsePage(Job<BrowsePageReq>, BrowsePagePort)` is one page of the section's listing.
-  `kick_directory` (through `kick_genres` and `kick_letters`, from `LibraryWork::Genres` and
-  `Letters`) and `maybe_spawn_owned` (from the pump) take `keys.key(sid)` from the borrowed
+  `kick_values` (from `LibraryWork::Genres`, which means "all pages of the genre list", and
+  `Values { facet, want_rows }`), `kick_letters` (from `Letters`) and `maybe_spawn_owned` (from the
+  pump) take `keys.key(sid)` from the borrowed
   `ClientKeys`, raise the read's claim and push the job; the runner resolves the key at the launch
   and hands the body the `&'static Client` (the registry reads of the file are gone). Both kinds are
   `Direct`, and a controlled Home run never emits one: `bootstrap/effects.rs` `store()` accepts only
@@ -505,7 +506,7 @@ from `data/src/metadata.rs`. The household's watch-state writes are the eleventh
     the system refused, refuses the job: the claim is lowered in the refusing call and the
     request id remembered. `settle_refused_reads` takes the three markers at the head of the next
     step and wakes the pump (`idle::invalidate`); nothing is recorded and nothing backs off. The
-    directory is owed again (`genres_done` is still false, or the letters are still not current
+    directory is owed again (the value list is still incomplete, or the letters are still not current
     (`SecState::letters_current`), and the menu's tick sends the work again),
     and the page is still the first one missing, so the next pump asks again with the then-current
     key, exactly what the old `!spawned` arms left.
@@ -516,7 +517,7 @@ from `data/src/metadata.rs`. The household's watch-state writes are the eleventh
     120 steps (`SecState::letters_backoff`), an edit asking at once. The seams `finish_page_with` and
     `finish_directory_with` take the read as a closure so a test can swap in one that panics.
   - **The letters carry the grid's terms.** The Letters job is asked with `SecState::query_filters`,
-    the terms of the page read, and a `LettersKey` (applied Unwatched, applied genre, a membership
+    the terms of the page read, and a `LettersKey` (applied Unwatched, the applied `FilterSet`, a membership
     generation; `data/src/browse/letters.rs`) that the answer returns. A list is current, and
     shown, only while its key is the section's present one, checked where it is read.
 - **The Metadata reads.** The season tabs and the long-season page window (`data/src/metadata.rs`)

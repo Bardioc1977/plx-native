@@ -247,12 +247,13 @@ when a list lands.
   is deliberately not read); `Client::facet_values(section, facet, kind, type_terms, start, size)` reads
   a facet's value list from the facet NAME and the listing's type terms. Filter values go on the wire
   verbatim (`QueryBuilder::wire`).
-- `data::browse`: `SecState` replaces `unwatched: bool` and `genre: Option<GenreEntry>` with a
-  `FilterSet` plus the cached facet list per type; `QueryEdit` gains
-  `Filters(FilterSet)`, an ABSOLUTE replacement (the Library page's pending slot is last-wins, so a delta
-  would lose the first of two toggles in one flush); `Unwatched` and `Genre` stay as variants with their
-  meaning. `genres`, `genres_done` and `genre_resolved` generalize to a per-facet value cache (three
-  lists kept, pages appended in server order).
+- `data::browse`: `SecState` keeps the genre as the `genre` term of a `FilterSet` (the Unwatched switch
+  stays its own flag), the facet list per type and a cache of value lists (three kept, pages appended in
+  server order). The absolute edit `LibraryWork::Filters { set }` replaces the selection (the Library
+  page's pending slot is last-wins, so a delta would lose the first of two toggles in one flush);
+  `QueryEdit::Filters(FilterSet)` joins it with the panel, because `QueryEdit` is matched exhaustively
+  by the Library screen. `QueryEdit::Unwatched` and `Genre` keep their meaning. The own listing's genre
+  is stored in the record's legacy `genre` field only.
 - Value lists are fetched by the store as typed jobs and returned as addressed events (store jobs,
   `docs/stores-as-machines.md`); the screen starts no worker.
 - `screens`: the panel, the picker, the header control and the empty state, built from `MenuForm`,

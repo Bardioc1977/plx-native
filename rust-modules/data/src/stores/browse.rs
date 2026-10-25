@@ -637,8 +637,9 @@ pub enum LibraryWork {
     Letters,
     Genres,
     /// Replace the current section's facet terms with `set`: the absolute form of every filter edit
-    /// (a pending slot that keeps only the last edit loses nothing to it). STUB (red commit of the
-    /// saved view): ignored.
+    /// (a pending slot that keeps only the last edit loses nothing to it): refused for a listing the
+    /// filters do not apply to, and for a selection over the request budget; terms for a facet the
+    /// section's menu lacks are dropped; the result is remembered in the view's record.
     Filters {
         set: crate::browse::filters::FilterSet,
     },

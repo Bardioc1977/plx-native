@@ -13,9 +13,16 @@
 //! stored record is consulted for whatever the live state cannot yet say. The same holds for good
 //! when the restore itself failed transiently — the menu landed but the sorted re-ask or the genre
 //! list did not — and the library shows the default: that is an unresolved restore, not a choice.
+//!
+//! The facet terms ride in the same record, per listing type: the SHOWN listing's are the live ones
+//! (they are seeded before the first page is asked for, so there is nothing to wait for), every other
+//! listing's are the stored ones, untouched by an edit made elsewhere. The own listing's genre is
+//! never among them: the legacy `genre` field is its one store, so that a build rolled back past this
+//! one, which edits that field and keeps `filters` as it was, cannot leave a stale copy for an
+//! upgrade to resurrect.
 
 use super::LibraryType;
-use plx_plex::plex::session::LibraryView;
+use plx_plex::plex::session::{LibraryView, StoredFilter};
 
 /// What the viewer just changed. Decides which parts of the live state are authoritative when the
 /// saved view has not been resolved (the menu is not yet known, or a restore failed).
@@ -26,7 +33,6 @@ pub(super) enum ViewField {
     Genre,
     /// The facet terms (not the genre, which is the legacy field's): an edit of the selection, or
     /// a correction the server's answers made to it.
-    #[allow(dead_code)]
     Filters,
     Listing,
 }
@@ -50,8 +56,8 @@ pub(super) struct ViewSnapshot {
     /// The genre filter's tag id.
     pub(super) genre: Option<String>,
     /// The facet terms of the SHOWN listing, as the record stores them (its own genre is not among
-    /// them). STUB (red commit of the saved view): ignored by the merge.
-    #[allow(dead_code)]
+    /// them): the live selection, which is authoritative for the shown listing because it is seeded
+    /// from the record before the first page is asked for.
     pub(super) filters: Vec<plx_plex::plex::session::StoredFilter>,
 }
 
@@ -102,6 +108,18 @@ pub(super) fn merge(
     } else {
         stored.genre.clone()
     };
+    // The other listings' terms are the stored ones, untouched by an edit made on this listing; the
+    // shown listing's are the live ones. The own listing's genre is never among them: the legacy
+    // `genre` field above is its one store, and a copy here is what a rolled-back build would leave
+    // stale for an upgrade to resurrect.
+    let shown = snap.listing.wire();
+    let mut filters: Vec<StoredFilter> = stored
+        .filters
+        .iter()
+        .filter(|term| term.listing != shown && !(term.listing.is_empty() && term.facet == "genre"))
+        .cloned()
+        .collect();
+    filters.extend(snap.filters.iter().cloned());
     LibraryView {
         machine_id: machine.to_string(),
         key,
@@ -109,11 +127,10 @@ pub(super) fn merge(
         desc,
         unwatched: snap.unwatched,
         genre,
-        listing: snap.listing.wire().to_string(),
+        listing: shown.to_string(),
         listing_sort,
         listing_desc,
-        // The viewer's other filters are not what this edit changed: a stored record keeps them.
-        filters: stored.filters.clone(),
+        filters,
         extensions: stored.extensions.clone(),
     }
 }

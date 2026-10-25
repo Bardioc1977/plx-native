@@ -1626,7 +1626,7 @@ impl BrowseState {
             sort,
             unwatched: state.unwatched,
             genre: state.genre().map(|genre| genre.id.clone()),
-            filters: Vec::new(),
+            filters: if state.library_type.filters() { state.filters.to_stored(state.library_type) } else { Vec::new() },
         };
         // The viewer's own edit of a field settles it, whatever the restore had left.
         if let Some(state) = self.states.get_mut(i) {
@@ -1964,6 +1964,16 @@ impl BrowseState {
                     None => true,
                 }
             }
+            LibraryWork::Filters { set } => {
+                if self.cur() != index {
+                    return false;
+                }
+                let landed = self.set_filters(set);
+                if landed {
+                    self.note_view_choice(index, ViewField::Filters);
+                }
+                landed
+            }
             LibraryWork::Hubs { may_publish } => {
                 self.hubs_kick(index, adapter, keys, jobs);
                 self.hubs_commit_staged(index, may_publish)
@@ -1981,7 +1991,6 @@ impl BrowseState {
                     LibraryWork::Want { lo, hi, focus } => self.want(lo, hi, focus),
                     LibraryWork::Letters => self.kick_letters(adapter, keys, jobs),
                     LibraryWork::Genres => self.kick_values(adapter, keys, jobs, "genre", usize::MAX),
-                    LibraryWork::Filters { .. } => {}
                     LibraryWork::Values { facet, want_rows } => self.kick_values(adapter, keys, jobs, &facet, want_rows),
                     LibraryWork::Retry => self.retry_cur_source(),
                     LibraryWork::Requery => {
@@ -1992,6 +2001,7 @@ impl BrowseState {
                     | LibraryWork::HubPage { .. }
                     | LibraryWork::HubPageCancel { .. }
                     | LibraryWork::HubHold { .. }
+                    | LibraryWork::Filters { .. }
                     | LibraryWork::SaveCursor { .. } => unreachable!(),
                 }
                 true
@@ -2895,6 +2905,7 @@ impl BrowseState {
             if sec == self.cur() {
                 self.bump_gen();
             }
+            self.note_view_choice(sec, ViewField::Filters);
         }
         landed
     }
@@ -3100,6 +3111,7 @@ impl BrowseState {
                             }
                             if dropped_terms {
                                 self.requery();
+                                self.note_view_choice(result.sec, ViewField::Filters);
                             }
                         }
                         true
