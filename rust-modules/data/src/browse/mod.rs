@@ -916,6 +916,11 @@ pub struct BrowseState {
     src_facts_gen: u32,
     tabs_gen: u32,
     tab_shape: u32,
+    /// The strip's label component, beside [`tab_shape`](Self::tab_shape) and moved by the same
+    /// call: for each of [`TAB_KINDS`], the library name its pill wears now (`None` for a kind
+    /// that wears none, or one without exactly one favourite). `tabs_gen` is the strip's label
+    /// generation, so a rename or a second library must move it exactly as a new pill does.
+    tab_titles: [Option<String>; TAB_KINDS.len()],
     retry_cd: u32,
     remembered: Vec<(SecKind, String, i64)>,
     /// This profile's remembered library views ([`plx_plex::plex::session::Preferences::library_views`]):
@@ -1015,6 +1020,7 @@ impl Default for BrowseState {
             src_facts_gen: 0,
             tabs_gen: 1,
             tab_shape: u32::MAX,
+            tab_titles: Default::default(),
             retry_cd: 0,
             remembered: Vec::new(),
             view_memory: Default::default(),
@@ -2176,12 +2182,38 @@ impl BrowseState {
         let user = plx_plex::plex::session::current_profile_key();
         self.resolve_pins_from(&session, &user);
     }
+    /// **Rediscovery's one door into the table:** adopt the sections not seen yet and take a new
+    /// title for one already known.
+    ///
+    /// The table is append-only for its INDICES (the page mailbox leans on them), and
+    /// identity is `(source, key)`: a section already present keeps its index, kind, pin and
+    /// state. Its TITLE is the one field that follows the server, because the Other Videos pill
+    /// wears it (`refresh_tab_shape`): a rename is applied here, at the next rediscovery (a
+    /// restart, a profile or server switch, a token change, the Sources panel's re-check), not
+    /// instantly, because nothing polls. A rename to a blank title is ignored, so a server that
+    /// answers one never blanks a name already shown. A library deleted on the server is NOT
+    /// removed (pre-existing: it stays until the table resets). Anything that caches a title by
+    /// index must follow [`sections_gen`](Self::sections_gen), which every rename bumps.
     fn append_sections_with(&mut self, source: usize, list: Vec<(i64, String, SecKind)>,
         preferences: Option<&plx_plex::plex::session::Session>) {
-        let fresh: Vec<_> = list.into_iter().filter(|(key, _, _)| {
-            !self.sections.iter().any(|section| section.src == source && section.key == *key)
-        }).collect();
+        let mut renamed = false;
+        let mut fresh = Vec::new();
+        for (key, title, kind) in list {
+            match self.sections.iter_mut().find(|section| section.src == source && section.key == key) {
+                Some(known) => {
+                    if known.title != title && !title.trim().is_empty() {
+                        known.title = title;
+                        renamed = true;
+                    }
+                }
+                None => fresh.push((key, title, kind)),
+            }
+        }
         if fresh.is_empty() {
+            if renamed {
+                self.bump_sections_gen();
+                plx_machine::idle::invalidate();
+            }
             return;
         }
         let first_fresh = self.sections.len();
@@ -2388,6 +2420,10 @@ impl BrowseState {
         }
         crate::stores::StoreOutcome { changed: true, endpoints }
     }
+    /// Recompute the strip's shape (which kinds have a pill) AND its label component (the library
+    /// name a pill wears), and move [`tabs_gen`](Self::tabs_gen) when either differs from the stamp.
+    /// Called on every table bump, so the common case, nothing changed, compares borrowed
+    /// strings and allocates nothing; a changed title is cloned once into the stamp.
     fn refresh_tab_shape(&mut self) {
         let mask = TAB_KINDS.iter().enumerate().fold(0u32, |mask, (i, &kind)| {
             if self.tab_has_favorite(kind) {
@@ -2396,7 +2432,19 @@ impl BrowseState {
                 mask
             }
         });
-        if mask != self.tab_shape {
+        let titles = TAB_KINDS.map(|kind| sole_favorite_title(
+            self.sections.iter().map(|section| (section.kind, section.pinned, section.title.as_str())),
+            kind,
+        ));
+        let titles_moved = titles.iter().zip(&self.tab_titles).any(|(now, stamp)| *now != stamp.as_deref());
+        if titles_moved {
+            for (stamp, now) in self.tab_titles.iter_mut().zip(titles) {
+                if now != stamp.as_deref() {
+                    *stamp = now.map(str::to_owned);
+                }
+            }
+        }
+        if mask != self.tab_shape || titles_moved {
             self.tab_shape = mask;
             self.tabs_gen = self.tabs_gen.wrapping_add(1);
         }
@@ -2422,6 +2470,7 @@ impl BrowseState {
         self.remembered = Vec::new();
         self.view_memory = Default::default();
         self.tab_shape = u32::MAX;
+        self.tab_titles = Default::default();
         self.cur = 0;
         self.left = Vec::new();
         self.retry_cd = 0;
@@ -3357,6 +3406,14 @@ impl SecKind {
             SecKind::Video => plx_platform::i18n::msg::browse_kind_videos(),
         }
     }
+    /// Whether this kind's strip pill may be named after its library: Other Videos only. A Movies or
+    /// TV Shows pill is a TYPE (the library behind it is whichever one the profile prefers, and
+    /// the words are the type's own in the UI language); the Other Videos library is a personal
+    /// collection with a name its owner chose, and when it is the only one the pill says it.
+    /// The Type menu and the counts keep the translated type word either way.
+    pub const fn pill_wears_library_title(self) -> bool {
+        matches!(self, SecKind::Video)
+    }
     /// This kind's position in [`TAB_KINDS`] — the index of the per-kind arrays (`preferred`,
     /// `kind_fetch`). One definition instead of a `Movie => 0, Show => 1` copy per array.
     pub const fn slot(self) -> usize {
@@ -3473,6 +3530,27 @@ fn activate_source_of(_i: usize) {
 /// favourite set can fill it — see [`tab_kinds`] — so this is the vocabulary, not the strip.
 /// Other Videos comes last: a type most households do not own sits after the two everybody has.
 pub const TAB_KINDS: [SecKind; 3] = [SecKind::Movie, SecKind::Show, SecKind::Video];
+
+/// **The library name a kind's pill wears**, over `(kind, favourite, title)` rows: the title of the
+/// ONE favourite library of `kind`, trimmed, when `kind` wears a title
+/// ([`SecKind::pill_wears_library_title`]) and the title is not blank. `None` is "use the type
+/// word": no favourite, two or more (a favourite on a friend's server counts like any other), a
+/// kind that never wears one, or a title that names nothing. The single place the rule lives:
+/// [`BrowseState::refresh_tab_shape`] stamps it and `DirectoryView::tab_library_title` publishes
+/// it, so what the strip draws cannot disagree with what bumped it. A library that must not
+/// lend its name (a disguised one, `docs/disguised-libraries-spec.md`) is excluded here.
+fn sole_favorite_title<'a>(
+    rows: impl Iterator<Item = (SecKind, bool, &'a str)>,
+    kind: SecKind,
+) -> Option<&'a str> {
+    if !kind.pill_wears_library_title() {
+        return None;
+    }
+    let mut favourites = rows.filter(|&(candidate, pinned, _)| candidate == kind && pinned);
+    let (_, _, title) = favourites.next()?;
+    let title = title.trim();
+    (favourites.next().is_none() && !title.is_empty()).then_some(title)
+}
 
 // ---- favourites: the ONE control, it governs the WHOLE APP, and it is PER PROFILE ------------
 //

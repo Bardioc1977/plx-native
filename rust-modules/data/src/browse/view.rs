@@ -556,6 +556,16 @@ impl<'a> DirectoryView<'a> {
         let section = self.preferred(self.tab_kind(tab)?)?;
         self.sections().get(section).map(|section| section.row.title.as_str())
     }
+    /// **The name the pill of `kind` wears**, when it wears its library's: the title of the one
+    /// favourite library of that kind (`super::sole_favorite_title`, the rule `tabs_gen` is
+    /// stamped by), `None` for the type word. Not [`tab_title`](Self::tab_title), which answers the
+    /// PREFERRED library of any kind with no such rule.
+    pub fn tab_library_title(self, kind: super::SecKind) -> Option<&'a str> {
+        super::sole_favorite_title(
+            self.sections().iter().map(|section| (section.kind, section.row.pinned, section.row.title.as_str())),
+            kind,
+        )
+    }
     #[allow(dead_code)]
     pub fn tab_count(self) -> usize {
         super::TAB_KINDS.into_iter()

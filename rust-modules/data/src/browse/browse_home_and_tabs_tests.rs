@@ -1458,6 +1458,7 @@ fn tab_shape_of_a_two_type_household_is_unchanged() {
         vec![(1, "Movies".into(), SecKind::Movie), (2, "TV Shows".into(), SecKind::Show)],
     );
     assert_eq!(browse.state.tab_shape, 0b11, "Movies is bit 0 and TV Shows bit 1, as ever");
+    assert_eq!(browse.state.tab_titles, [None, None, None], "…and no title component ever moves it");
     assert_eq!(browse.state.tabs_gen(), before.wrapping_add(1), "the row changed once, when its pills appeared");
     assert_eq!(browse.state.tab_of_kind(SecKind::Video), None, "a type nobody has has no position");
     assert_eq!(browse.tab_count(), 2);
@@ -1465,6 +1466,204 @@ fn tab_shape_of_a_two_type_household_is_unchanged() {
     let stable = browse.state.tabs_gen();
     browse.append_sections(0, vec![(3, "Also Movies".into(), SecKind::Movie)]);
     assert_eq!((browse.state.tab_shape, browse.state.tabs_gen()), (0b11, stable));
+}
+
+/// **Which kinds can lend their library's name to a pill.** Only Other Videos: a Movies or TV Shows
+/// pill is a TYPE, and the library behind it is whichever one the profile prefers.
+#[test]
+fn only_other_videos_wears_its_library_title() {
+    assert_eq!(
+        TAB_KINDS.map(|kind| (kind, kind.pill_wears_library_title())),
+        [(SecKind::Movie, false), (SecKind::Show, false), (SecKind::Video, true)],
+    );
+}
+
+/// **The one rule that decides a pill's own title**, over plain `(kind, favourite, title)` rows:
+/// exactly one favourite library of a kind that wears its title, trimmed and not blank.
+#[test]
+fn sole_favorite_title_trims_and_ignores_unpinned_and_other_kinds() {
+    use SecKind::{Movie, Video};
+    let rows = |rows: &'static [(SecKind, bool, &'static str)]| rows.iter().copied();
+    assert_eq!(sole_favorite_title(rows(&[(Video, true, "  Home Movies \n")]), Video), Some("Home Movies"));
+    assert_eq!(
+        sole_favorite_title(rows(&[(Video, false, "Switched Off"), (Video, true, "Kept")]), Video),
+        Some("Kept"),
+        "a library switched off is not a candidate, and not one of two"
+    );
+    assert_eq!(
+        sole_favorite_title(rows(&[(Video, true, "One"), (Video, true, "Two")]), Video),
+        None,
+        "two favourites have no single name"
+    );
+    assert_eq!(sole_favorite_title(rows(&[(Movie, true, "Films"), (Video, true, "Clips")]), Video), Some("Clips"));
+    assert_eq!(
+        sole_favorite_title(rows(&[(Movie, true, "Films")]), Movie),
+        None,
+        "a kind that does not wear a title never answers one"
+    );
+    for blank in ["", "   ", "\n\t "] {
+        let one = [(Video, true, blank)];
+        assert_eq!(sole_favorite_title(one.iter().copied(), Video), None, "{blank:?} names nothing");
+    }
+    assert_eq!(sole_favorite_title(rows(&[(Video, false, "Off")]), Video), None, "no favourite, no title");
+    assert_eq!(sole_favorite_title(rows(&[]), Video), None);
+}
+
+/// **A rename on the server reaches the table, and so the pill.** Rediscovery answers the sections
+/// the table already holds; the table is append-only for its INDICES (the page mailbox leans on
+/// them) but not for a title, which used to keep its first-seen value until a restart.
+#[test]
+fn a_rename_on_the_server_reaches_the_table_and_the_pill() {
+    let _g = plx_base::testlock::serial();
+    let _t = TempPins::new("rename-reaches-pill");
+    let mut browse = TestBrowse::default();
+    browse.seed_sources(vec![a_source("mac-mini", "", true)]);
+    let answer = |video: &str| vec![
+        (1, "Movies".into(), SecKind::Movie),
+        (2, "TV Shows".into(), SecKind::Show),
+        (3, video.to_owned(), SecKind::Video),
+    ];
+    browse.append_sections(0, answer("Home Movies"));
+    browse.state.sections[2].count = 12;
+    let mut directory = view::DirectorySnapshot::default();
+    directory.capture_from(&mut browse.state);
+    assert_eq!(directory.view().tab_library_title(SecKind::Video), Some("Home Movies"));
+    let (table, tabs, before) = (browse.state.sections_gen(), browse.state.tabs_gen(), directory.clone());
+
+    browse.append_sections(0, answer("Family Clips"));
+
+    assert_eq!(browse.section_title(2), "Family Clips", "the new name is the table's");
+    assert_eq!(browse.section_count(), 3, "no row was added");
+    assert_eq!((browse.state.sections[2].key, browse.state.sections[2].kind, browse.state.sections[2].count),
+        (3, SecKind::Video, 12), "identity and state are untouched");
+    assert_eq!(browse.state.states.len(), 3);
+    assert_ne!(browse.state.sections_gen(), table, "the table's generation moved");
+    assert_ne!(browse.state.tabs_gen(), tabs, "…and the strip's, so its labels are rebuilt");
+    directory.capture_from(&mut browse.state);
+    assert_eq!(directory.view().tab_library_title(SecKind::Video), Some("Family Clips"));
+    assert!(!directory.same_publication(&before), "a renamed library is a new publication");
+
+    let (table, tabs) = (browse.state.sections_gen(), browse.state.tabs_gen());
+    browse.append_sections(0, answer("Family Clips"));
+    assert_eq!((browse.state.sections_gen(), browse.state.tabs_gen()), (table, tabs),
+        "the same answer again moves nothing");
+}
+
+/// **A rename to nothing is ignored**: a server that answers a blank title for a library it has
+/// already named does not blank the pill, the Library header or the Sources row.
+#[test]
+fn a_rename_to_an_empty_title_is_ignored() {
+    let _g = plx_base::testlock::serial();
+    let _t = TempPins::new("rename-to-empty");
+    let mut browse = TestBrowse::default();
+    browse.seed_sources(vec![a_source("mac-mini", "", true)]);
+    browse.append_sections(0, vec![(3, "Home Movies".into(), SecKind::Video)]);
+    let (table, tabs) = (browse.state.sections_gen(), browse.state.tabs_gen());
+    for blank in ["", "   ", "\n"] {
+        browse.append_sections(0, vec![(3, blank.into(), SecKind::Video)]);
+        assert_eq!(browse.section_title(0), "Home Movies", "{blank:?} does not rename");
+    }
+    assert_eq!((browse.state.sections_gen(), browse.state.tabs_gen()), (table, tabs), "…and moves nothing");
+}
+
+/// **The label component moves `tabs_gen` exactly when the pill's title does.** The strip rebuilds
+/// its faces and widths on `tabs_gen` and on nothing else; a title that changed with no bump would
+/// draw the old word until a pill appeared or went.
+#[test]
+fn the_label_component_bumps_tabs_gen_only_when_it_changes() {
+    let _g = plx_base::testlock::serial();
+    let _t = TempPins::new("label-gen");
+    let mut browse = TestBrowse::default();
+    browse.seed_sources(vec![a_source("mac-mini", "", true)]);
+    browse.append_sections(0, vec![(1, "Movies".into(), SecKind::Movie)]);
+    let g0 = browse.state.tabs_gen();
+    assert_eq!(browse.state.tab_titles, [None, None, None], "no kind wears a title yet");
+
+    browse.append_sections(0, vec![(3, "Home Movies".into(), SecKind::Video)]);
+    let g1 = browse.state.tabs_gen();
+    assert_ne!(g1, g0, "the first Other Videos library adds a pill");
+    assert_eq!(browse.state.tab_titles, [None, None, Some("Home Movies".to_owned())]);
+
+    browse.state.bump_sections_gen();
+    assert_eq!(browse.state.tabs_gen(), g1, "an idle table bump does not touch the strip");
+
+    browse.append_sections(0, vec![(3, "Family Clips".into(), SecKind::Video)]);
+    let g2 = browse.state.tabs_gen();
+    assert_ne!(g2, g1, "a rename moves it, the pill mask did not");
+    assert_eq!(browse.state.tab_shape, 0b101);
+
+    browse.append_sections(0, vec![(4, "Holiday Clips".into(), SecKind::Video)]);
+    let g3 = browse.state.tabs_gen();
+    assert_ne!(g3, g2, "a second favourite library takes the name away; the mask is the same");
+    assert_eq!(browse.state.tab_shape, 0b101);
+    assert_eq!(browse.state.tab_titles, [None, None, None]);
+
+    browse.append_sections(0, vec![(5, "More Movies".into(), SecKind::Movie)]);
+    assert_eq!(browse.state.tabs_gen(), g3, "a library of a kind that wears no title moves nothing");
+}
+
+/// **A pin toggle flips the pill between the library's own title and the type word**, through the
+/// editor's commit (`apply_pins`), the one path a person uses.
+#[test]
+fn pin_toggle_flips_between_own_title_and_type_label() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("pill-title-toggle");
+    t.watching("u-owner");
+    let mut browse = TestBrowse::default();
+    browse.seed_sources(vec![a_source("mac-mini", "", true)]);
+    browse.append_sections(0, vec![
+        (1, "Movies".into(), SecKind::Movie),
+        (3, "Home Movies".into(), SecKind::Video),
+        (4, "Holiday Clips".into(), SecKind::Video),
+    ]);
+    let mut directory = view::DirectorySnapshot::default();
+    let mut title = |browse: &mut TestBrowse| {
+        directory.capture_from(&mut browse.state);
+        (directory.view().tab_library_title(SecKind::Video).map(str::to_owned), directory.view().tabs_gen())
+    };
+    let (both, g_both) = title(&mut browse);
+    assert_eq!(both, None, "two favourites: the type word");
+
+    browse.state.apply_pins(&[(2, false)]);
+    plx_base::storage_worker::drain_for_test();
+    let (one, g_one) = title(&mut browse);
+    assert_eq!(one.as_deref(), Some("Home Movies"), "the remaining library names the pill");
+    assert_ne!(g_one, g_both);
+
+    browse.state.apply_pins(&[(2, true)]);
+    plx_base::storage_worker::drain_for_test();
+    let (again, g_again) = title(&mut browse);
+    assert_eq!(again, None, "switched back on: the type word again");
+    assert_ne!(g_again, g_one);
+
+    browse.state.apply_pins(&[(1, false), (2, false)]);
+    plx_base::storage_worker::drain_for_test();
+    let (none, _) = title(&mut browse);
+    assert_eq!(none, None, "no favourite Other Videos library, no pill and no title");
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), None);
+}
+
+/// **A profile or server switch clears the label stamp**, so the next compute always bumps
+/// `tabs_gen`, also when the new household's Other Videos library happens to carry the same name.
+#[test]
+fn reset_clears_the_label_stamp() {
+    let _g = plx_base::testlock::serial();
+    let _t = TempPins::new("label-reset");
+    let mut browse = TestBrowse::default();
+    browse.seed_sources(vec![a_source("mac-mini", "", true)]);
+    browse.append_sections(0, vec![(3, "Home Movies".into(), SecKind::Video)]);
+    assert_eq!(browse.state.tab_titles[SecKind::Video.slot()].as_deref(), Some("Home Movies"));
+    let before = browse.state.tabs_gen();
+
+    browse.reset();
+    assert_eq!(browse.state.tab_titles, [None, None, None], "the previous profile's name is gone");
+    assert_ne!(browse.state.tabs_gen(), before);
+
+    browse.seed_sources(vec![a_source("mac-mini", "", true)]);
+    let cleared = browse.state.tabs_gen();
+    browse.append_sections(0, vec![(3, "Home Movies".into(), SecKind::Video)]);
+    assert_ne!(browse.state.tabs_gen(), cleared, "the same name is a new pill after a reset");
+    assert_eq!(browse.state.tab_titles[SecKind::Video.slot()].as_deref(), Some("Home Movies"));
 }
 
 /// **The Sources panel stays inside the type being browsed**, and Other Videos is a type: the
