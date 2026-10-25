@@ -59,15 +59,28 @@ pub fn valid_facet_name(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
 }
 
-/// Parameters the listing request carries itself, which a filter term must not be named after.
-const RESERVED_NAMES: [&str; 5] = ["type", "sort", "includeMeta", "unwatched", "unwatchedLeaves"];
+/// Query parameters a filter term must not be named after: the ones the app puts on its own listing
+/// requests (`type`, `sort`, `includeMeta`, the window), the PMS query language's (`group`, `limit`,
+/// `push`, `pop`, `or`, `sourceType`, `sectionId`, `filter`, `title`), those of the other reads that
+/// share the query builder, and the Unwatched switch.
+const RESERVED_NAMES: [&str; 21] = [
+    "type", "sort", "sectionId", "sourceType", "group", "limit", "push", "pop", "or", "filter", "title",
+    "query", "guid", "count", "tagId", "firstCharacter", "uri", "onlyTransient", "checkFiles",
+    "unwatched", "unwatchedLeaves",
+];
 
 /// May `name` be a filter TERM, or a value list be asked for? It is a safe [`valid_facet_name`] that is
-/// none of the request's own parameters (`type`, `sort`, `includeMeta`) nor the Unwatched switch, which
-/// is not a term and whose key answers the whole unwatched LISTING (248 KB on a 400-film library). The
-/// server may well advertise `unwatched` as a facet ([`Facet`]); this is about what the app sends.
+/// none of the request's own parameters ([`RESERVED_NAMES`], any `include*` or `exclude*` parameter,
+/// `X-Plex-*`) nor the Unwatched switch, which is not a term and whose key answers the whole unwatched
+/// LISTING (248 KB on a 400-film library). The server may well advertise `unwatched` as a facet
+/// ([`Facet`]); this is about what the app sends.
 pub fn valid_term_name(name: &str) -> bool {
-    valid_facet_name(name) && !RESERVED_NAMES.contains(&name)
+    let family = |prefix: &str| name.strip_prefix(prefix).is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()));
+    valid_facet_name(name)
+        && !RESERVED_NAMES.contains(&name)
+        && !family("include")
+        && !family("exclude")
+        && !name.starts_with("X-Plex-")
 }
 
 /// One `Filter[]` element as the wire has it. Lenient: every field is optional and any scalar

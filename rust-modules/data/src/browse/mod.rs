@@ -1847,9 +1847,16 @@ impl BrowseState {
         self.settle_refused_reads(adapter);
         let current = self.cur();
         let Some(state) = self.states.get(current) else { return };
-        let boolean = state.facets_known
-            && state.facets.iter().any(|offered| offered.name == facet && offered.kind == plx_plex::plex::FacetKind::Boolean);
-        if boolean || !plx_plex::plex::valid_term_name(facet) || !state.library_type.filters() {
+        // Before the menu has landed only a name that can be a term is asked for (the genre, which the
+        // restore vouches, among them); once it is known, only a facet it advertises, and never a
+        // boolean one (the key of `unwatched` answers the whole listing).
+        let offered = state.facets_known.then(|| state.facets.iter().find(|offered| offered.name == facet));
+        let refused = match offered {
+            Some(Some(offered)) => offered.kind == plx_plex::plex::FacetKind::Boolean,
+            Some(None) => true,
+            None => false,
+        };
+        if refused || !plx_plex::plex::valid_term_name(facet) || !state.library_type.filters() {
             return;
         }
         let Some(start) = state.values_owed(facet, want_rows) else { return };
