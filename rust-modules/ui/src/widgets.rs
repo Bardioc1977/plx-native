@@ -6426,10 +6426,11 @@ strip_keys! {
 const _: () = {
     let mut i = 0;
     while i < TAB_KEYS.len() {
-        assert!(TAB_KEYS[i] >= crate::dispatch::STRIP_BASE, "a strip key below STRIP_BASE");
+        assert!(TAB_KEYS[i] >= crate::dispatch::STRIP_BASE);
         let mut j = i + 1;
         while j < TAB_KEYS.len() {
-            assert!(TAB_KEYS[i] != TAB_KEYS[j], "two strip destinations share one key");
+            // the build error names this line: two strip destinations share one key
+            assert!(TAB_KEYS[i] != TAB_KEYS[j]);
             j += 1;
         }
         i += 1;
