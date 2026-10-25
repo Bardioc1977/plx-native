@@ -41,7 +41,7 @@ fn a_page_read_in_flight_across_a_watched_edit_lands_watched() {
         start: 0,
         items: vec![row(sid, "6"), row(sid, "7"), row(sid, "8")],
         total: 3,
-        sorts: None, restored: None, genres: None, genre: None,
+        sorts: None, restored: None, genres: None, genre: None, facets: None,
         resolved: Default::default(),
     };
     browse.adapter.page.post(r, |_| true); // the read's answer, as the server described it before the press

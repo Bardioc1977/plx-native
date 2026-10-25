@@ -187,3 +187,66 @@ pub fn unwatched_facet(kind: SecKind, listing: LibraryType) -> &'static str {
 pub fn value_type_terms(listing: LibraryType, kind: SecKind) -> Vec<(String, String)> {
     listing.type_terms(kind)
 }
+
+// ---- the stored form, and what a page's Meta does to the selection ----------------------------
+
+use plx_plex::plex::session::StoredFilter;
+use plx_plex::plex::{Facet, FacetKind};
+
+impl FilterSet {
+    /// The selection a record holds for `listing`: the terms of that listing, as stored. The library's
+    /// own listing's genre is not among them: the legacy `genre` field of the record is the one store
+    /// of it (an older build edits that field and keeps `filters` as it was, so a genre kept in both
+    /// would be resurrected by a stale copy).
+    pub(super) fn from_stored(stored: &[StoredFilter], listing: LibraryType) -> FilterSet {
+        FilterSet::from_terms(
+            stored
+                .iter()
+                .filter(|term| term.listing == listing.wire())
+                .filter(|term| !(listing == LibraryType::Primary && term.facet == "genre"))
+                .map(|term| FilterTerm {
+                    facet: term.facet.clone(),
+                    flag: term.flag,
+                    values: term
+                        .values
+                        .iter()
+                        .map(|value| FilterValue { id: value.key.clone(), title: value.title.clone() })
+                        .collect(),
+                }),
+        )
+    }
+}
+
+impl super::SecState {
+    /// The first page's `Meta` offered `offered` for this listing. Returns whether it proved a term of
+    /// the selection gone, which is then dropped and the listing must be asked again.
+    ///
+    /// * The Unwatched facet is synthesised, not merely read: a server that omits it (or a season type,
+    ///   which advertises none) still gets the row, under the listing's own name
+    ///   ([`unwatched_facet`]). The switch is not a term and is never reconciled.
+    /// * An EMPTY list proves nothing for a listing that normally has facets: one degraded answer must
+    ///   not erase what the viewer chose, so nothing is learned and nothing dropped. (Seasons and
+    ///   Collections legitimately advertise none.)
+    pub(super) fn land_facets(&mut self, kind: Option<SecKind>, offered: Vec<Facet>) -> bool {
+        let listing = self.library_type;
+        if offered.is_empty() && !matches!(listing, LibraryType::Seasons | LibraryType::Collections) {
+            return false;
+        }
+        let mut offered = offered;
+        if let (true, Some(kind)) = (listing.filters(), kind) {
+            let name = unwatched_facet(kind, listing);
+            if !offered.iter().any(|facet| facet.name == name) {
+                offered.push(Facet { name: name.to_owned(), kind: FacetKind::Boolean, title: "Unwatched".to_owned() });
+            }
+        }
+        let facets = std::sync::Arc::new(offered);
+        let (kept, dropped) = self.filters.retain_facets(|facet| facets.iter().any(|offered| offered.name == facet));
+        self.facets = facets;
+        self.facets_known = true;
+        if dropped.is_empty() {
+            return false;
+        }
+        self.filters = std::sync::Arc::new(kept);
+        true
+    }
+}

@@ -201,7 +201,7 @@ fn the_grids_focus_index_reaches_the_landing_keep_rule() {
         adapter.page.claim(0);
         adapter.page.post(PageResult {
             client, token_gen: client.token_gen(), gen: state.query_gen(), sec, start: far * PAGE,
-            items: page_rows(far), total: TOTAL as i64, sorts: None, restored: None, genres: None, genre: None,
+            items: page_rows(far), total: TOTAL as i64, sorts: None, restored: None, genres: None, genre: None, facets: None,
             resolved: Default::default(),
         }, |_| true);
         assert!(state.pump_owned(&adapter).changed, "the page landed");

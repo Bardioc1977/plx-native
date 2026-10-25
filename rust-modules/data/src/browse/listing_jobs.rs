@@ -352,7 +352,7 @@ fn finish_page_with(port: &BrowsePagePort, addr: Addr, client: &'static Client, 
     port.done(addr, BrowsePageAnswer(PageResult {
         client, token_gen: key.token, gen, sec, start, items: page.items, total: page.total,
         sorts: page.sorts, restored: page.restored, genres: page.genres, genre: page.genre,
-        resolved: page.resolved,
+        facets: page.facets, resolved: page.resolved,
     }));
 }
 

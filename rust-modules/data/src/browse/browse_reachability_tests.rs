@@ -360,7 +360,7 @@ fn a_stale_failure_landing_does_not_blame_the_current_query() {
         start: 0,
         items: Vec::new(),
         total: -1,
-        sorts: None, restored: None, genres: None, genre: None,
+        sorts: None, restored: None, genres: None, genre: None, facets: None,
         resolved: Default::default(),
     };
     browse.adapter.page.post(r, |_| true);

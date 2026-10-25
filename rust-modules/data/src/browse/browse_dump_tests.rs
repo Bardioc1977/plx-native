@@ -93,7 +93,7 @@ fn dump_mode_a_page_request_out_lands_on_the_pump_that_runs_whatever_the_worker(
         worker.page.post(PageResult {
             client, token_gen, gen, sec: 0, start: 0,
             items: vec![PmsMovie { sid, ..Default::default() }], total: 1,
-            sorts: None, restored: None, genres: None, genre: None, resolved: Default::default(),
+            sorts: None, restored: None, genres: None, genre: None, facets: None, resolved: Default::default(),
         }, |_| true);
     });
     let gate = dump_gate();

@@ -38,7 +38,12 @@
 //! library unfiltered. A sort or genre that could not be CHECKED (the sorted re-ask or the genre
 //! list failed) is not dropped either: the record keeps it until a restore settles it
 //! ([`SecState::sort_resolved`]). The listing type and Unwatched need no server check and are applied when
-//! the section is created ([`BrowseState::seed_saved_view`]).
+//! the section is created ([`BrowseState::seed_saved_view`]), and so is every other filter term of the
+//! shown listing ([`filters`]): those are TRUSTED, not vouched. A stale key matches nothing (the server
+//! answers 0, never an error) and the empty read-out is the viewer's way out; a facet the first page's
+//! `Meta` does not offer is dropped and the listing asked again without publishing the page that
+//! carried it, except that an empty menu proves nothing and the Unwatched switch, which is not a term,
+//! is never reconciled ([`SecState::land_facets`]).
 //!
 //! [`BrowseState`] is main-thread-only; worker threads touch only their owning store adapter's
 //! mailboxes + atomics and the `&'static` Plex client.
@@ -62,6 +67,7 @@
 //! that replaces it, and it holds for every source that lands later rather than only for the
 //! second call.
 use plx_plex::plex::{ClientKeys, SectionQuery, ServerId};
+use filters::FilterSet;
 use letters::LettersKey;
 use saved_view::ViewField;
 use crate::pms::{parse_item, PmsMovie};
@@ -1426,6 +1432,7 @@ impl BrowseState {
         // A new listing starts a new restore, and the viewer just chose it.
         state.sort_resolved = true;
         state.genre_resolved = true;
+        self.seed_terms(current);
         self.requery();
         true
     }
@@ -1652,6 +1659,20 @@ impl BrowseState {
             Some(next)
         });
     }
+    /// Section `i` moved to another listing: put back the terms its record holds for that listing,
+    /// as the sort is restored for it at its first page. The Unwatched switch carried over by itself;
+    /// the genre belongs to the own listing and is vouched by the worker.
+    fn seed_terms(&mut self, i: usize) {
+        let Some(section) = self.sections.get(i) else { return };
+        let Some(machine) = self.sources.get(section.src).map(|s| s.machine_id.as_str()) else { return };
+        let Some(view) = self.view_memory.get(machine, section.key) else { return };
+        let listing = self.states.get(i).map(|state| state.library_type);
+        let Some(listing) = listing.filter(|listing| listing.filters()) else { return };
+        let terms = FilterSet::from_stored(&view.filters, listing);
+        if let Some(state) = self.states.get_mut(i) {
+            state.filters = Arc::new(terms);
+        }
+    }
     /// Apply section `i`'s remembered listing type and Unwatched switch, once, as the section is
     /// created. Neither needs the server to vouch for it — the type is checked against what the
     /// section kind offers, and Unwatched is a plain flag — so the first page's query carries
@@ -1668,9 +1689,16 @@ impl BrowseState {
             .filter(|library_type| LibraryType::offered(kind).contains(library_type))
             .unwrap_or_default();
         let unwatched = view.unwatched;
+        let terms = FilterSet::from_stored(&view.filters, library_type);
         if let Some(state) = self.states.get_mut(i) {
             state.library_type = library_type;
             state.unwatched = unwatched;
+            // The terms need no menu to be believed: a stale key matches nothing and a facet the
+            // server no longer offers is dropped when the first page's `Meta` lands. The genre needs
+            // the worker ([`Restore`]).
+            if library_type.filters() {
+                state.filters = Arc::new(terms);
+            }
         }
     }
     /// The remembered sort and genre to restore on section `i`'s FIRST page, if any: only while
@@ -3003,6 +3031,9 @@ impl BrowseState {
                             }
                         } else if result.gen == self.query_gen() {
                             let kind = self.section_kind(result.sec);
+                            // The menu proved a term of the selection gone: this page was asked with
+                            // it, so it is not published and the listing is asked again.
+                            let mut dropped_terms = false;
                             if let Some(state) = self.state_mut(result.sec) {
                                 state.fetch = SecFetch::Ready;
                                 // The saved genre was checked against the library's own genre
@@ -3038,23 +3069,35 @@ impl BrowseState {
                                         state.genre_resolved = result.resolved.genre;
                                     }
                                 }
-                                if state.total != result.total {
-                                    state.total = result.total;
-                                    state.items.resize(state.total as usize);
+                                if let Some(offered) = result.facets {
+                                    if !state.facets_known {
+                                        dropped_terms = state.land_facets(kind, offered);
+                                    }
                                 }
-                                // A pending restore lands on the bookmark's slot: its page stays
-                                // loaded until the restore seats (see `Keep::restore`).
-                                let keep = Keep {
-                                    wanted: wanted.0..wanted.1,
-                                    focus,
-                                    restore: state.cursor.as_deref().map(Cursor::slot),
-                                };
-                                // The read describes the server from when it was requested; an
-                                // edit published since (a press while it was out) is made again.
-                                let mut items = result.items;
-                                ledger.patch(stamp, items.iter_mut());
-                                state.items.land(result.start, items, &keep);
-                                changed = true;
+                                if dropped_terms {
+                                    changed = true;
+                                } else {
+                                    if state.total != result.total {
+                                        state.total = result.total;
+                                        state.items.resize(state.total as usize);
+                                    }
+                                    // A pending restore lands on the bookmark's slot: its page stays
+                                    // loaded until the restore seats (see `Keep::restore`).
+                                    let keep = Keep {
+                                        wanted: wanted.0..wanted.1,
+                                        focus,
+                                        restore: state.cursor.as_deref().map(Cursor::slot),
+                                    };
+                                    // The read describes the server from when it was requested; an
+                                    // edit published since (a press while it was out) is made again.
+                                    let mut items = result.items;
+                                    ledger.patch(stamp, items.iter_mut());
+                                    state.items.land(result.start, items, &keep);
+                                    changed = true;
+                                }
+                            }
+                            if dropped_terms {
+                                self.requery();
                             }
                         }
                         true
@@ -3103,6 +3146,9 @@ struct ListingPage {
     genres: Option<(Vec<GenreEntry>, Option<i64>)>,
     /// The remembered genre this page was filtered by, once the list proved it still exists.
     genre: Option<GenreEntry>,
+    /// The filters the page's `Meta` offers for the active type (`Some` when the fetch carried
+    /// `includeMeta=1` and the server sent a block).
+    facets: Option<Vec<plx_plex::plex::Facet>>,
     /// Whether each saved choice this page was asked to restore was settled one way or the other.
     resolved: Resolved,
 }
@@ -3127,7 +3173,7 @@ impl Default for Resolved {
 impl ListingPage {
     fn failed() -> Self {
         Self {
-            items: Vec::new(), total: -1, sorts: None, restored: None, genres: None, genre: None,
+            items: Vec::new(), total: -1, sorts: None, restored: None, genres: None, genre: None, facets: None,
             resolved: Resolved::default(),
         }
     }
@@ -3193,6 +3239,9 @@ fn fetch_listing_page(
     let Some(mut container) = client.section_items_query(&base) else {
         return ListingPage::failed();
     };
+    let facets: Option<Vec<plx_plex::plex::Facet>> = container.meta.as_ref().and_then(|meta| {
+        meta.types.iter().find(|kind| kind.active != 0).or_else(|| meta.types.first()).map(|kind| kind.facets())
+    });
     let sorts: Option<Vec<SortEntry>> = container.meta.as_ref().and_then(|meta| {
         meta.types.iter().find(|kind| kind.active != 0)
             .or_else(|| meta.types.first()).map(|kind| kind.sort.iter()
@@ -3254,7 +3303,7 @@ fn fetch_listing_page(
     let total = if container.total_size > 0 { container.total_size }
         else { query.start + container.metadata.len() as i64 };
     let items = container.metadata.iter().map(|item| parse_item(item, sid)).collect();
-    ListingPage { items, total, sorts, restored, genres, genre, resolved }
+    ListingPage { items, total, sorts, restored, genres, genre, facets, resolved }
 }
 
 /// Bumped whenever the section table's SHAPE changes — a source's sections appended, or the whole
@@ -3288,6 +3337,8 @@ struct PageResult {
     /// See [`ListingPage::genres`] and [`ListingPage::genre`].
     genres: Option<(Vec<GenreEntry>, Option<i64>)>,
     genre: Option<GenreEntry>,
+    /// See [`ListingPage::facets`].
+    facets: Option<Vec<plx_plex::plex::Facet>>,
     /// See [`ListingPage::resolved`].
     resolved: Resolved,
 }
@@ -4271,7 +4322,7 @@ pub fn queue_page_failure_for_owner_test(
     adapter.page.claim(0);
     adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: state.query_gen(), sec, start: 0,
-        items: Vec::new(), total: -1, sorts: None, restored: None, genres: None, genre: None,
+        items: Vec::new(), total: -1, sorts: None, restored: None, genres: None, genre: None, facets: None,
         resolved: Default::default(),
     }, |_| true);
 }
@@ -4307,7 +4358,7 @@ pub fn spawn_owned_page_for_test(
         worker_adapter.page.post(PageResult {
             client, token_gen, gen, sec, start: 0,
             items: vec![PmsMovie { sid, title, ..Default::default() }],
-            total: 1, sorts: None, restored: None, genres: None, genre: None,
+            total: 1, sorts: None, restored: None, genres: None, genre: None, facets: None,
             resolved: Default::default(),
         }, |_| true);
         done_tx.send(()).expect("test receives worker completion");

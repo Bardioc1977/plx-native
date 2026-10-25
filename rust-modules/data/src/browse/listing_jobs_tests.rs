@@ -394,7 +394,8 @@ fn a_restored_genre_owes_the_letters_again() {
     browse.adapter.page.post(PageResult {
         client, token_gen: client.token_gen(), gen: browse.state.query_gen(), sec: 0, start: 0,
         items: Vec::new(), total: 0, sorts: None, restored: None, genres: None,
-        genre: Some(GenreEntry { id: "7".into(), title: "Drama".into() }), resolved: Default::default(),
+        genre: Some(GenreEntry { id: "7".into(), title: "Drama".into() }), facets: None,
+        resolved: Default::default(),
     }, |_| true);
     browse.adapter.page.claim(0);
     let _ = browse.pump();

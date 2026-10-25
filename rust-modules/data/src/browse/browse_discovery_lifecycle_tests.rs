@@ -287,7 +287,7 @@ fn page_failure_and_recovery_republish_directory_reachability() {
                 }]
             },
             total,
-            sorts: None, restored: None, genres: None, genre: None,
+            sorts: None, restored: None, genres: None, genre: None, facets: None,
             resolved: Default::default(),
         }, |_| true);
         browse.adapter.page.claim(0);

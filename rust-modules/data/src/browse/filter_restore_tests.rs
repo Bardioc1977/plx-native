@@ -158,7 +158,7 @@ fn an_empty_facet_list_never_drops_a_term_and_a_degraded_meta_does_not_erase_the
     let held = stored_view("u-filters", "filter-machine").expect("the record is still there");
     assert!(held.unwatched);
     assert_eq!(held.filters, vec![term("", "network", &["77"])]);
-    let _ = requests(&pms, 2);
+    let _ = requests(&pms, 1);
 }
 
 #[test]
@@ -195,10 +195,11 @@ fn seasons_advertise_no_facet_and_still_get_the_unwatched_row() {
     view.unwatched = true;
     let _session = remembered("filters-seasons", "u-filters", view);
     let _cleanup = RegisteredCleanup;
-    let pms = loopback_pms("filter-machine", vec![SEASONS_PAGE]);
+    // seasons are ordered by their menu's first entry, so the listing is asked once more in that order
+    let pms = loopback_pms("filter-machine", vec![SEASONS_PAGE, SEASONS_PAGE]);
     let mut browse = library_on(&pms, "filter-machine", "TV", SecKind::Show);
     pump_until_landed(&mut browse);
-    let asked = requests(&pms, 1);
+    let asked = requests(&pms, 2);
     assert!(asked[0].contains("type=3") && asked[0].contains("unwatchedLeaves=1"), "{}", asked[0]);
     let state = browse.state.cur_state().unwrap();
     assert_eq!(state.facets.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["unwatchedLeaves"]);
