@@ -4383,6 +4383,10 @@ mod hero_pool_tests;
 mod multi_source_merge_tests;
 
 #[cfg(test)]
+#[path = "pms_clip_hub_tests.rs"]
+mod clip_hub_tests;
+
+#[cfg(test)]
 #[path = "pms_recent_paging_tests.rs"]
 mod recent_paging_tests;
 

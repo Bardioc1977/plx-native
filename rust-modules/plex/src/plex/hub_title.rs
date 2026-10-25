@@ -124,3 +124,38 @@ pub fn localized_hub_title(scope: Scope<'_>, hub_identifier: &str, pms_title: &s
         _ => pms_title.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A library's own `video.recent.<id>` shelf (the Other Videos family: Plex names it `video.*`,
+    /// not `movie.recentlyadded.*`) is worded by the catalogue like its sibling families. Otherwise
+    /// the server's partially localised title shows (`be` is the known weak case, issue #12).
+    #[test]
+    fn video_recent_section_hub_is_titled_by_the_catalogue() {
+        let _guard = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+        assert!(is_recently_added_hub("video.recent.3"));
+        assert_eq!(
+            localized_hub_title(Scope::Section, "video.recent.3", "Kürzlich hinzugefügt!"),
+            msg::browse_library_hub_recently_added(),
+            "the server's own wording is replaced inside the library"
+        );
+        assert_eq!(
+            localized_hub_title(Scope::Home { library: "Home Clips", identifier_is_unique: true }, "video.recent.3", "x"),
+            msg::browse_home_hub_recently_added_in("Home Clips"),
+            "on Home it is the per-library form, there being no per-type one"
+        );
+        assert!(!is_recently_added_hub("video.inprogress.3") && !is_recently_added_hub("video.unwatched.random.3"));
+    }
+
+    /// The whole-server hub keeps its per-type wording.
+    #[test]
+    fn the_whole_server_videos_hub_keeps_its_per_type_title() {
+        let _guard = plx_platform::i18n::language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+        assert_eq!(
+            localized_hub_title(Scope::Home { library: "Home Clips", identifier_is_unique: true }, "home.videos.recent", "x"),
+            msg::browse_home_hub_recently_added_videos()
+        );
+    }
+}
