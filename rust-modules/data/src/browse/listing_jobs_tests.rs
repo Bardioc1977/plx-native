@@ -44,10 +44,10 @@ fn a_panicking_page_body_lands_as_a_failed_page_and_arms_the_retry() {
     assert!(browse.jobs.is_empty(), "no new page is asked for while the countdown runs: {:?}", browse.jobs);
 }
 
-/// A directory body that panics answers an empty list, as a read that found nothing does: the
-/// landing marks the list fetched (the menu is not left waiting) and the claim goes down.
+/// A directory body that panics answers a failed read: the landing marks the list failed (asked for
+/// again after the back-off, the menu is not left waiting for ever) and the claim goes down.
 #[test]
-fn a_panicking_directory_body_lands_as_an_empty_list() {
+fn a_panicking_directory_body_lands_as_a_failed_list() {
     let _g = plx_base::testlock::serial();
     let (_cleanup, mut browse, sid, client) = loopback_page_source();
     browse.refill();
@@ -58,16 +58,19 @@ fn a_panicking_directory_body_lands_as_an_empty_list() {
         StoreJob::BrowseDirectory(job, port) => (job, port),
         other => panic!("a directory job, not {other:?}"),
     };
-    assert!(browse.adapter.genres.busy(), "premise: the step raised the genre claim");
+    assert!(browse.adapter.values.busy(), "premise: the step raised the genre claim");
 
     finish_directory_with(&port, job.addr, client, job.req, || panic!("the body panicked"));
 
-    assert!(browse.adapter.genres.has_mail(), "the answer was posted, outside the guard");
+    assert!(browse.adapter.values.has_mail(), "the answer was posted, outside the guard");
     let _ = browse.pump();
     let state = &browse.state.states()[0];
-    assert!(state.genres_done, "an empty list is a landed list");
-    assert!(state.genres.is_empty());
-    assert!(!browse.adapter.genres.busy(), "the take lowered the claim");
+    // Changed with the value-list job (it is what a panic and a failed read both are): the list is
+    // marked FAILED and asked for again after its back-off, where it used to be taken for a genre list
+    // that is empty for good.
+    let list = state.value_list("genre").expect("the failed read left its marker");
+    assert!(list.rows.is_empty() && list.failed.is_some() && !state.genres_done());
+    assert!(!browse.adapter.values.busy(), "the take lowered the claim");
 }
 
 /// The directory job the steps have left, taken off the outbox.
@@ -100,7 +103,7 @@ fn tick_directory_without_keys(browse: &mut TestBrowse, sid: plx_plex::plex::Ser
 /// Is the refusal of directory request `id` still on the adapter, unconsumed? (Consumes it if so.)
 fn directory_refusal_pending(browse: &TestBrowse, which: Directory, id: u32) -> bool {
     match which {
-        Directory::Values => browse.adapter.genres.take_refused(id),
+        Directory::Values => browse.adapter.values.take_refused(id),
         Directory::Letters => browse.adapter.letters.take_refused(id),
     }
 }
@@ -183,7 +186,7 @@ fn a_refused_directory_job_is_settled_by_the_next_step_and_the_one_after_asks_ag
         assert!(!which.busy(&browse.adapter), "no claim is left up without a job in flight");
         assert!(!directory_refusal_pending(&browse, which, job.addr.req.0), "the refusal is consumed");
         let state = &browse.state.states()[0];
-        assert!(!state.genres_done && state.letters_owed(), "the list is still owed, as after a read that never started");
+        assert!(!state.genres_done() && state.letters_owed(), "the list is still owed, as after a read that never started");
 
         client.set_token("new");
         assert_ne!(ClientKey::of(client), first, "premise: the key moved");
@@ -309,7 +312,7 @@ fn path_and_terms(line: &str) -> (String, String) {
 }
 
 fn a_genre_menu(browse: &mut TestBrowse) {
-    browse.state.state_mut(0).unwrap().genres = Arc::new(vec![GenreEntry { id: "7".into(), title: "Drama".into() }]);
+    browse.state.state_mut(0).unwrap().seed_genre_list(vec![GenreEntry { id: "7".into(), title: "Drama".into() }]);
 }
 
 /// The letters request carries the SAME terms the grid page sends (`SecState::query_filters`),

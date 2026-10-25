@@ -159,8 +159,22 @@ impl Client {
         start: i64,
         size: i64,
     ) -> Option<FacetPage> {
+        self.facet_values_container(section_key, facet, kind, type_terms, start, size).map(FacetPage::from_container)
+    }
+
+    /// [`facet_values`](Self::facet_values) before the rows are projected: the answer container, for a
+    /// caller that reads it at a seam of its own.
+    pub fn facet_values_container(
+        &self,
+        section_key: i64,
+        facet: &str,
+        kind: FacetKind,
+        type_terms: &[(String, String)],
+        start: i64,
+        size: i64,
+    ) -> Option<MediaContainer> {
         let path = facet_values_path(section_key, facet, kind, type_terms, PageReq::window(start, size))?;
-        self.get_json(&path).map(FacetPage::from_container)
+        self.get_json(&path)
     }
 
     /// GET /library/sections/{key}/{directory} — a secondary directory: the filter value

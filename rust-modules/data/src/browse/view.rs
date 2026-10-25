@@ -27,7 +27,7 @@ struct ListingData {
     fetch: SecFetch,
     items: SecItems,
     sorts: Arc<Vec<SortEntry>>,
-    genres: Arc<Vec<GenreEntry>>,
+    genres: Option<Arc<super::values::ValueList>>,
     letters: Arc<Vec<(String, i64)>>,
     /// Do `letters` describe the listing the query now asks for ([`super::SecState::letters_current`])?
     letters_current: bool,
@@ -151,7 +151,7 @@ impl ListingSnapshot {
                     title: plx_platform::i18n::msg::browse_library_title().into(),
                     default_desc: false,
                 }]),
-                genres: Arc::new(Vec::new()),
+                genres: None,
                 letters: Arc::new(letters),
                 letters_current: true,
                 sort_idx: 0,
@@ -223,7 +223,7 @@ impl<'a> ListingView<'a> {
         self.0.data.as_ref().map_or(&[], |s| s.sorts.as_slice())
     }
     pub fn genres(self) -> &'a [GenreEntry] {
-        self.0.data.as_ref().map_or(&[], |s| s.genres.as_slice())
+        self.0.data.as_ref().and_then(|s| s.genres.as_deref()).map_or(&[], |list| list.rows.as_slice())
     }
     /// The per-letter counts of THIS listing: empty while the list on hand was counted under other
     /// terms than the grid has now (or none has landed), so a stale list can never size a jump.
@@ -336,7 +336,7 @@ impl super::BrowseState {
                     fetch: state.fetch,
                     items: state.items.clone(),
                     sorts: state.sorts.clone(),
-                    genres: state.genres.clone(),
+                    genres: state.value_list("genre").cloned(),
                     letters: state.letters.clone(),
                     letters_current: state.letters_current(),
                     sort_idx: state.sort_idx,
@@ -748,13 +748,13 @@ mod tests {
                 title: plx_platform::i18n::msg::browse_library_title().into(),
                 default_desc: false,
             }]);
-            section.genres = Arc::new(vec![GenreEntry {
+            section.seed_genre_list(vec![GenreEntry {
                 id: "7".into(),
                 title: "Drama".into(),
             }]);
             let key = section.letters_key();
             section.land_letters(key, vec![("A".into(), 3), ("B".into(), 4)]);
-            (section.sorts.clone(), section.genres.clone(), section.letters.clone())
+            (section.sorts.clone(), section.value_list("genre").cloned().unwrap(), section.letters.clone())
         };
         let initial = owner.listing_snapshot();
         assert!(Arc::ptr_eq(
@@ -762,7 +762,7 @@ mod tests {
             &sorts
         ));
         assert!(Arc::ptr_eq(
-            &initial.data.as_ref().unwrap().genres,
+            initial.data.as_ref().unwrap().genres.as_ref().unwrap(),
             &genres
         ));
         assert!(Arc::ptr_eq(

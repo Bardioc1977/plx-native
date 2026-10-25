@@ -17,8 +17,8 @@
 //!
 //! The sort/filter MENUS are server-driven: the first page of a section is requested with
 //! `includeMeta=1` and the response's `Meta.Type[]` supplies the Sort entries; the genre
-//! value list is fetched lazily (`kick_genres`) when the filter menu first opens — or earlier, with
-//! the first page, when a saved genre has to be checked against it. Nothing
+//! value list is fetched lazily (`LibraryWork::Genres` / `Values`, a store job) when the filter menu first
+//! opens — or earlier, with the first page, when a saved genre has to be checked against it. Nothing
 //! menu-shaped is hardcoded, with one measured exception: PMS 1.43.4 never advertises a
 //! play-count sort in `Meta.Type[].Sort` on any section type, yet it DOES honour
 //! `sort=viewCount:desc`/`:asc` on movie and show sections (an unrecognised key 500s the whole
@@ -591,15 +591,13 @@ struct SecState {
     /// can be told from one not yet read.
     facets: Arc<Vec<plx_plex::plex::Facet>>,
     facets_known: bool,
-    /// STUB (red commit of the value-list job): the value lists kept, most recently opened first.
-    #[allow(dead_code)]
-    values: Vec<(String, Arc<values::ValueList>)>,
-    #[allow(dead_code)]
-    values_gen: u32,
     // menus (kept across re-queries)
     sorts: Arc<Vec<SortEntry>>,
-    genres: Arc<Vec<GenreEntry>>,
-    genres_done: bool, // a genre fetch LANDED (even empty) — kick_genres won't ask again
+    /// The value lists kept, most recently opened first, at most [`filters::VALUE_LISTS_KEPT`]; the
+    /// genre list is the `genre` facet's. Cleared on a type change.
+    values: Vec<(String, Arc<values::ValueList>)>,
+    /// Moves when the lists are forgotten: a value read still out for the old ones lands nowhere.
+    values_gen: u32,
     /// Is the live sort the viewer's CHOICE rather than merely what a failed restore left? False
     /// only after a first page that was asked to restore the saved sort and could not tell
     /// whether it had (the re-ask failed, or no menu came back): the library then shows the
@@ -655,8 +653,8 @@ struct LoanedView {
     facets: Arc<Vec<plx_plex::plex::Facet>>,
     facets_known: bool,
     sorts: Arc<Vec<SortEntry>>,
-    genres: Arc<Vec<GenreEntry>>,
-    genres_done: bool,
+    values: Vec<(String, Arc<values::ValueList>)>,
+    values_gen: u32,
     sort_resolved: bool,
     genre_resolved: bool,
 }
@@ -831,8 +829,6 @@ impl Default for SecState {
             values: Vec::new(),
             values_gen: 0,
             sorts: Arc::default(),
-            genres: Arc::default(),
-            genres_done: false,
             sort_resolved: true,
             genre_resolved: true,
             letters: Arc::default(),
@@ -860,19 +856,15 @@ impl SecState {
                 || filters::FILTERS_DEPENDING_ON_VIEWING.iter().any(|facet| self.filters.get(facet).is_some())))
             || self.sorts.get(self.sort_idx).is_some_and(|sort| sort.key == "lastViewedAt")
     }
-    /// STUB: has the genre list landed.
-    #[allow(dead_code)]
-    fn genres_done(&self) -> bool {
-        self.genres_done
-    }
-    /// STUB: the landed list of `facet`.
-    #[allow(dead_code)]
-    fn value_list(&self, _facet: &str) -> Option<&Arc<values::ValueList>> {
-        None
-    }
     /// The genre filter, the first value of the `genre` term.
     fn genre(&self) -> Option<&GenreEntry> {
         self.filters.get("genre").and_then(|term| term.values.first())
+    }
+    /// Install `rows` as the landed `genre` list: the fixture of a test about something else.
+    #[cfg(test)]
+    fn seed_genre_list(&mut self, rows: Vec<GenreEntry>) {
+        self.values.retain(|(facet, _)| facet != "genre");
+        self.install_values("genre", rows, None, filters::VALUE_PAGE);
     }
     /// Set (or clear) the genre term directly: the fixture of a test about something else.
     #[cfg(test)]
@@ -922,7 +914,7 @@ pub struct BrowseState {
     /// read the step emits takes the next one of its kind, raises its claim for it, and a refusal
     /// of that id is what the next step settles ([`listing_jobs`]).
     page_req: u32,
-    genres_req: u32,
+    values_req: u32,
     letters_req: u32,
     /// The same for the section-hubs read in flight (`BrowseAdapter::hubs.fetch` holds its claim).
     hubs_stamp: crate::viewledger::Stamp,
@@ -995,8 +987,8 @@ pub struct BrowseAdapter {
     /// The listing page read: its claim and mailbox, and the refusal of a read that never started
     /// ([`listing_jobs`]). The claim is raised by the step that emits the read.
     page: crate::stores::Fetch<PageResult>,
-    /// The genre and first-letter lists, each with a claim and mailbox of its own.
-    genres: crate::stores::Fetch<DirectoryResult<GenreEntry>>,
+    /// The facet value lists and the first-letter list, each with a claim and mailbox of its own.
+    values: crate::stores::Fetch<DirectoryResult<GenreEntry>>,
     letters: crate::stores::Fetch<DirectoryResult<(String, i64)>>,
     src_fetching: AtomicBool,
     src_result: Mutex<Option<(u32, usize, SrcLanding)>>,
@@ -1012,7 +1004,7 @@ impl Default for BrowseAdapter {
     fn default() -> Self {
         Self {
             page: Default::default(),
-            genres: Default::default(),
+            values: Default::default(),
             letters: Default::default(),
             src_fetching: AtomicBool::new(false),
             src_result: Mutex::new(None),
@@ -1024,7 +1016,7 @@ impl Default for BrowseAdapter {
 impl BrowseAdapter {
     fn clear(&self) {
         self.page.clear();
-        self.genres.clear();
+        self.values.clear();
         self.letters.clear();
         *self.src_result.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.hubs.fetch.clear();
@@ -1038,7 +1030,7 @@ impl Default for BrowseState {
             ledger: Default::default(),
             page_stamp: 0,
             page_req: 0,
-            genres_req: 0,
+            values_req: 0,
             letters_req: 0,
             hubs_stamp: 0,
             hubs_gen: 0,
@@ -1120,9 +1112,9 @@ impl BrowseState {
     pub fn pump_needs_work(&self, adapter: &BrowseAdapter) -> bool {
         if self.discovery_needs_pump(adapter)
             || self.retry_cd > 0
-            || self.cur_state().is_some_and(SecState::letters_waiting)
+            || self.cur_state().is_some_and(|state| state.letters_waiting() || state.values_waiting())
             || adapter.page.has_mail()
-            || adapter.genres.has_mail()
+            || adapter.values.has_mail()
             || adapter.letters.has_mail()
             || adapter.hubs.fetch.has_mail()
             // A read the runner refused (or an adapter retired under) leaves its record with the claim
@@ -1313,8 +1305,8 @@ impl BrowseState {
     }
     fn genres(&self) -> &[GenreEntry] {
         self.cur_state()
-            .map(|state| state.genres.as_slice())
-            .unwrap_or(&[])
+            .and_then(|state| state.value_list("genre"))
+            .map_or(&[], |list| list.rows.as_slice())
     }
     fn set_sort(&mut self, index: usize) {
         let current = self.cur();
@@ -1402,8 +1394,8 @@ impl BrowseState {
             state.loaned = Some(LoanedView {
                 library_type: from, sort_idx: state.sort_idx, sort_desc: state.sort_desc,
                 filters: state.filters.clone(), facets: state.facets.clone(),
-                facets_known: state.facets_known, sorts: state.sorts.clone(), genres: state.genres.clone(),
-                genres_done: state.genres_done, sort_resolved: state.sort_resolved,
+                facets_known: state.facets_known, sorts: state.sorts.clone(), values: state.values.clone(),
+                values_gen: state.values_gen, sort_resolved: state.sort_resolved,
                 genre_resolved: state.genre_resolved,
             });
         } else if from == LibraryType::Collections {
@@ -1414,8 +1406,8 @@ impl BrowseState {
                 state.facets = view.facets;
                 state.facets_known = view.facets_known;
                 state.sorts = view.sorts;
-                state.genres = view.genres;
-                state.genres_done = view.genres_done;
+                state.values = view.values;
+                state.values_gen = view.values_gen;
                 state.sort_resolved = view.sort_resolved;
                 state.genre_resolved = view.genre_resolved;
                 self.requery();
@@ -1430,8 +1422,7 @@ impl BrowseState {
         state.filters = Arc::default();
         state.facets = Arc::default();
         state.facets_known = false;
-        state.genres = Arc::default();
-        state.genres_done = false;
+        state.forget_values();
         // A new listing starts a new restore, and the viewer just chose it.
         state.sort_resolved = true;
         state.genre_resolved = true;
@@ -1443,7 +1434,7 @@ impl BrowseState {
         let Some(state) = self.states.get_mut(current) else {
             return;
         };
-        let genre = index.and_then(|i| state.genres.get(i).cloned());
+        let genre = index.and_then(|i| state.value_list("genre").and_then(|list| list.rows.get(i).cloned()));
         let set = match genre {
             Some(genre) => state.filters.with("genre", vec![genre]),
             None => state.filters.without("genre"),
@@ -1769,22 +1760,19 @@ impl BrowseState {
         plx_machine::idle::invalidate();
         true
     }
-    /// Ask for one of the current section's value lists, if it is owed and not already out. Nothing
-    /// is started here: the read leaves as a [`crate::stores::StoreJob::BrowseDirectory`] on `jobs`
-    /// and the application's runner starts it, so the registry is read by the host (`keys`), never
-    /// by this step. The directory's claim is raised HERE, at the step, because the screens re-send
-    /// the request every tick and several run before one drain; the runner's refusal gives it back.
-    fn kick_directory(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
-        jobs: &mut Vec<crate::stores::StoreJob>, which: listing_jobs::Directory) {
+    /// Ask for the current section's first-letter list, if it is owed and not already out. Nothing is
+    /// started here: the read leaves as a [`crate::stores::StoreJob::BrowseDirectory`] on `jobs` and the
+    /// application's runner starts it, so the registry is read by the host (`keys`), never by this
+    /// step. The claim is raised HERE, at the step, because the screens re-send the request every tick
+    /// and several run before one drain; the runner's refusal gives it back.
+    fn kick_letters(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
+        jobs: &mut Vec<crate::stores::StoreJob>) {
+        let which = listing_jobs::Directory::Letters;
         self.settle_refused_reads(adapter);
         let current = self.cur();
-        // Genres are asked once per listing type; the letters are asked whenever the list on hand
-        // does not describe the grid ([`SecState::letters_owed`]).
-        let owed = self.cur_state().map(|state| match which {
-            listing_jobs::Directory::Values => !state.genres_done,
-            listing_jobs::Directory::Letters => state.letters_owed(),
-        });
-        if self.states.get(current).is_none() || !owed.unwrap_or(false) {
+        // The letters are asked whenever the list on hand does not describe the grid
+        // ([`SecState::letters_owed`]).
+        if !self.cur_state().is_some_and(SecState::letters_owed) {
             return;
         }
         let Some(sid) = self.section_sid(current) else {
@@ -1801,17 +1789,10 @@ impl BrowseState {
         let state = &self.states[current];
         let library_type = state.library_type;
         // The letters are asked with the terms the grid's pages are, from the same source, and keyed
-        // by them; the genre list is scoped by the listing's type alone.
-        let (filters, letters) = match which {
-            listing_jobs::Directory::Values => (library_type.type_terms(kind), None),
-            listing_jobs::Directory::Letters => (state.query_filters(kind), Some(state.letters_key())),
-        };
-        let id = match which {
-            listing_jobs::Directory::Values => &mut self.genres_req,
-            listing_jobs::Directory::Letters => &mut self.letters_req,
-        };
-        *id = id.wrapping_add(1);
-        let id = *id;
+        // by them.
+        let (filters, letters) = (state.query_filters(kind), Some(state.letters_key()));
+        self.letters_req = self.letters_req.wrapping_add(1);
+        let id = self.letters_req;
         which.claim(adapter, id);
         jobs.push(crate::stores::StoreJob::BrowseDirectory(
             plx_machine::job::Job {
@@ -1822,28 +1803,68 @@ impl BrowseState {
             listing_jobs::BrowseDirectoryPort::of(adapter, which),
         ));
     }
+    /// Ask for the next window of facet `facet`'s value list on the current section, while fewer than
+    /// `want_rows` rows are on hand and the list is incomplete, if no value read is out. The read
+    /// carries the listing's own `type` terms and NO filter term ([`filters::value_type_terms`]), so
+    /// the list is the whole stable one; it is never asked for a boolean facet (the key of
+    /// `unwatched` answers the whole listing) or a name that is not a safe path segment, for the
+    /// Collections listing, or while a failed read of the same list holds it back.
+    fn kick_values(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
+        jobs: &mut Vec<crate::stores::StoreJob>, facet: &str, want_rows: usize) {
+        let which = listing_jobs::Directory::Values;
+        self.settle_refused_reads(adapter);
+        let current = self.cur();
+        let Some(state) = self.states.get(current) else { return };
+        let boolean = state.facets_known
+            && state.facets.iter().any(|offered| offered.name == facet && offered.kind == plx_plex::plex::FacetKind::Boolean);
+        if boolean || !plx_plex::plex::valid_facet_name(facet) || !state.library_type.filters() {
+            return;
+        }
+        let Some(start) = state.values_owed(facet, want_rows) else { return };
+        let Some(sid) = self.section_sid(current) else {
+            return;
+        };
+        let Some(key) = keys.key(sid) else {
+            return;
+        };
+        if which.busy(adapter) {
+            return;
+        }
+        let section = self.sections[current].key;
+        let kind = self.sections[current].kind;
+        let state = &mut self.states[current];
+        let library_type = state.library_type;
+        let ask = listing_jobs::ValuesAsk {
+            facet: facet.to_owned(), start, size: filters::VALUE_PAGE, generation: state.values_gen, total: None,
+        };
+        state.touch_values(facet);
+        self.values_req = self.values_req.wrapping_add(1);
+        let id = self.values_req;
+        which.claim(adapter, id);
+        jobs.push(crate::stores::StoreJob::BrowseDirectory(
+            plx_machine::job::Job {
+                addr: listing_jobs::listing_addr(id),
+                req: listing_jobs::BrowseDirectoryReq::new(
+                    sid, key, self.table_epoch(), current, section, library_type,
+                    filters::value_type_terms(library_type, kind), None, which, Some(ask)),
+            },
+            listing_jobs::BrowseDirectoryPort::of(adapter, which),
+        ));
+    }
     /// Settle the reads the runner refused since the last step: the claim went back in the call that
     /// refused (`Port::refused`), so what is left is the refusal's record, which is consumed here
     /// and never recorded anywhere. A directory read that never started leaves its list owed
-    /// (`genres_done` is only set by a landing, and the letters stay not current until one), a page read that never started
+    /// (a value list is only extended by a landing, and the letters stay not current until one), a page read that never started
     /// leaves the first missing page missing, so the state is already the one such a read leaves and
     /// the next ask is the same step's own. The loop is woken because nothing else would: the
     /// claim that held the pump quiet is down.
     fn settle_refused_reads(&mut self, adapter: &BrowseAdapter) {
         let refused = adapter.page.take_refused(self.page_req)
-            | adapter.genres.take_refused(self.genres_req)
+            | adapter.values.take_refused(self.values_req)
             | adapter.letters.take_refused(self.letters_req);
         if refused {
             plx_machine::idle::invalidate();
         }
-    }
-    fn kick_genres(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
-        jobs: &mut Vec<crate::stores::StoreJob>) {
-        self.kick_directory(adapter, keys, jobs, listing_jobs::Directory::Values);
-    }
-    fn kick_letters(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
-        jobs: &mut Vec<crate::stores::StoreJob>) {
-        self.kick_directory(adapter, keys, jobs, listing_jobs::Directory::Letters);
     }
     pub fn addressed_with_adapter(
         &mut self,
@@ -1930,8 +1951,8 @@ impl BrowseState {
                 match work {
                     LibraryWork::Want { lo, hi, focus } => self.want(lo, hi, focus),
                     LibraryWork::Letters => self.kick_letters(adapter, keys, jobs),
-                    LibraryWork::Genres => self.kick_genres(adapter, keys, jobs),
-                    LibraryWork::Values { .. } => {}
+                    LibraryWork::Genres => self.kick_values(adapter, keys, jobs, "genre", usize::MAX),
+                    LibraryWork::Values { facet, want_rows } => self.kick_values(adapter, keys, jobs, &facet, want_rows),
                     LibraryWork::Retry => self.retry_cur_source(),
                     LibraryWork::Requery => {
                         self.requery_stale();
@@ -2780,7 +2801,7 @@ impl BrowseState {
         let Some((epoch, source, landing)) = taken else { return Default::default() };
         self.apply_discovery(epoch, source, landing, None, adapter)
     }
-    /// `#[track_caller]`: the paced dump keys a landing's claim by CALL SITE, and the genre and
+    /// `#[track_caller]`: the paced dump keys a landing's claim by CALL SITE, and the value and
     /// letters mailboxes both come through here, so the wrapper must hand its caller's site on
     /// (`plx_machine::landgate::Gate::take_owed`).
     #[track_caller]
@@ -2790,7 +2811,21 @@ impl BrowseState {
         fetch: &crate::stores::Fetch<DirectoryResult<T>>,
         apply: impl FnOnce(&mut SecState, Vec<T>, bool, Option<LettersKey>),
     ) -> bool {
-        // DUMP MODE: owed while this directory's own claim is held (genre and letters each have
+        self.land_directory_result(gate, fetch, |state, result| {
+            apply(state, result.list, result.ok, result.letters);
+        })
+    }
+    /// The core of a directory landing: take the mailbox, drop an answer from before a reset, and hand
+    /// the whole answer to `apply` if its section still stands on the lifecycle and the listing type it
+    /// was asked for. `#[track_caller]` for the same reason.
+    #[track_caller]
+    fn land_directory_result<T>(
+        &mut self,
+        gate: &plx_machine::landgate::Gate,
+        fetch: &crate::stores::Fetch<DirectoryResult<T>>,
+        apply: impl FnOnce(&mut SecState, DirectoryResult<T>),
+    ) -> bool {
+        // DUMP MODE: owed while this directory's own claim is held (values and letters each have
         // one), per mailbox. The take lowers the claim with it.
         let taken = crate::stores::take_landing_owed(gate, crate::stores::StoreId::Browse,
             || fetch.busy(), || fetch.take());
@@ -2799,30 +2834,44 @@ impl BrowseState {
         if result.epoch != self.table_epoch() {
             return false;
         }
-        let DirectoryResult { sec, client, token_gen, library_type, list, ok, letters, .. } = result;
+        let (sec, client, token_gen, library_type) = (result.sec, result.client, result.token_gen, result.library_type);
         plx_plex::plex::commit_if_current(client.id(), client, token_gen, || {
             if self.section_sid(sec) == Some(client.id()) {
                 if let Some(state) = self.state_mut(sec) {
                     if state.library_type != library_type {
                         return false;
                     }
-                    apply(state, list, ok, letters);
+                    apply(state, result);
                     return true;
                 }
             }
             false
         }).unwrap_or(false)
     }
+    /// Land the value mailbox's answer: the page appends to its facet's list if it is the page that list
+    /// waits for ([`SecState::land_values`]), and a selected key a COMPLETE list does not hold takes the
+    /// listing it filtered with it.
+    #[track_caller]
+    fn land_values_owned(&mut self, gate: &plx_machine::landgate::Gate,
+        fetch: &crate::stores::Fetch<DirectoryResult<GenreEntry>>) -> bool {
+        let mut pruned = None;
+        let landed = self.land_directory_result(gate, fetch, |state, result| {
+            let Some(ask) = result.values else { return };
+            if state.land_values(ask, result.list, result.ok).pruned {
+                pruned = Some(result.sec);
+            }
+        });
+        if let Some(sec) = pruned {
+            if sec == self.cur() {
+                self.bump_gen();
+            }
+        }
+        landed
+    }
     #[cfg(test)]
     fn land_discovery_owned(&mut self, adapter: &Arc<BrowseAdapter>)
         -> crate::stores::StoreOutcome {
         self.land_discovery_owned_with_gate(adapter, plx_machine::landgate::fixture_gate())
-    }
-    #[cfg(test)]
-    #[track_caller]
-    fn land_directory_owned<T>(&mut self, fetch: &crate::stores::Fetch<DirectoryResult<T>>,
-        apply: impl FnOnce(&mut SecState, Vec<T>, bool, Option<LettersKey>)) -> bool {
-        self.land_directory_owned_with_gate(plx_machine::landgate::fixture_gate(), fetch, apply)
     }
     /// Ask for the first page the wanted window is missing, if no page read is out. Nothing is
     /// started here: the read leaves as a [`crate::stores::StoreJob::BrowsePage`] on `jobs` and the
@@ -2914,6 +2963,7 @@ impl BrowseState {
         let current = self.cur();
         if let Some(state) = self.states.get_mut(current) {
             state.tick_letters_backoff();
+            state.tick_values_backoff();
         }
         let discovery = self.land_discovery_owned_with_gate(adapter, gate);
         changed |= discovery.changed;
@@ -2921,14 +2971,7 @@ impl BrowseState {
         self.maybe_discover_owned(adapter, &mut execute_discovery);
         changed |= self.hubs_land(adapter, gate, keys);
         changed |= self.hubs_tick_all(adapter, keys, jobs);
-        changed |= self.land_directory_owned_with_gate(
-            gate,
-            &adapter.genres, |state, list, _, _| {
-            state.genres_done = true;
-            if state.genres.is_empty() {
-                state.genres = Arc::new(list);
-            }
-        });
+        changed |= self.land_values_owned(gate, &adapter.values);
         changed |= self.land_letters_owned(gate, &adapter.letters);
         // DUMP MODE: owed while the listing page's claim is held. The take lowers it with it.
         // The wanted window, read before the landing borrows the section table: the grid's
@@ -2965,11 +3008,8 @@ impl BrowseState {
                                 // The saved genre was checked against the library's own genre
                                 // list before this page was asked for, and the page is in it:
                                 // the filter and the list the Filter menu reads land with it.
-                                if let Some(list) = result.genres {
-                                    if state.genres.is_empty() {
-                                        state.genres = Arc::new(list);
-                                    }
-                                    state.genres_done = true;
+                                if let Some((list, total)) = result.genres {
+                                    state.install_values("genre", list, total, filters::RESTORE_VOUCH_PAGE);
                                 }
                                 if let Some(genre) = result.genre {
                                     state.filters = Arc::new(state.filters.with("genre", vec![genre]));
@@ -3060,7 +3100,7 @@ struct ListingPage {
     /// asked for and the menu offered its key — what the landing points the menu at.
     restored: Option<(String, bool)>,
     /// The library's genre list, when the saved genre was checked against it.
-    genres: Option<Vec<GenreEntry>>,
+    genres: Option<(Vec<GenreEntry>, Option<i64>)>,
     /// The remembered genre this page was filtered by, once the list proved it still exists.
     genre: Option<GenreEntry>,
     /// Whether each saved choice this page was asked to restore was settled one way or the other.
@@ -3091,14 +3131,6 @@ impl ListingPage {
             resolved: Resolved::default(),
         }
     }
-}
-
-/// A genre-directory row as a menu entry; `None` for a row with no id or no name.
-fn genre_entry(directory: &plx_plex::plex::LibrarySection) -> Option<GenreEntry> {
-    (!directory.key.is_empty() && !directory.title.is_empty()).then(|| GenreEntry {
-        id: directory.key.clone(),
-        title: directory.title.clone(),
-    })
 }
 
 /// The advertised menu entry to restore sort `key` through, or — for the library's own listing
@@ -3135,15 +3167,23 @@ fn fetch_listing_page(
     let mut filters = query.filters.to_vec();
     if let (Some(restore), true) = (restore, discovery) {
         if let Some(wanted) = &restore.genre {
-            let list = client
-                .section_directory(query.section_key, "genre", &restore.library_type.type_terms(restore.kind))
-                .map(|container| container.directory.iter().filter_map(genre_entry).collect::<Vec<_>>());
-            if let Some(list) = list {
+            // The ONE path rule (`filters::value_type_terms`: the facet name and the listing's own type
+            // terms, no filter term) read in one page of RESTORE_VOUCH_PAGE rows, so a library's whole
+            // genre list is vouched as it always was.
+            let page = client.facet_values(query.section_key, "genre", plx_plex::plex::FacetKind::List,
+                &filters::value_type_terms(restore.library_type, restore.kind), 0, filters::RESTORE_VOUCH_PAGE as i64);
+            if let Some(page) = page {
+                let list: Vec<GenreEntry> = page.rows.into_iter().map(|row| GenreEntry { id: row.key, title: row.title }).collect();
+                let complete = page.total.map_or(list.len() < filters::RESTORE_VOUCH_PAGE, |total| list.len() as i64 >= total);
                 if let Some(found) = list.iter().find(|entry| &entry.id == wanted) {
                     filters.push(("genre".into(), found.id.clone()));
                     genre = Some(found.clone());
+                } else if !complete {
+                    // the key may be past the rows read: the server has not vouched for it, and it has
+                    // not condemned it either
+                    resolved.genre = false;
                 }
-                genres = Some(list);
+                genres = Some((list, page.total));
             } else {
                 resolved.genre = false;
             }
@@ -3246,7 +3286,7 @@ struct PageResult {
     /// Some when the page was fetched in a remembered sort — see [`ListingPage::restored`].
     restored: Option<(String, bool)>,
     /// See [`ListingPage::genres`] and [`ListingPage::genre`].
-    genres: Option<Vec<GenreEntry>>,
+    genres: Option<(Vec<GenreEntry>, Option<i64>)>,
     genre: Option<GenreEntry>,
     /// See [`ListingPage::resolved`].
     resolved: Resolved,
@@ -3263,9 +3303,11 @@ struct DirectoryResult<T> {
     /// Did the read answer? False for a read that failed or panicked: `list` is then empty because
     /// there was nothing to project, not because the server listed nothing.
     ok: bool,
-    /// The key a letters read was asked under ([`LettersKey`]); `None` for the genre list, which the
+    /// The key a letters read was asked under ([`LettersKey`]); `None` for a value list, which the
     /// grid's terms do not scope.
     letters: Option<LettersKey>,
+    /// What a value read asked for, with the total the server reported; `None` for letters.
+    values: Option<listing_jobs::ValuesAsk>,
 }
 
 /// What a source-discovery worker brings back, per SOURCE — named by its index, which appending
@@ -4121,8 +4163,8 @@ pub fn seed_query_choices_for_owner_test(
     let current = state.cur();
     if let Some(section) = state.state_mut(current) {
         section.sorts = Arc::new(sorts);
-        section.genres = Arc::new(genres);
-        section.genres_done = true;
+        section.values.clear();
+        section.install_values("genre", genres, None, filters::VALUE_PAGE);
     }
 }
 
@@ -4152,12 +4194,15 @@ pub fn queue_genre_for_owner_test(
     prepare_page_for_owner_test(state, client.id());
     let sec = state.cur();
     state.state_mut(sec).unwrap().total = 0;
-    adapter.genres.claim(0);
-    adapter.genres.post(DirectoryResult {
+    adapter.values.claim(0);
+    adapter.values.post(DirectoryResult {
         epoch: state.table_epoch(), sec, client, token_gen: client.token_gen(),
         library_type: state.states[sec].library_type,
         list: vec![GenreEntry { id: "new".into(), title: "New Genre".into() }],
         ok: true, letters: None,
+        values: Some(listing_jobs::ValuesAsk {
+            facet: "genre".into(), start: 0, size: filters::VALUE_PAGE, generation: state.states[sec].values_gen, total: None,
+        }),
     }, |_| true);
 }
 
@@ -4170,13 +4215,13 @@ pub fn adapter_has_page_for_test(adapter: &BrowseAdapter) -> bool {
 /// still waiting for the pump?
 #[cfg(any(test, feature = "test-support"))]
 pub fn directory_answered_for_test(adapter: &BrowseAdapter) -> bool {
-    adapter.genres.has_mail() || adapter.letters.has_mail()
+    adapter.values.has_mail() || adapter.letters.has_mail()
 }
 
 /// TEST ONLY: is a directory claim (genres or letters) up on this adapter?
 #[cfg(any(test, feature = "test-support"))]
 pub fn directory_claim_up_for_test(adapter: &BrowseAdapter) -> bool {
-    adapter.genres.busy() || adapter.letters.busy()
+    adapter.values.busy() || adapter.letters.busy()
 }
 
 #[cfg(any(test, feature = "test-support"))]

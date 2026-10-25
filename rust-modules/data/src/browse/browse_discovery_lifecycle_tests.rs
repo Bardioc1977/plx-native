@@ -470,9 +470,9 @@ fn directory_landings_for_the_current_lifecycle_commit_both_menus() {
     let (_cleanup, mut browse, _, client) = registered_directory_source();
     queue_directories_from(&mut browse, client, client.token_gen());
     let state = browse.state.states().first().unwrap();
-    assert_eq!(state.genres[0].id, "stale");
+    assert_eq!(state.value_list("genre").unwrap().rows.last().map(|row| row.id.as_str()), Some("stale"));
     assert_eq!(*state.letters, vec![("S".into(), 99)]);
-    assert!(state.genres_done);
+    assert!(state.genres_done());
     assert!(state.letters_current(), "landed under the key the section asks with");
 }
 #[test]
@@ -553,7 +553,7 @@ fn reset_clears_the_single_flight_flags_with_the_mailboxes() {
     let _g = plx_base::testlock::serial();
     let mut browse = TestBrowse::default();
     browse.adapter.page.claim(0);
-    browse.adapter.genres.claim(0);
+    browse.adapter.values.claim(0);
     browse.adapter.letters.claim(0);
 
     browse.reset();
@@ -563,7 +563,7 @@ fn reset_clears_the_single_flight_flags_with_the_mailboxes() {
         "page fetch stayed latched — Library wedges"
     );
     assert!(
-        !browse.adapter.genres.busy(),
+        !browse.adapter.values.busy(),
         "genre fetch stayed latched"
     );
     assert!(

@@ -375,7 +375,7 @@ fn a_failed_genre_check_opens_the_library_unfiltered() {
     assert!(view.genre().is_none());
     assert_eq!(view.item(0).map(|item| item.rk.as_str()), Some("a-title"),
         "a remembered preference is never the reason a library cannot open");
-    assert!(!browse.state.cur_state().unwrap().genres_done,
+    assert!(!browse.state.cur_state().unwrap().genres_done(),
         "the Filter menu still fetches the list itself");
     let requests: Vec<String> = (0..2).map(|_| pms.requests.recv().unwrap()).collect();
     assert!(!requests[1].contains("genre="), "{}", requests[1]);

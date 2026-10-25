@@ -259,12 +259,11 @@ pub(super) fn registered_directory_source(
 {
     let (cleanup, mut browse, sid, client) = registered_page_source();
     let state = browse.state.state_mut(0).unwrap();
-    state.genres = Arc::new(vec![GenreEntry {
-        id: "new".into(),
-        title: "New Genre".into(),
-    }]);
+    // a genre list that has begun but not finished: one row on hand, the rest owed
+    state.values.clear();
+    state.install_values("genre", vec![GenreEntry { id: "new".into(), title: "New Genre".into() }],
+        Some(2), filters::VALUE_PAGE);
     state.letters = Arc::new(vec![("N".into(), 7)]);
-    state.genres_done = false;
     state.letters_for = None;
     (cleanup, browse, sid, client)
 }
@@ -308,7 +307,11 @@ pub(super) fn queue_directories_from(
     token_gen: u32,
 ) {
     let epoch = browse.state.table_epoch();
-    browse.adapter.genres.post(DirectoryResult {
+    let ask = listing_jobs::ValuesAsk {
+        facet: "genre".into(), start: 1, size: filters::VALUE_PAGE,
+        generation: browse.state.states[0].values_gen, total: Some(2),
+    };
+    browse.adapter.values.post(DirectoryResult {
         library_type: browse.state.states[0].library_type,
         epoch,
         sec: 0,
@@ -320,6 +323,7 @@ pub(super) fn queue_directories_from(
         }],
         ok: true,
         letters: None,
+        values: Some(ask),
     }, |_| true);
     browse.adapter.letters.post(DirectoryResult {
         library_type: browse.state.states[0].library_type,
@@ -330,22 +334,21 @@ pub(super) fn queue_directories_from(
         list: vec![("S".into(), 99)],
         ok: true,
         letters: Some(browse.state.states[0].letters_key()),
+        values: None,
     }, |_| true);
-    browse.adapter.genres.claim(0);
+    browse.adapter.values.claim(0);
     browse.adapter.letters.claim(0);
-    browse.state.land_directory_owned(&browse.adapter.genres, |st, list, _, _| {
-        st.genres_done = true;
-        st.genres = Arc::new(list);
-    });
+    browse.state.land_values_owned(plx_machine::landgate::fixture_gate(), &browse.adapter.values);
     browse.state.land_letters_for_test(&browse.adapter.letters);
 }
 pub(super) fn assert_new_directories_survive(browse: &TestBrowse) {
     let state = browse.state.states().first().unwrap();
-    assert_eq!(state.genres.len(), 1);
-    assert_eq!(state.genres[0].id, "new");
-    assert_eq!(state.genres[0].title, "New Genre");
+    let genres = &state.value_list("genre").expect("the fixture's list").rows;
+    assert_eq!(genres.len(), 1, "the stale page was not appended");
+    assert_eq!(genres[0].id, "new");
+    assert_eq!(genres[0].title, "New Genre");
     assert_eq!(*state.letters, vec![("N".into(), 7)]);
-    assert!(!state.genres_done);
+    assert!(!state.genres_done());
     assert!(state.letters_for.is_none(), "the registered fixture's list is owed again, as it was");
 }
 // ---- the three-state fetch machine ---------------------------------------------------------

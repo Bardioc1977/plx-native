@@ -52,19 +52,19 @@ fn dump_mode_a_directory_request_out_lands_on_the_pump_that_runs_whatever_the_wo
         let library_type = browse.state.states[0].library_type;
         let asked = browse.state.states[0].letters_key();
         let adapter = Arc::clone(&browse.adapter);
-        if letters { adapter.letters.claim(0) } else { adapter.genres.claim(0) }
+        if letters { adapter.letters.claim(0) } else { adapter.values.claim(0) }
         let worker = Arc::clone(&adapter);
         let join = late(move || {
             if letters {
                 worker.letters.post(DirectoryResult {
                     library_type, epoch, sec: 0, client, token_gen, list: vec![("S".into(), 99)],
-                    ok: true, letters: Some(asked),
+                    ok: true, letters: Some(asked), values: None,
                 }, |_| true);
             } else {
-                worker.genres.post(DirectoryResult {
+                worker.values.post(DirectoryResult {
                     library_type, epoch, sec: 0, client, token_gen,
                     list: vec![GenreEntry { id: "late".into(), title: "Late".into() }],
-                    ok: true, letters: None,
+                    ok: true, letters: None, values: None,
                 }, |_| true);
             }
         });
@@ -72,13 +72,12 @@ fn dump_mode_a_directory_request_out_lands_on_the_pump_that_runs_whatever_the_wo
         let changed = if letters {
             browse.state.land_letters_owned(&gate, &adapter.letters)
         } else {
-            browse.state.land_directory_owned_with_gate(&gate, &adapter.genres, |st, list, _, _| {
-                st.genres_done = true;
-                st.genres = Arc::new(list);
+            browse.state.land_directory_owned_with_gate(&gate, &adapter.values, |st, list, _, _| {
+                st.seed_genre_list(list);
             })
         };
         assert!(changed, "the answer the pump owed must be taken by the pump that asked (letters={letters})");
-        assert!(!adapter.letters.busy() && !adapter.genres.busy(), "the take released the claim (letters={letters})");
+        assert!(!adapter.letters.busy() && !adapter.values.busy(), "the take released the claim (letters={letters})");
         join.join().unwrap();
     }
 }
@@ -134,25 +133,24 @@ fn dump_mode_a_stale_epoch_answer_is_awaited_and_consumed_by_the_pump_that_was_o
     let stale_epoch = browse.state.table_epoch();
     let token_gen = client.token_gen();
     let library_type = browse.state.states[0].library_type;
-    browse.adapter.genres.claim(0);
+    browse.adapter.values.claim(0);
     browse.state.epoch = browse.state.epoch.wrapping_add(1); // the table moved while the worker was out
     let worker = Arc::clone(&browse.adapter);
     let join = late(move || {
-        worker.genres.post(DirectoryResult {
+        worker.values.post(DirectoryResult {
             library_type, epoch: stale_epoch, sec: 0, client, token_gen,
             list: vec![GenreEntry { id: "stale".into(), title: "Stale".into() }],
-            ok: true, letters: None,
+            ok: true, letters: None, values: None,
         }, |_| true);
     });
     let gate = dump_gate();
     let adapter = Arc::clone(&browse.adapter);
-    let changed = browse.state.land_directory_owned_with_gate(&gate, &adapter.genres, |st, list, _, _| {
-        st.genres_done = true;
-        st.genres = Arc::new(list);
+    let changed = browse.state.land_directory_owned_with_gate(&gate, &adapter.values, |st, list, _, _| {
+        st.seed_genre_list(list);
     });
     assert!(!changed, "a stale answer changes nothing");
-    assert!(!adapter.genres.busy(), "but it was awaited, and its take released the claim");
-    assert!(!browse.state.states[0].genres_done);
+    assert!(!adapter.values.busy(), "but it was awaited, and its take released the claim");
+    assert!(!browse.state.states[0].genres_done());
     join.join().unwrap();
 }
 
@@ -173,26 +171,25 @@ fn a_paced_lag_counts_the_genre_and_letters_mailboxes_from_their_own_first_sight
     let adapter = Arc::clone(&browse.adapter);
     let gate = plx_machine::landgate::Gate::default();
     gate.arm_dump_paced(3);
-    adapter.genres.post(DirectoryResult {
+    adapter.values.post(DirectoryResult {
         library_type, epoch, sec: 0, client, token_gen,
         list: vec![GenreEntry { id: "g".into(), title: "G".into() }],
-        ok: true, letters: None,
+        ok: true, letters: None, values: None,
     }, |_| true);
-    adapter.genres.claim(0);
+    adapter.values.claim(0);
     let (mut genre_at, mut letters_at) = (None, None);
     for v in 0..9u64 {
         gate.dump_frame(v);
         if v == 2 {
             adapter.letters.post(DirectoryResult {
                 library_type, epoch, sec: 0, client, token_gen, list: vec![("S".into(), 9)],
-                ok: true, letters: Some(asked.clone()),
+                ok: true, letters: Some(asked.clone()), values: None,
             }, |_| true);
             adapter.letters.claim(0);
         }
         if genre_at.is_none() && browse.state.land_directory_owned_with_gate(
-            &gate, &adapter.genres, |st, list, _, _| {
-            st.genres_done = true;
-            st.genres = Arc::new(list);
+            &gate, &adapter.values, |st, list, _, _| {
+            st.seed_genre_list(list);
         }) {
             genre_at = Some(v);
         }

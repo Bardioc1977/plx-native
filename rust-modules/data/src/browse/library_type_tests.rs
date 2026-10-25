@@ -67,8 +67,7 @@ mod tests {
         current.sort_idx = 1;
         current.sort_desc = true;
         current.set_genre_term(Some(GenreEntry { id: "7".into(), title: "Drama".into() }));
-        current.genres = Arc::new(vec![GenreEntry { id: "7".into(), title: "Drama".into() }]);
-        current.genres_done = true;
+        current.seed_genre_list(vec![GenreEntry { id: "7".into(), title: "Drama".into() }]);
         let key = current.letters_key();
         current.land_letters(key, vec![("A".into(), 1)]);
 
@@ -81,7 +80,7 @@ mod tests {
         assert_eq!((back.sort_idx, back.sort_desc), (1, true), "the sort comes back");
         assert_eq!(back.genre().map(|genre| genre.id.as_str()), Some("7"), "the genre comes back");
         assert_eq!(back.sorts.len(), 2);
-        assert!(back.genres_done && back.loaned.is_none());
+        assert!(back.genres_done() && back.loaned.is_none());
         assert!(back.letters.is_empty() && !back.letters_current(),
             "the loan holds no counts: what the section lists can change while Collections is shown");
         assert_eq!(state.listing_snapshot().view().library_type(), LibraryType::Primary);
@@ -107,7 +106,6 @@ mod tests {
         }]);
         current.sort_desc = true;
         current.set_genre_term(Some(GenreEntry { id: "7".into(), title: "Drama".into() }));
-        current.genres_done = true;
         let key = current.letters_key();
         current.land_letters(key, vec![("A".into(), 1), ("B".into(), 1)]);
         current.cursor = Some(Arc::new(Cursor { at: CursorAt::SlotIndex(0), scroll: 12.0 }));
@@ -129,7 +127,7 @@ mod tests {
         assert!(listing.view().letters().is_empty());
         assert!(listing.view().cursor().is_none());
         assert!(listing.view().unwatched());
-        assert!(!state.states[1].genres_done && state.states[1].letters_for.is_none());
+        assert!(!state.states[1].genres_done() && state.states[1].letters_for.is_none());
         assert!(!state.set_genre_by_id(Some("7")));
         assert_eq!(state.states[1].query_filters(SecKind::Show),
             vec![("type".into(), "4".into()), ("unwatched".into(), "1".into())]);
@@ -204,7 +202,7 @@ mod tests {
         fetch.post(DirectoryResult {
             epoch: browse.state.table_epoch(), sec: 0, client, token_gen: client.token_gen(),
             library_type: captured_type, list: vec![("S".into(), 99)],
-            ok: true, letters: Some(browse.state.states[0].letters_key()),
+            ok: true, letters: Some(browse.state.states[0].letters_key()), values: None,
         }, |_| true);
         fetch.claim(0);
         assert!(!browse.state.land_letters_for_test(&fetch));

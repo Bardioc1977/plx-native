@@ -16,7 +16,9 @@ fn value(id: &str, title: &str) -> FilterValue {
 
 /// The directory job the steps have left, taken off the outbox (`None`: there is none).
 fn job_left(browse: &mut TestBrowse) -> Option<(plx_machine::job::Job<BrowseDirectoryReq>, BrowseDirectoryPort)> {
-    let mut jobs = std::mem::take(&mut browse.jobs);
+    // the pump also asks for the listing's first page; this file is about the value reads
+    let mut jobs: Vec<StoreJob> = std::mem::take(&mut browse.jobs)
+        .into_iter().filter(|job| matches!(job, StoreJob::BrowseDirectory(..))).collect();
     match jobs.len() {
         0 => None,
         1 => match jobs.remove(0) {

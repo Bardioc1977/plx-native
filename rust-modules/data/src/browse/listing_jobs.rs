@@ -1,6 +1,7 @@
-//! The Library's listing reads as store jobs: the grid's pages and the filter menus' value lists.
+//! The Library's listing reads as store jobs: the grid's pages, a facet's value list (the genre
+//! list among them) and the A-Z rail's letters.
 //!
-//! A Browse step that wants a listing page, or a section's genre or first-letter list, raises that
+//! A Browse step that wants a listing page, or a facet's value list or the first-letter list, raises that
 //! read's claim, takes the section's [`ClientKey`] from the borrowed [`ClientKeys`] and **leaves the
 //! read as a job on the store's outbox** ([`StoreJob::BrowsePage`], [`StoreJob::BrowseDirectory`]).
 //! Nothing here starts a worker or reads the server registry: the application's runner starts the
@@ -20,53 +21,46 @@
 //! `Browse(Discovery(..))` and refuses `StoreWork::Browse`).
 
 use super::{
-    genre_entry, fetch_listing_page, DirectoryResult, GenreEntry, LettersKey, LibraryType, ListingPage,
-    PageResult, Restore, SectionQuery, PAGE,
+    fetch_listing_page, DirectoryResult, GenreEntry, LettersKey, LibraryType, ListingPage, PageResult,
+    Restore, SectionQuery, PAGE,
 };
 use plx_machine::job::Port;
 use plx_machine::machine::{Addr, MachineId, RequestId};
-use plx_plex::plex::{Client, ClientKey, LibrarySection, MediaContainer, ServerId};
+use plx_plex::plex::{Client, ClientKey, FacetKind, FacetPage, LibrarySection, MediaContainer, ServerId};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 // ---- the directory read -----------------------------------------------------------------------
 
-/// Which of a section's two value lists a [`BrowseDirectoryReq`] reads. Each has its own claim and
+/// Which of a section's two lists a [`BrowseDirectoryReq`] reads. Each has its own claim and
 /// mailbox on the adapter, and the port a job leaves with knows which.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Directory {
-    /// `/library/sections/{key}/genre`: the Filter menu's genre list.
+    /// `/library/sections/{key}/{facet}`: one window of a facet's value list (the Filter menu's genre
+    /// list is the `genre` facet's).
     Values,
     /// `/library/sections/{key}/firstCharacter`: the A-Z rail's letters and their counts.
     Letters,
 }
 
 impl Directory {
-    /// The directory's name on the wire.
-    fn wire(self) -> &'static str {
-        match self {
-            Self::Values => "genre",
-            Self::Letters => "firstCharacter",
-        }
-    }
-
     pub(super) fn busy(self, adapter: &super::BrowseAdapter) -> bool {
         match self {
-            Self::Values => adapter.genres.busy(),
+            Self::Values => adapter.values.busy(),
             Self::Letters => adapter.letters.busy(),
         }
     }
 
     pub(super) fn claim(self, adapter: &super::BrowseAdapter, id: u32) {
         match self {
-            Self::Values => adapter.genres.claim(id),
+            Self::Values => adapter.values.claim(id),
             Self::Letters => adapter.letters.claim(id),
         }
     }
 
     fn refuse_for(self, adapter: &super::BrowseAdapter, id: u32) {
         match self {
-            Self::Values => adapter.genres.refuse_for(id),
+            Self::Values => adapter.values.refuse_for(id),
             Self::Letters => adapter.letters.refuse_for(id),
         }
     }
@@ -95,9 +89,11 @@ pub struct BrowseDirectoryReq {
     /// The wire terms the read is scoped by: the listing's `type=` for the genre list, and for the
     /// letters the very terms the grid's page read sends (`SecState::query_filters`).
     filters: Vec<(String, String)>,
-    /// What a letters read counts, to come back with its answer ([`LettersKey`]); `None` for genres.
+    /// What a letters read counts, to come back with its answer ([`LettersKey`]); `None` for values.
     letters: Option<LettersKey>,
     which: Directory,
+    /// What a value read asks for, to come back with its answer; `None` for letters.
+    values: Option<ValuesAsk>,
 }
 
 impl BrowseDirectoryReq {
@@ -105,15 +101,15 @@ impl BrowseDirectoryReq {
     pub fn server(&self) -> (ServerId, ClientKey) {
         (self.sid, self.key)
     }
-    /// STUB (red commit): the facet a value read asks for.
+    /// The facet a value read asks for.
     #[cfg(test)]
     pub(super) fn facet(&self) -> Option<&str> {
-        None
+        self.values.as_ref().map(|ask| ask.facet.as_str())
     }
-    /// STUB: the first row of the window.
+    /// The first row of the window a value read asks for.
     #[cfg(test)]
     pub(super) fn start(&self) -> usize {
-        0
+        self.values.as_ref().map_or(0, |ask| ask.start)
     }
 }
 
@@ -121,7 +117,7 @@ impl BrowseDirectoryReq {
 pub struct BrowseDirectoryAnswer(DirectoryAnswer);
 
 enum DirectoryAnswer {
-    Genres(DirectoryResult<GenreEntry>),
+    Values(DirectoryResult<GenreEntry>),
     Letters(DirectoryResult<(String, i64)>),
 }
 
@@ -158,7 +154,7 @@ impl Port<BrowseDirectoryAnswer> for BrowseDirectoryPort {
     /// directory is out at a time (its claim), so the answer replaces whatever is waiting.
     fn done(&self, _addr: Addr, out: BrowseDirectoryAnswer) {
         match out.0 {
-            DirectoryAnswer::Genres(result) => self.adapter.genres.post(result, |_| true),
+            DirectoryAnswer::Values(result) => self.adapter.values.post(result, |_| true),
             DirectoryAnswer::Letters(result) => self.adapter.letters.post(result, |_| true),
         }
     }
@@ -181,7 +177,8 @@ pub(super) fn listing_addr(id: u32) -> Addr {
     Addr { to: MachineId::Store(crate::stores::StoreId::Browse.ord()), req: RequestId(id) }
 }
 
-/// What a value read asked for (STUB in the red commit; inert).
+/// What a value read asks for: the facet's window (`start`, `size`) and the list generation it is for
+/// ([`super::SecState::values_gen`]); the answer carries it back, with the `total` the server reported.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ValuesAsk {
     pub(super) facet: String,
@@ -195,8 +192,8 @@ impl BrowseDirectoryReq {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(sid: ServerId, key: ClientKey, epoch: u32, sec: usize, section: i64,
         library_type: LibraryType, filters: Vec<(String, String)>, letters: Option<LettersKey>,
-        which: Directory, _values: Option<ValuesAsk>) -> Self {
-        Self { sid, key, epoch, sec, section, library_type, filters, letters, which }
+        which: Directory, values: Option<ValuesAsk>) -> Self {
+        Self { sid, key, epoch, sec, section, library_type, filters, letters, which, values }
     }
 }
 
@@ -205,9 +202,11 @@ impl BrowseDirectoryReq {
 /// failed (`ok: false`), never as the empty list of a read that found nothing.
 pub fn finish_browse_directory_job(port: &BrowseDirectoryPort, addr: Addr, client: &'static Client,
     req: BrowseDirectoryReq) {
-    let (section, which, filters) = (req.section, req.which, req.filters.clone());
-    finish_directory_with(port, addr, client, req, move || {
-        client.section_directory(section, which.wire(), &filters)
+    let (section, which, filters, values) = (req.section, req.which, req.filters.clone(), req.values.clone());
+    finish_directory_with(port, addr, client, req, move || match (which, values) {
+        (Directory::Values, Some(ask)) => client.facet_values_container(section, &ask.facet, FacetKind::List,
+            &filters, ask.start as i64, ask.size as i64),
+        _ => client.section_directory(section, "firstCharacter", &filters),
     });
 }
 
@@ -215,20 +214,23 @@ pub fn finish_browse_directory_job(port: &BrowseDirectoryPort, addr: Addr, clien
 /// test swaps for a read that panics.
 fn finish_directory_with(port: &BrowseDirectoryPort, addr: Addr, client: &'static Client,
     req: BrowseDirectoryReq, read: impl FnOnce() -> Option<MediaContainer>) {
-    let BrowseDirectoryReq { key, epoch, sec, library_type, letters, which, .. } = req;
+    let BrowseDirectoryReq { key, epoch, sec, library_type, letters, which, values, .. } = req;
     let answer = match which {
         Directory::Values => {
-            let list = directory_list(read, genre_entry);
-            DirectoryAnswer::Genres(DirectoryResult {
-                epoch, sec, client, token_gen: key.token, library_type, ok: list.is_some(),
-                list: list.unwrap_or_default(), letters: None,
+            let page = catch_unwind(AssertUnwindSafe(|| read().map(FacetPage::from_container))).unwrap_or_default();
+            let values = values.map(|ask| ValuesAsk { total: page.as_ref().and_then(|page| page.total), ..ask });
+            DirectoryAnswer::Values(DirectoryResult {
+                epoch, sec, client, token_gen: key.token, library_type, ok: page.is_some(),
+                list: page.map(|page| page.rows.into_iter().map(|row| GenreEntry { id: row.key, title: row.title }).collect())
+                    .unwrap_or_default(),
+                letters: None, values,
             })
         }
         Directory::Letters => {
             let list = directory_list(read, letter_entry);
             DirectoryAnswer::Letters(DirectoryResult {
                 epoch, sec, client, token_gen: key.token, library_type, ok: list.is_some(),
-                list: list.unwrap_or_default(), letters,
+                list: list.unwrap_or_default(), letters, values: None,
             })
         }
     };
