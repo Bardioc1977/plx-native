@@ -46,15 +46,16 @@ the movie detail page, which has nothing to play (`browse::SecKind`).
 library's title is Plex's own default, "Other Videos" in the server language):
 
 ```json
-{"key":"4","type":"movie","title":"Other Videos","agent":"tv.plex.agents.none","scanner":"Plex Video Files","hidden":1}
+{"key":"3","type":"movie","title":"Other Videos","agent":"tv.plex.agents.none","scanner":"Plex Video Files","hidden":1}
 ```
 
 A Movies library reads `tv.plex.agents.movie` / `Plex Movie`. The app's rule (`LibrarySection::is_other_videos`,
-classified by `SecKind::of_section`) is: type `movie` AND a "none" agent (`tv.plex.agents.none`, or
-the legacy `com.plexapp.agents.none`) AND a scanner that starts with `Plex Video Files` (the legacy
-spelling adds " Scanner"). Both halves are required, so a curated Movies library (none agent, `Plex
-Movie` scanner) stays Movies, and a row without the fields (an older server, a shared token's answer,
-not measured) reads as Movies. `hidden` is the server owner's visibility switch, read from the
+classified by `SecKind::of_section`) is: type `movie` AND the "none" agent `tv.plex.agents.none` AND a
+scanner that starts with `Plex Video Files`. Both halves are required, so a curated Movies library
+(none agent, `Plex Movie` scanner) stays Movies, and a row without the fields (an older server, a
+shared token's answer, not measured) reads as Movies. **Not measured:** the app also accepts the legacy
+spellings `com.plexapp.agents.none` and `Plex Video Files Scanner`, the names Plex's library
+documentation gives for an older server; no server examined here answered either. `hidden` is the server owner's visibility switch, read from the
 library's prefs: `0` include in the home screen and global search, `1` exclude from the home screen,
 `2` exclude from both. Home follows it: a library the server hides from Home sends no row there
 (`home.videos.recent` answers size 0), its own pill and Library page stay.
@@ -332,7 +333,7 @@ hub is empty and `/hubs/continueWatching` carries no item of it. What the item t
 hub of a library with `hidden` 0 is NOT measured (the only Other Videos library on the server used was
 hidden); the app takes a hub of type `clip` as a row and admits its cards by their own type
 (`pms::hub_listable`, `shelf_card`), so a hub whose items are `clip`-typed (extras) is an empty row and
-is dropped. A personal-video hub (`home.videos.*`, `video.*`) is a row and never a hero billboard.
+is dropped. A personal-video hub (`home.videos.*`, `video.*`) is a row, and never feeds the recently-added families' hero allowance and pool; an in-progress clip of a visible library still reaches the hero through Continue Watching.
 
 **The spec gives `/hubs` no paging** (`docs/plex-openapi.json`: its only parameters are `count`, `onlyTransient`
 and `identifier`), but a windowed request does page its hub list on a live server (see [Paging, observed](#paging-observed)).

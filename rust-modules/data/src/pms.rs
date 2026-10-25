@@ -69,9 +69,11 @@ fn hub_listable(hub_type: &str) -> bool {
 
 /// Whether a hub is a library of personal videos' own row, by its locale-independent id: the
 /// whole-server `home.videos.*` family and a section's `video.*` family (`video.recent.<id>`,
-/// `video.inprogress.<id>`). Such a row is a Home row but never a billboard: a hero is a title worth
-/// leading Home with, and a home clip is not (the hero pool and the refresh's hero allowance both
-/// read this ONE predicate).
+/// `video.inprogress.<id>`). Such a row is a Home row but never feeds the recently-added families'
+/// hero allowance and pool: a hero is a title worth leading Home with, and a recently added home
+/// clip is not (the hero pool and the refresh's hero allowance both read this ONE predicate). An
+/// in-progress clip of a visible library still reaches the hero through Continue Watching, the
+/// deck, as any resume does.
 fn personal_video_hub(hub_id: &str) -> bool {
     hub_id.starts_with("home.videos.") || hub_id.starts_with("video.")
 }
@@ -2313,7 +2315,7 @@ fn merge_with_scope(srcs: &[Src], scope: &BrowseScope) -> HubBuild {
         // Match on the locale-independent hubIdentifier, not the localized display title:
         // "home.continue" plus every Recently Added variant (home.movies.recent,
         // home.television.recent, promoted <type>.recentlyadded.<id>) all carry "recent". The
-        // personal-video families (home.videos.*, video.*) carry it too and are never a billboard.
+        // personal-video families (home.videos.*, video.*) carry it too and never feed the recently-added hero pool.
         let eligible = (hub.hub_id == "home.continue" || hub.hub_id.contains("recent"))
             && !personal_video_hub(&hub.hub_id);
         if !eligible {

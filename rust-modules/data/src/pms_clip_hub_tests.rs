@@ -74,7 +74,8 @@ fn a_hub_of_an_unlisted_type_is_still_skipped() {
     assert_eq!(hubs.iter().map(|h| h.hub_id.as_str()).collect::<Vec<_>>(), ["home.movies.recent"]);
 }
 
-/// **A personal clip never feeds the hero billboard**, in either family of ids: the whole-server
+/// **A recently added personal clip never feeds the hero pool**, in either family of ids (an in-progress
+/// one still reaches it through Continue Watching, the deck): the whole-server
 /// `home.videos.recent` and a section's own `video.recent.<id>` (which the title table admits in Home
 /// scope). The pool takes the movie row beside them, which is the control.
 #[test]
