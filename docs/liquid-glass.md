@@ -354,6 +354,11 @@ no longer priced by §2.
 when you cross between those three breaks the one illusion that code was written to preserve. Either
 all three or none; "glass on Home only" is not an option, however tempting the frame budget makes it.
 It ships, and `/tmp/plxnative-flattabs` is the way back to the flat capsule for a comparison.
+The track wears the material only while it is no wider than the budget (`GLASS_TRACK_MAX`, 672 px at
+1920): the strip of Home, Movies, TV Shows, the Watchlist bookmark and Search is 648, so a third type
+pill (Other Videos, for a household that has such a library) takes the whole strip to the flat capsule.
+`a_strip_with_a_third_type_pill_is_flat_by_the_budget` pins that arithmetic; how it looks on a television
+is not verified here.
 Its density is not a constant — see §6.
 
 **No:** anything on the player route (§1), and a second far-away glass cluster that the frame walk merges

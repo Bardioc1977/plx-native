@@ -37,10 +37,27 @@ Verified response (trimmed):
 ```
 
 **Section keys on this server: Movies = `1`, TV Shows = `2`, Music = `3`.** Select sections by
-`Directory[].type`, never by hard-coded key — and note the app no longer filters that type down to
-`movie`/`show`: `artist` and `photo` are kept too (`browse::SecKind`), because the top strip's
-projection can only give a friend's shared MUSIC library a pill if the type reaches the table at
-all. "Ignore music for now" was true while the strip named one server's movie and show sections.
+`Directory[].type`, never by hard-coded key. The app keeps `movie` and `show` and drops every other
+type (`artist`, `photo`, ...): a type it has no level for would reach the strip as a pill that opens
+the movie detail page, which has nothing to play (`browse::SecKind`).
+
+**An "Other Videos" library has the type `movie`.** What tells it from a Movies library is the pair
+`agent` + `scanner`, which ride the same plain `/library/sections` row (measured on PMS 1.43.5; the
+library's title is Plex's own default, "Other Videos" in the server language):
+
+```json
+{"key":"4","type":"movie","title":"Other Videos","agent":"tv.plex.agents.none","scanner":"Plex Video Files","hidden":1}
+```
+
+A Movies library reads `tv.plex.agents.movie` / `Plex Movie`. The app's rule (`LibrarySection::is_other_videos`,
+classified by `SecKind::of_section`) is: type `movie` AND a "none" agent (`tv.plex.agents.none`, or
+the legacy `com.plexapp.agents.none`) AND a scanner that starts with `Plex Video Files` (the legacy
+spelling adds " Scanner"). Both halves are required, so a curated Movies library (none agent, `Plex
+Movie` scanner) stays Movies, and a row without the fields (an older server, a shared token's answer,
+not measured) reads as Movies. `hidden` is the server owner's visibility switch, read from the
+library's prefs: `0` include in the home screen and global search, `1` exclude from the home screen,
+`2` exclude from both. Home follows it: a library the server hides from Home sends no row there
+(`home.videos.recent` answers size 0), its own pill and Library page stay.
 
 ---
 
@@ -303,8 +320,19 @@ Verified hub list (`MediaContainer.Hub[]`), each hub has
 | `home.ondeck` | On Deck | `/hubs/home/onDeck` |
 | `home.movies.recent` | Recently Added Movies | `/hubs/home/recentlyAdded?type=1` |
 | `home.television.recent` | Recently Added TV | `/hubs/home/recentlyAdded?type=2` |
+| `home.videos.recent` | Recently Added Videos | `/hubs/home/recentlyAdded?type=1&personal=1` |
 | `movie.recentlyadded.1` (promoted) | Recently Added in Movies | `/library/sections/1/all?sort=addedAt:desc` |
 | `custom.collection.*` | collection shelves | `/library/collections/{id}/children` |
+
+**An Other Videos library's hub has the hub `type` `clip`, and its items are `movie` rows.** Measured on
+PMS 1.43.5: `home.videos.recent` is `type: clip`, and the rows in it (like the rows of the library's own
+`video.*` hubs, §3a) are `type: movie` with `subtype: clip`. The same list carries `home.music.recent`
+(`album`) and `home.photos.recent` (`photo`) with size 0. While the library's `hidden` is 1 or 2 (§1) the clip
+hub is empty and `/hubs/continueWatching` carries no item of it. What the item type is inside a
+hub of a library with `hidden` 0 is NOT measured (the only Other Videos library on the server used was
+hidden); the app takes a hub of type `clip` as a row and admits its cards by their own type
+(`pms::hub_listable`, `shelf_card`), so a hub whose items are `clip`-typed (extras) is an empty row and
+is dropped. A personal-video hub (`home.videos.*`, `video.*`) is a row and never a hero billboard.
 
 **The spec gives `/hubs` no paging** (`docs/plex-openapi.json`: its only parameters are `count`, `onlyTransient`
 and `identifier`), but a windowed request does page its hub list on a live server (see [Paging, observed](#paging-observed)).
@@ -456,6 +484,12 @@ Measured on this server, and every one of these is a thing the OpenAPI spec does
   `tv.inprogress.N` with `key=/hubs/sections/N/continueWatching/items`. **It is NOT
   `home.continue`**, so `pms::hub_is_continue`'s match does not carry over — a per-section
   shelf is identified by the `*.inprogress.*` id or that `key`.
+* **An Other Videos library answers `video.*` hubs of type `clip`** (measured on PMS 1.43.5):
+  `video.inprogress.N`, `video.recent.N`, `video.unwatched.random.N` and `video.recentlyviewed.N`, whose
+  items are `type: movie`, `subtype: clip`, with thumb, art and `librarySectionID`. `video.inprogress.N`
+  has a `/library/sections/N/all?...` key, not `/hubs/sections/N/continueWatching/items`, and is still
+  the deck by its `.inprogress.` id. `video.recent.N` is worded by the same override as the
+  `*.recentlyadded.N` family.
 * **A collection is a hub like any other** (`custom.collection.N.<id>.<id>`,
   `key=/library/collections/{id}/children`), which is why the owner's table lists
   "Toy Story Collection" in the same column as "Recently Added".

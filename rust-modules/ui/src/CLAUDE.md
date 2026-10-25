@@ -467,7 +467,8 @@ presentation in a design pass.
 6. **An icon tab and a bookmark disc are both a mark, never a label.** The strip's faces are
    `TabFace::{Label, Icon}` (the Watchlist bookmark and Search are `Icon` faces: square, 60 x 60,
    the mark at `TAB_ICON_D`), and a destination is found by its KEY (`TAB_KEY_WATCHLIST` is
-   `STRIP_BASE + 5`, drawn before Search), never by "the last face". The strip PULSES a mark once
+   `STRIP_BASE + 5`, drawn before Search; every key is one line of the `strip_keys!` list in
+   `widgets.rs`, and a key declared beside it fails a test), never by "the last face". The strip PULSES a mark once
    after a title is put on the list: `StripRender::pulse(idx)` (`TAB_PULSE_S` 0.4 s, the GLYPH
    grown to `TAB_PULSE_SCALE` about 1.35x with a soft white `TAB_PULSE_GLOW_A` glow around it,
    `tab_pulse_look`) is time-driven, ends at exactly rest, reports through `idle::note_motion`, and
