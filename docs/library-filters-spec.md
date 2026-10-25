@@ -19,7 +19,8 @@ them:
   no menu contents" is true for the Sort menu only. The Filter menu has an **Unwatched** toggle and a **Genre** row
   (`screens/src/library/menu.rs`, `filter_section`), `QueryEdit` is
   `{Sort, Unwatched, Genre, LibraryType}` (`data/src/stores/browse.rs`). `SecState::query_filters`
-  (`data/src/browse/mod.rs`) can emit nothing else; `Meta.Type[].Filter[]` was not parsed until the wire PR (1a) of this spec.
+  (`data/src/browse/mod.rs`) could emit nothing else until the data PR (1b) of this spec, and the menu
+  still offers nothing else; `Meta.Type[].Filter[]` was not parsed until the wire PR (1a).
 - Everything the viewer can already do (Sort, A–Z rail, paging, Seasons/Episodes views, per-profile
   memory of the view in `library_sorts` / `LibraryView`) keeps working with any query; only the
   query builder and the menu are narrow.

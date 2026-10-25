@@ -644,7 +644,8 @@ pub enum LibraryWork {
         set: crate::browse::filters::FilterSet,
     },
     /// The next page(s) of facet `facet`'s value list, until `want_rows` rows have landed (or the
-    /// list is complete). Idempotent: the picker sends it on every tick. STUB (red commit): ignored.
+    /// list is complete). Idempotent: the picker sends it on every tick. Nothing is asked for a
+    /// boolean facet, a name that is not a safe path segment, or the Collections listing.
     Values {
         facet: String,
         want_rows: usize,
