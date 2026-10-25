@@ -180,9 +180,11 @@ impl BrowseDirectoryReq {
 /// list, as a read that found nothing does.
 pub fn finish_browse_directory_job(port: &BrowseDirectoryPort, addr: Addr, client: &'static Client,
     req: BrowseDirectoryReq) {
-    let (section, metadata_type, which) = (req.section, req.metadata_type, req.which);
+    let (section, which) = (req.section, req.which);
+    let filters: Vec<(String, String)> =
+        req.metadata_type.map(|ty| ("type".to_owned(), ty.to_string())).into_iter().collect();
     finish_directory_with(port, addr, client, req, move || {
-        client.section_directory(section, which.wire(), metadata_type)
+        client.section_directory(section, which.wire(), &filters)
     });
 }
 

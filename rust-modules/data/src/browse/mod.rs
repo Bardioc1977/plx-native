@@ -405,6 +405,13 @@ impl LibraryType {
         }
     }
 
+    /// The `type=` term of a listing of this type ([`Self::plex_type`]) as the wire pair a listing
+    /// request carries: empty for the section's own default listing. The first of
+    /// [`SecState::query_filters`]' terms, and the whole of what the genre list is asked with.
+    pub fn type_terms(self, kind: SecKind) -> Vec<(String, String)> {
+        self.plex_type(kind).map(|ty| ("type".to_owned(), ty.to_string())).into_iter().collect()
+    }
+
     /// Do the Unwatched and Genre filters apply? A collection has no watch state of its own and
     /// no genre, so both are hidden — and not sent — while collections are listed. The section's
     /// Unwatched switch is kept for when its own type is listed again (a genre never survives a
@@ -833,10 +840,7 @@ impl SecState {
         self.membership_stale = false;
     }
     fn query_filters(&self, section_kind: SecKind) -> Vec<(String, String)> {
-        let mut filters = Vec::new();
-        if let Some(kind) = self.library_type.plex_type(section_kind) {
-            filters.push(("type".into(), kind.to_string()));
-        }
+        let mut filters = self.library_type.type_terms(section_kind);
         if !self.library_type.filters() {
             return filters;
         }
@@ -3041,7 +3045,7 @@ fn fetch_listing_page(
     if let (Some(restore), true) = (restore, discovery) {
         if let Some(wanted) = &restore.genre {
             let list = client
-                .section_directory(query.section_key, "genre", restore.library_type.plex_type(restore.kind))
+                .section_directory(query.section_key, "genre", &restore.library_type.type_terms(restore.kind))
                 .map(|container| container.directory.iter().filter_map(genre_entry).collect::<Vec<_>>());
             if let Some(list) = list {
                 if let Some(found) = list.iter().find(|entry| &entry.id == wanted) {

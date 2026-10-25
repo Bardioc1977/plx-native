@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(descending, "show.titleSort:desc,episode.index");
         let reversed = SectionQuery { start: 0, sort: &descending, ..next };
         assert_eq!(fetch_listing_page(client, sid, &reversed, true, None).items[0].rk, "91");
-        assert_eq!(client.section_directory(2, "firstCharacter", Some(4)).unwrap().directory[0].size, 121);
+        assert_eq!(client.section_directory(2, "firstCharacter", &[("type".to_owned(), "4".to_owned())]).unwrap().directory[0].size, 121);
         let requests: Vec<String> = (0..5).map(|_| rx.recv().unwrap()).collect();
         for request in &requests[..4] {
             assert!(request.contains("type=4"), "{request}");
