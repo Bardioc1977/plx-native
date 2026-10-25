@@ -14,6 +14,7 @@ Priority is by what the owner's library actually exercises (multi-version files,
 | 3 | Library filter facets from the server's `Meta.Type.Filter[]` | `docs/library-filters-spec.md` | proposed |
 | 4 | Companion: be a cast/remote-control target (`/player/*`, GDM) | `docs/companion-spec.md` | proposed, wire format unverified |
 | 5 | User ratings: read and write (`/:/rate`), critic reviews | `docs/user-ratings-spec.md` | proposed |
+| 6 | Disguised libraries: hide a library (Other videos) from global views, keep it searchable on its own | `docs/disguised-libraries-spec.md` | proposed, after upstream #599 |
 
 Not planned here: Plex Discover browse, friends/social, Live TV, music, photos (out of scope by
 earlier decision), and accessibility/voice search (little use on this device).
