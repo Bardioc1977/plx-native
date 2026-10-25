@@ -202,7 +202,8 @@ fn the_profile_chip_has_a_round_surround_at_rest_and_only_widens_on_focus() {
 #[test]
 fn a_normal_strip_keeps_the_material_and_a_long_one_loses_it() {
     // Home + three libraries + the square Search mark, at the widths `with_tab_metrics`
-    // measures: label + 2 x TAB_PILL_PAD.
+    // measures: label + 2 x TAB_PILL_PAD. These are MODEL numbers (hand-picked label widths), not a
+    // measurement; the shipped strip per language is `the_two_type_track_is_measured_per_language_...`.
     let normal = [126.0, 146.0, 176.0, TAB_ICON_PILL_W];
     assert!(
         tab_track_w(&normal) <= GLASS_TRACK_MAX,
@@ -460,30 +461,92 @@ fn full_strip_faces() -> Vec<TabFace> {
     ]
 }
 
-/// **A third type pill takes the strip off the glass, by the budget's own arithmetic.** The shipped
-/// strip of two types is 648 wide (Home 126, Movies 146, TV Shows 176, two 60 px marks, four gaps of
-/// 16 and the track's 16) against a budget of 672: 24 px of headroom. ANY further pill, even a bare
-/// 60 px mark, is 724. So every household with an Other Videos library draws the flat dark capsule
-/// (`tab_glass_on`), the designed degradation `a_normal_strip_keeps_the_material_and_a_long_one_loses_it`
-/// documents, until now unreachable with two types. This pins the consequence so nobody finds it by
-/// accident; re-solving the budget is a separate, measured GPU change. The same arithmetic applies
-/// to any other fourth destination (Live TV's pill, #993).
+/// The strip of a household with two types in the current UI language: Home, Movies, TV Shows,
+/// the Watchlist mark and Search (`app::chrome::strip_keys`).
+fn two_type_strip_faces() -> Vec<TabFace> {
+    let mut faces = full_strip_faces();
+    faces.remove(3);
+    faces
+}
+
+/// The shipped two-type track and the budget it is charged against, per UI language: MODEL
+/// numbers (the shipped bold face's whole-pixel advances, `ShippedMeasure`), not a television
+/// measurement. 621 px in English, 529-679 across the nine languages, against 672.3: Belarusian is
+/// over the budget today, without any new pill.
+const TWO_TYPE_TRACK: [(&str, f32); 9] = [("en", 621.0), ("de", 529.0), ("es", 582.0), ("fr", 561.0),
+    ("it", 555.0), ("pt", 549.0), ("hu", 659.0), ("ru", 666.0), ("be", 679.0)];
+
 #[test]
-fn a_strip_with_a_third_type_pill_is_flat_by_the_budget() {
-    let two_types = [126.0, 146.0, 176.0, TAB_ICON_PILL_W, TAB_ICON_PILL_W];
-    assert_eq!(tab_track_w(&two_types), 648.0, "the shipped strip");
-    assert!(tab_track_w(&two_types) <= GLASS_TRACK_MAX, "two types keep the material");
-    let bare_fourth = [126.0, 146.0, 176.0, TAB_ICON_PILL_W, TAB_ICON_PILL_W, TAB_ICON_PILL_W];
-    assert_eq!(tab_track_w(&bare_fourth), 724.0);
-    assert!(
-        tab_track_w(&bare_fourth) > GLASS_TRACK_MAX,
-        "even a bare 60 px mark as a fourth pill is {} against a budget of {GLASS_TRACK_MAX}",
-        tab_track_w(&bare_fourth),
-    );
+fn the_two_type_track_is_measured_per_language_against_the_budget() {
+    use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+    assert!((GLASS_TRACK_MAX - 672.3).abs() < 0.05, "the budget moved: {GLASS_TRACK_MAX}");
+    for language in SHIPPED {
+        let _guard = language_on_this_thread_for_test(language);
+        let tag = language.tag();
+        let track = tab_track_w(&tab_widths(&two_type_strip_faces(), &plx_base::fontcov::advances::ShippedMeasure));
+        let want = TWO_TYPE_TRACK.iter().find(|(t, _)| *t == tag).unwrap_or_else(|| panic!("{tag} is not in the table")).1;
+        assert_eq!(track, want, "{tag}: the two-type track");
+        assert_eq!(tab_glass_on(track), tag != "be", "{tag}: only Belarusian is flat with two types already");
+    }
+    assert_eq!(TWO_TYPE_TRACK.len(), SHIPPED.len());
+}
+
+/// **The translated Other Videos label takes the strip off the glass in every language**: its
+/// 136-197 px of text on top of the two-type track is past the budget everywhere. (Where that
+/// stops being true is a library TITLE short enough, `a_library_title_keeps_the_glass_only_where_the_track_has_room`.)
+/// This pins the consequence so nobody finds it by accident; re-solving the budget is a separate,
+/// measured GPU change. The same arithmetic applies to any other fourth destination (Live TV's
+/// pill, #993): with a short label it keeps the glass in German, French, Italian and Portuguese
+/// and not in English, Hungarian, Russian, Belarusian or (by 0.7 px) Spanish, on this model.
+#[test]
+fn the_translated_other_videos_pill_is_flat_in_every_language() {
+    use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
     let measure = plx_base::fontcov::advances::ShippedMeasure;
-    let widths = tab_widths(&full_strip_faces(), &measure);
-    assert!(tab_track_w(&widths) > GLASS_TRACK_MAX && !tab_glass_on(tab_track_w(&widths)),
-        "the real strip of three types is {} wide and draws flat", tab_track_w(&widths));
+    for language in SHIPPED {
+        let _guard = language_on_this_thread_for_test(language);
+        let widths = tab_widths(&full_strip_faces(), &measure);
+        assert!(tab_track_w(&widths) > GLASS_TRACK_MAX && !tab_glass_on(tab_track_w(&widths)),
+            "{}: the real strip of three types is {} wide and draws flat", language.tag(), tab_track_w(&widths));
+    }
+    // a bare 60 px mark as a fourth pill does the same where the track is already wide
+    let two_types = [115.0, 134.0, 172.0, TAB_ICON_PILL_W, TAB_ICON_PILL_W];
+    assert_eq!(tab_track_w(&two_types), 621.0, "the English two-type strip");
+    assert!(tab_track_w(&two_types) <= GLASS_TRACK_MAX);
+    let bare_fourth = [115.0, 134.0, 172.0, TAB_ICON_PILL_W, TAB_ICON_PILL_W, TAB_ICON_PILL_W];
+    assert_eq!(tab_track_w(&bare_fourth), 697.0);
+    assert!(tab_track_w(&bare_fourth) > GLASS_TRACK_MAX);
+}
+
+/// **A library title keeps the glass only if it is short enough**, and how short depends on the UI
+/// language because the other pills' words do: at most 91 px of text in German, 71 Portuguese,
+/// 65 Italian, 59 French, 38 Spanish; never in English, Hungarian, Russian or Belarusian, whose
+/// two-type track leaves no room for a fourth label. `tab_glass_on` is a function of width, so a
+/// rename can flip the material in those five languages; that is a fact of the budget, not a
+/// defect, and it is tested rather than prevented.
+#[test]
+fn a_library_title_keeps_the_glass_only_where_the_track_has_room() {
+    use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+    let measure = plx_base::fontcov::advances::ShippedMeasure;
+    let thresholds = [("de", Some(91.0)), ("pt", Some(71.0)), ("it", Some(65.0)), ("fr", Some(59.0)),
+        ("es", Some(38.0)), ("en", None), ("hu", None), ("ru", None), ("be", None)];
+    for language in SHIPPED {
+        let _guard = language_on_this_thread_for_test(language);
+        let tag = language.tag();
+        let two = tab_widths(&two_type_strip_faces(), &measure);
+        let want = thresholds.iter().find(|(t, _)| *t == tag).unwrap_or_else(|| panic!("{tag}")).1;
+        let wears_glass = |text: f32| {
+            let mut widths = two.clone();
+            widths.insert(3, text + 2.0 * TAB_PILL_PAD);
+            tab_glass_on(tab_track_w(&widths))
+        };
+        match want {
+            Some(most) => {
+                assert!(wears_glass(most), "{tag}: {most} px of title keeps the glass");
+                assert!(!wears_glass(most + 1.0), "{tag}: {} px does not", most + 1.0);
+            }
+            None => assert!(!wears_glass(0.0), "{tag}: not even an empty label keeps it"),
+        }
+    }
 }
 
 /// **The six-pill strip fits in every shipped language** without scrolling, and the fully unfurled
@@ -501,17 +564,25 @@ fn the_full_strip_fits_every_language_and_leaves_an_ordinary_chip_name_room() {
     use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
     let measure = plx_base::fontcov::advances::ShippedMeasure;
     let mut room = Vec::new();
-    for language in SHIPPED {
-        let _guard = language_on_this_thread_for_test(language);
-        let widths = tab_widths(&full_strip_faces(), &measure);
-        let tag = language.tag();
-        assert!(tab_content_w(&widths) <= TAB_VIEW_MAX, "{tag}: {} past the viewport", tab_content_w(&widths));
-        for stop in 0..widths.len() {
-            assert_eq!(tab_scroll_target(&widths, stop, 0.0), 0.0, "{tag}: stop {stop} scrolls the strip");
+    // Once with the translated type word, once with a 40-plus character library title on the pill:
+    // the title is elided to what the strip leaves, so the chip's room must not move.
+    let title = "Family videos from the summers at the lake";
+    assert!(title.chars().count() > 40);
+    for with_title in [false, true] {
+        for language in SHIPPED {
+            let _guard = language_on_this_thread_for_test(language);
+            let mut faces = full_strip_faces();
+            if with_title {
+                assert!(fit_title_face(&mut faces, 3, title, &measure), "{}: the title has room", language.tag());
+            }
+            let widths = tab_widths(&faces, &measure);
+            let tag = language.tag();
+            assert!(tab_content_w(&widths) <= TAB_VIEW_MAX, "{tag}: {} past the viewport", tab_content_w(&widths));
+            for stop in 0..widths.len() {
+                assert_eq!(tab_scroll_target(&widths, stop, 0.0), 0.0, "{tag}: stop {stop} scrolls the strip");
+            }
+            room.push((tag, tab_chip_clearance(&widths)));
         }
-        let track_x = (crate::consts::SCR_W - tab_track_w(&widths)) * 0.5;
-        let chip_end_without_name = chip_cap(1.0, 0.0).x + chip_cap(1.0, 0.0).w;
-        room.push((tag, track_x - chip_end_without_name));
     }
     // Measured with the TV's glyph advances: 294 px in Russian (the tightest), 326 in English, so a
     // name of up to 290 px clears the track in every language and English never overlaps at all

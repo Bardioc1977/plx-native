@@ -124,6 +124,14 @@ impl ChromeSnapshot {
                 widgets::TAB_KEY_WATCHLIST => TabFace::Icon(Icon::Bookmark),
                 _ => TabFace::Icon(Icon::Search),
             }).collect();
+            // The Other Videos pill names its library when it is the only one; the translated type
+            // word is already in the face, and stays when the title cannot be used.
+            if let (Some(at), Some(title)) = (
+                self.keys.iter().position(|&key| key == widgets::TAB_KEY_VIDEOS),
+                directory.tab_library_title(SecKind::Video),
+            ) {
+                widgets::fit_title_face(&mut self.faces, at, title, measure);
+            }
             self.widths = widgets::tab_widths(&self.faces, measure);
             self.tabs_generation = Some(generation);
         }
@@ -286,7 +294,8 @@ mod tests {
             TabFace::Label(word) => Some(word.as_str()),
             TabFace::Icon(_) => None,
         }).collect();
-        assert_eq!(words, ["Home", "Movies", "TV Shows", "Other Videos"]);
+        // the fixture's one Other Videos library is titled "Library 2", and the only one names its pill
+        assert_eq!(words, ["Home", "Movies", "TV Shows", "Library 2"]);
 
         let no_shows = directory(&[SecKind::Movie, SecKind::Video]);
         assert_eq!(strip_keys(no_shows.view()), vec![widgets::TAB_KEY_HOME, widgets::TAB_KEY_MOVIES,
@@ -445,7 +454,11 @@ mod tests {
             assert!(title.starts_with(face.trim_end_matches('\u{2026}')), "it is a prefix of the title: {face:?}");
             assert!(face.chars().count() > 8, "most of the room is used, not just a stub: {face:?}");
             let w = text_w(&face);
-            assert!(w <= 240.0, "{face:?} is {w} px of text, over the 240 px cap");
+            assert!(w <= widgets::TAB_TITLE_MAX, "{face:?} is {w} px of text, over the {} px cap", widgets::TAB_TITLE_MAX);
+            let snapshot = strip(&libraries(&[(SecKind::Movie, "Movies", true), (SecKind::Show, "TV Shows", true),
+                (SecKind::Video, title, true)]));
+            assert!(widgets::tab_chip_clearance(&snapshot.widths) >= widgets::TAB_TITLE_ROOM,
+                "the unfurled chip keeps its room for an ordinary name beside the strip");
         }
 
         #[test]

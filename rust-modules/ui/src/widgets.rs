@@ -7324,11 +7324,17 @@ const CHIP_CAP_MAX_R: f32 = CHIP_CAP_MAX.x + CHIP_CAP_MAX.w;
 /// source-pass note measures from the other direction. Nothing in the shader can undo that, so the
 /// geometry has to keep them apart, and the test below is what keeps them apart.
 ///
-/// What it costs is stated plainly: the product's strip of two types is 648px against this limit
-/// of 672, so the material survives a household of Movies and TV Shows and NOT a third type: any
-/// further pill, even a bare 60px mark, makes it 724 and flat (Other Videos is that pill:
-/// `a_strip_with_a_third_type_pill_is_flat_by_the_budget`). What it buys is that the band is never
-/// two materials and never a doubled one, and never over the budget a measurement set.
+/// What it costs is stated plainly, and it depends on the UI language: on the shipped font's
+/// advances (a model of the television's text, `ShippedMeasure`, not a television measurement) the
+/// strip of two types is 621 px in English and 529-679 px across the shipped languages against
+/// this limit of 672.3, so the material survives a household of Movies and TV Shows in eight of the
+/// nine and Belarusian is flat already. An Other Videos pill whose label is the translated type
+/// word (136-197 px of text) is flat in every language
+/// (`the_translated_other_videos_pill_is_flat_in_every_language`); a library TITLE keeps the glass
+/// only if its text is at most 91 px in German, 71 Portuguese, 65 Italian, 59 French, 38 Spanish
+/// (never in English, Hungarian, Russian or Belarusian), pinned by
+/// `a_library_title_keeps_the_glass_only_where_the_track_has_room`. What it buys is that the band
+/// is never two materials and never a doubled one, and never over the budget a measurement set.
 const GLASS_TRACK_MAX: f32 = if GLASS_TRACK_TOUCH_MAX < GLASS_TRACK_BUDGET_MAX {
     GLASS_TRACK_TOUCH_MAX
 } else {
@@ -7455,6 +7461,123 @@ fn tab_metrics_from(faces: &[TabFace], measure: impl Fn(&std::ffi::CStr) -> f32)
 /// input geometry; the capability keeps host fixtures independent of a loaded SDL font.
 pub fn tab_widths(faces: &[TabFace], measure: &dyn plx_machine::machine::Measure) -> Vec<f32> {
     tab_metrics_from(faces, |word| measure.width(word, theme::size::BODY, true)).1
+}
+
+/// **The chip name width every shipped language must keep clear of the strip** while the profile
+/// chip is unfurled: the strip's left end stays at least this far from the end of the capsule
+/// (`chip_cap(1.0, 0.0)`). It is the room the shipped six-pill strip already leaves in every
+/// language (Russian 294 px is the tightest), pinned by
+/// `the_full_strip_fits_every_language_and_leaves_an_ordinary_chip_name_room`, and a library
+/// title that names a pill is budgeted against it rather than against a free constant.
+pub const TAB_TITLE_ROOM: f32 = 290.0;
+/// The most text a library title may take on its pill, whatever room the strip has left, so a
+/// wide-open language does not draw a long pill for a long name.
+pub const TAB_TITLE_MAX: f32 = 240.0;
+/// Below this much text room (about four letters and the ellipsis) a title is not used at all and
+/// the pill keeps its translated type word.
+pub const TAB_TITLE_FLOOR: f32 = 60.0;
+/// The most characters of a library title that are measured at all, so a hostile name bounds the
+/// elision's binary search.
+const TAB_TITLE_CHARS: usize = 128;
+/// The strip's content width that still leaves [`TAB_TITLE_ROOM`] to the unfurled chip: the track
+/// is centred, so `SCR_W - 2 * (chip end + TAB_TRACK_PAD + TAB_TITLE_ROOM)`, 904 px at 1920.
+const TAB_VIEW_FOR_ROOM: f32 = crate::consts::SCR_W
+    - 2.0 * (chip_cap(1.0, 0.0).x + chip_cap(1.0, 0.0).w + TAB_TRACK_PAD + TAB_TITLE_ROOM);
+
+/// **How far the centred strip stays from the fully unfurled chip's capsule** (`chip_cap(1.0, 0.0)`,
+/// the capsule with no name): a name of up to this many px clears the strip's left end. Every
+/// shipped language keeps at least [`TAB_TITLE_ROOM`]; the one expression the glass-budget test
+/// and the chrome tests grade it with.
+pub fn tab_chip_clearance(widths: &[f32]) -> f32 {
+    let cap = chip_cap(1.0, 0.0);
+    (crate::consts::SCR_W - tab_track_w(widths)) * 0.5 - (cap.x + cap.w)
+}
+
+/// **The text room a library title has on its pill:** what [`TAB_VIEW_FOR_ROOM`] leaves after the
+/// other `faces - 1` pills (`others_w` in all) and the gaps between all `faces` of them, less the
+/// title pill's own padding, at most [`TAB_TITLE_MAX`]. `None` below [`TAB_TITLE_FLOOR`], which
+/// includes every non-positive remainder: `elide_by` answers its input UNCHANGED for a budget of
+/// zero or less, so a crowded strip must never reach it with one. `None` means "use the type word".
+fn title_budget(others_w: f32, faces: usize) -> Option<f32> {
+    let gaps = faces.saturating_sub(1) as f32 * TAB_GAP;
+    let room = TAB_VIEW_FOR_ROOM - others_w - gaps - 2.0 * TAB_PILL_PAD;
+    (room >= TAB_TITLE_FLOOR).then_some(room.min(TAB_TITLE_MAX))
+}
+
+/// A server-supplied title made fit to draw on a pill: control characters (NUL included, which
+/// would otherwise blank the pill, `CString` refusing it) become spaces, format characters that
+/// draw nothing are dropped, runs of white space are one space, the ends are trimmed, and at most
+/// [`TAB_TITLE_CHARS`] characters are kept. Empty when nothing visible is left.
+///
+/// The format characters are an explicit list (no `icu_properties` in `Cargo.lock`): the soft
+/// hyphen, the zero-width and bidi marks U+200B-U+200F, U+202A-U+202E, U+2060-U+2064 and
+/// U+2066-U+206F, and the byte-order mark.
+fn clean_title(raw: &str) -> String {
+    let mut out = String::new();
+    let (mut gap, mut kept) = (false, 0usize);
+    for ch in raw.chars() {
+        if matches!(ch, '\u{AD}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}')
+        {
+            continue;
+        }
+        if ch.is_whitespace() || ch.is_control() {
+            gap = !out.is_empty();
+            continue;
+        }
+        let need = usize::from(gap) + 1;
+        if kept + need > TAB_TITLE_CHARS {
+            break;
+        }
+        if gap {
+            out.push(' ');
+            gap = false;
+        }
+        out.push(ch);
+        kept += need;
+    }
+    out
+}
+
+/// **Put a library's own title on the pill at `index`**, replacing the type word it holds, when it
+/// can: the cleaned title is not empty, no OTHER label pill says the same (a Unicode-lowercase
+/// comparison, so `ФИЛЬМЫ` is `Фильмы`: two identical pills would be one destination twice), and
+/// the strip leaves it at least [`TAB_TITLE_FLOOR`] of text ([`title_budget`]). It is then elided
+/// by character with the same measure and size [`tab_widths`] lays the strip out with, so the
+/// width the strip draws is the width the title was fitted to. Returns whether the title was used;
+/// on `false` the face is untouched and keeps the translated word, which is app text and is never
+/// elided.
+///
+/// Elision is by `char`: it never splits a UTF-8 scalar, but it can cut a base letter from a
+/// following combining mark or inside an emoji sequence (no grapheme segmenter without a new
+/// crate); what remains is a plain prefix and the ellipsis. Arabic and Hebrew have no glyph in
+/// any shipped face (upstream #760), here as in the Sources panel.
+pub fn fit_title_face(faces: &mut [TabFace], index: usize, title: &str,
+    measure: &dyn plx_machine::machine::Measure) -> bool {
+    let title = clean_title(title);
+    if title.is_empty() || index >= faces.len() {
+        return false;
+    }
+    let lowered = title.to_lowercase();
+    let collides = faces.iter().enumerate().any(|(i, face)| {
+        i != index && matches!(face, TabFace::Label(other) if other.to_lowercase() == lowered)
+    });
+    if collides {
+        return false;
+    }
+    let others_w: f32 = faces.iter().enumerate().filter(|&(i, _)| i != index)
+        .map(|(_, face)| tab_widths(std::slice::from_ref(face), measure)[0]).sum();
+    let Some(budget) = title_budget(others_w, faces.len()) else {
+        return false;
+    };
+    let fitted = plx_gfx::text::elide_by(&title, budget, false, |t| {
+        measure.width_str(t, theme::size::BODY, true)
+    });
+    if fitted == "\u{2026}" {
+        return false;
+    }
+    faces[index] = TabFace::Label(fitted);
+    true
 }
 
 /// Publish control geometry from the strip's actual scroll and its current destination. Keys
@@ -9218,6 +9341,10 @@ mod strip_key_tests;
 #[cfg(test)]
 #[path = "widgets_glass_budget_tests.rs"]
 mod glass_budget_tests;
+
+#[cfg(test)]
+#[path = "widgets_tab_title_tests.rs"]
+mod tab_title_tests;
 
 #[cfg(test)]
 #[path = "widgets_tab_capsule_motion_tests.rs"]
