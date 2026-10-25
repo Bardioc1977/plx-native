@@ -540,6 +540,7 @@ pub enum SecFetch {
     Failed,
 }
 
+pub mod filters;
 mod letters;
 pub mod listing_jobs;
 pub mod record;
@@ -4233,6 +4234,9 @@ mod reachability_tests;
 
 #[cfg(test)]
 mod library_type_tests;
+
+#[cfg(test)]
+mod filters_tests;
 
 #[cfg(test)]
 mod listing_job_tests;
