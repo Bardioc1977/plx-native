@@ -1413,3 +1413,40 @@ fn activating_a_deck_episode_seeds_the_show_page_on_its_season_and_a_discovery_o
         assert_eq!((seed.rk.as_str(), seed.spot.season), (rk, season), "from_deck {from_deck}");
     }
 }
+
+/// **The press the episode page's Go to Show disc emits lands on the SHOW's page, on the episode's
+/// season** (issue #879). The disc sends the item menu's own `Action::GoToShow(show_rk, season)`
+/// through `AppFx::ItemMenu` -> `apply_item_action`; this pins what the application does with it,
+/// the half of the route the screen cannot see: the seed (`open_detail` writes it in the call, before
+/// any frame spends it) and the destination.
+#[test]
+fn go_to_show_seeds_the_show_page_on_the_episodes_season() {
+    use plx_screens::item_menu::Action;
+    let _g = plx_base::testlock::serial();
+    let mut ps = plx_media::route::PlaybackSession::default();
+    let mt = unsafe { plx_base::task::MainThread::assume() };
+    let mut pa = plx_media::player::adapter::PlayerAdapter::new(mt);
+    let mut wait = None;
+    let sid = plx_plex::plex::ServerId::from_raw(1);
+
+    for (season, want) in [(3, Some(3)), (0, None)] {
+        let mut d = Dispatcher::<AppHost>::new();
+        let mut rig = Bridge::for_test(|| 0);
+        frame(&mut d, &mut rig, AppArg::Home, tick(0), vec![]);
+        unsafe {
+            crate::app::input::apply_item_action(
+                &mut ps, &mut pa,
+                plx_screens::registry::ItemMenuReq { act: Action::GoToShow("show-7".into(), season), sid,
+                    item: None, season: None, loaded_episode: false, from_home: false },
+                &mut d, &mut rig, &mut crate::app::playback::LivePlaybackResources, &mut wait, 0,
+            );
+        }
+        let seed = rig.mounter.seed.take().expect("the show's page was opened");
+        assert_eq!((seed.sid, seed.rk.as_str(), seed.spot.season), (sid, "show-7", want), "season {season}");
+        // the frame commits the push: the show's page, on the episode's server, is on top
+        frame(&mut d, &mut rig, AppArg::Home, tick(1), vec![]);
+        assert!(d.top_arg().is_some_and(|top| top.same_instance(
+            &AppArg::Content(ContentArg::Detail { sid, rk: "show-7".into() }))),
+            "season {season}: the show on the episode's server is the page on top");
+    }
+}

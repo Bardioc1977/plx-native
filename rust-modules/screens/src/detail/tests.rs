@@ -4992,6 +4992,57 @@ fn the_bookmark_disc_press_emits_the_item_menu_write() {
     assert_eq!(item_menu_acts(&fx), vec![crate::registry::ItemMenuAction::WatchlistRemove(WL_GUID.into())]);
 }
 
+// ---- the Go to Show disc on an episode's page (issue #879) -----------------------------------
+
+/// The Go to Show disc's elem id (`hero::ELEM_GO_SHOW`).
+const GO_SHOW_ELEM: u32 = 8;
+
+fn episode_of(sid: ServerId, show_rk: &str, season: i64) -> Detail {
+    Detail {
+        sid,
+        rk: "ep-5".into(),
+        kind: "episode".into(),
+        title: "Episode".into(),
+        show_rk: show_rk.into(),
+        show_title: "Show".into(),
+        season,
+        index: 5,
+        part: "/library/parts/ep-5".into(),
+        ..Default::default()
+    }
+}
+
+/// OK on an episode page's Go to Show disc asks the application for the item menu's own
+/// `GoToShow(show_rk, season)` on the episode's server, which opens the show on the episode's
+/// season. Nothing else presses it: a page that names no show, a movie, and a show have no such
+/// disc (the elem presses nothing). A page with no season number sends 0, the show's own default.
+#[test]
+fn an_episode_page_go_to_show_press_asks_for_the_shows_season() {
+    let sid = ServerId::from_raw(1);
+    let press = |d: Detail| {
+        let rk = d.rk.clone();
+        let _guard = install(d);
+        let mut screen = bare(&_guard, sid, &rk);
+        let (_, fx) = step(&mut screen, &ScreenEvent::Activate(GO_SHOW_ELEM), Some(GO_SHOW_ELEM));
+        let reqs: Vec<_> = fx.iter().filter_map(|e| match &e.fx {
+            Fx::App(AppFx::ItemMenu(req)) => Some((req.act.clone(), req.sid)),
+            _ => None,
+        }).collect();
+        clear();
+        reqs
+    };
+    assert_eq!(press(episode_of(sid, "show-7", 3)),
+        vec![(crate::registry::ItemMenuAction::GoToShow("show-7".into(), 3), sid)]);
+    assert_eq!(press(episode_of(sid, "show-7", 0)),
+        vec![(crate::registry::ItemMenuAction::GoToShow("show-7".into(), 0), sid)],
+        "no season number: the show's own default season");
+    assert_eq!(press(episode_of(sid, "", 3)), vec![], "an episode that names no show has nowhere to go");
+    assert_eq!(press(Detail { sid, rk: "ep-5".into(), kind: "movie".into(), show_rk: "show-7".into(), ..Default::default() }),
+        vec![], "a movie has no show");
+    assert_eq!(press(Detail { sid, rk: "ep-5".into(), is_show: true, kind: "show".into(), show_rk: "show-7".into(), ..Default::default() }),
+        vec![], "a show page is already the show");
+}
+
 /// The first membership answer is the disc's rest face: no fill/ribbon flip plays on open. A later
 /// change from a known face does animate.
 #[test]
