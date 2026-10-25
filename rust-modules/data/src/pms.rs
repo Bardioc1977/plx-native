@@ -58,6 +58,24 @@ pub fn listable(type_str: &str) -> bool {
     matches!(type_str, "movie" | "show" | "season" | "episode")
 }
 
+/// Whether a whole-server hub of this TYPE may become a Home row. The hub's type is the server's
+/// grouping word, not what its cards are: an Other Videos library's `home.videos.recent` is a hub of
+/// type `clip` whose items are `movie` rows of subtype `clip` (measured, PMS 1.43.5). The cards are
+/// admitted by [`shelf_card`] on the ITEM type, which still refuses a `clip`-typed extra, so a hub
+/// of trailers is an empty row and is dropped. Music and photo hubs stay out.
+fn hub_listable(hub_type: &str) -> bool {
+    hub_type == "mixed" || hub_type == "clip" || listable(hub_type)
+}
+
+/// Whether a hub is a library of personal videos' own row, by its locale-independent id: the
+/// whole-server `home.videos.*` family and a section's `video.*` family (`video.recent.<id>`,
+/// `video.inprogress.<id>`). Such a row is a Home row but never a billboard: a hero is a title worth
+/// leading Home with, and a home clip is not (the hero pool and the refresh's hero allowance both
+/// read this ONE predicate).
+fn personal_video_hub(hub_id: &str) -> bool {
+    hub_id.starts_with("home.videos.") || hub_id.starts_with("video.")
+}
+
 /// Items asked of each hub endpoint, per source. `/hubs?count=` is items-per-hub, so this bounds
 /// a shelf, never the number of shelves.
 pub(crate) const HUB_FETCH_COUNT: i64 = 12;
@@ -1982,7 +2000,7 @@ impl<'a> Projection<'a> {
     fn keeps(&mut self, shelf: &Shelf) -> bool {
         let Some(held) = self.held else { return true };
         if held.iter().any(|(id, key)| shelf.is(id, key)) { return true; }
-        if shelf.hub_id.contains("recent") && self.hero_left > 0 {
+        if shelf.hub_id.contains("recent") && !personal_video_hub(&shelf.hub_id) && self.hero_left > 0 {
             let eligible = shelf.items.iter().filter(|m| !m.art.is_empty() && m.kind != 2).count();
             self.hero_left = self.hero_left.saturating_sub(eligible);
             return true;
@@ -1999,7 +2017,7 @@ impl<'a> Projection<'a> {
         for hub in hubs { *self.counts.entry(hub.hub_identifier.clone()).or_insert(0) += 1; }
         let mut window = Vec::new();
         for hub in hubs {
-            if hub.kind != "mixed" && !listable(&hub.kind) {
+            if !hub_listable(&hub.kind) {
                 continue;
             }
             if hub.hub_identifier == "home.continue" || hub.hub_identifier == "home.ondeck" {
@@ -2295,7 +2313,8 @@ fn merge_with_scope(srcs: &[Src], scope: &BrowseScope) -> HubBuild {
         // Match on the locale-independent hubIdentifier, not the localized display title:
         // "home.continue" plus every Recently Added variant (home.movies.recent,
         // home.television.recent, promoted <type>.recentlyadded.<id>) all carry "recent".
-        let eligible = hub.hub_id == "home.continue" || hub.hub_id.contains("recent");
+        let eligible = (hub.hub_id == "home.continue" || hub.hub_id.contains("recent"))
+            && !personal_video_hub(&hub.hub_id);
         if !eligible {
             continue;
         }
