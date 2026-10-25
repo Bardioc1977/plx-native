@@ -36,7 +36,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Directory {
     /// `/library/sections/{key}/genre`: the Filter menu's genre list.
-    Genres,
+    Values,
     /// `/library/sections/{key}/firstCharacter`: the A-Z rail's letters and their counts.
     Letters,
 }
@@ -45,28 +45,28 @@ impl Directory {
     /// The directory's name on the wire.
     fn wire(self) -> &'static str {
         match self {
-            Self::Genres => "genre",
+            Self::Values => "genre",
             Self::Letters => "firstCharacter",
         }
     }
 
     pub(super) fn busy(self, adapter: &super::BrowseAdapter) -> bool {
         match self {
-            Self::Genres => adapter.genres.busy(),
+            Self::Values => adapter.genres.busy(),
             Self::Letters => adapter.letters.busy(),
         }
     }
 
     pub(super) fn claim(self, adapter: &super::BrowseAdapter, id: u32) {
         match self {
-            Self::Genres => adapter.genres.claim(id),
+            Self::Values => adapter.genres.claim(id),
             Self::Letters => adapter.letters.claim(id),
         }
     }
 
     fn refuse_for(self, adapter: &super::BrowseAdapter, id: u32) {
         match self {
-            Self::Genres => adapter.genres.refuse_for(id),
+            Self::Values => adapter.genres.refuse_for(id),
             Self::Letters => adapter.letters.refuse_for(id),
         }
     }
@@ -104,6 +104,16 @@ impl BrowseDirectoryReq {
     /// The server to ask and the client the step decided to ask it through.
     pub fn server(&self) -> (ServerId, ClientKey) {
         (self.sid, self.key)
+    }
+    /// STUB (red commit): the facet a value read asks for.
+    #[cfg(test)]
+    pub(super) fn facet(&self) -> Option<&str> {
+        None
+    }
+    /// STUB: the first row of the window.
+    #[cfg(test)]
+    pub(super) fn start(&self) -> usize {
+        0
     }
 }
 
@@ -171,11 +181,21 @@ pub(super) fn listing_addr(id: u32) -> Addr {
     Addr { to: MachineId::Store(crate::stores::StoreId::Browse.ord()), req: RequestId(id) }
 }
 
+/// What a value read asked for (STUB in the red commit; inert).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ValuesAsk {
+    pub(super) facet: String,
+    pub(super) start: usize,
+    pub(super) size: usize,
+    pub(super) generation: u32,
+    pub(super) total: Option<i64>,
+}
+
 impl BrowseDirectoryReq {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(sid: ServerId, key: ClientKey, epoch: u32, sec: usize, section: i64,
         library_type: LibraryType, filters: Vec<(String, String)>, letters: Option<LettersKey>,
-        which: Directory) -> Self {
+        which: Directory, _values: Option<ValuesAsk>) -> Self {
         Self { sid, key, epoch, sec, section, library_type, filters, letters, which }
     }
 }
@@ -197,7 +217,7 @@ fn finish_directory_with(port: &BrowseDirectoryPort, addr: Addr, client: &'stati
     req: BrowseDirectoryReq, read: impl FnOnce() -> Option<MediaContainer>) {
     let BrowseDirectoryReq { key, epoch, sec, library_type, letters, which, .. } = req;
     let answer = match which {
-        Directory::Genres => {
+        Directory::Values => {
             let list = directory_list(read, genre_entry);
             DirectoryAnswer::Genres(DirectoryResult {
                 epoch, sec, client, token_gen: key.token, library_type, ok: list.is_some(),
@@ -337,3 +357,7 @@ fn finish_page_with(port: &BrowsePagePort, addr: Addr, client: &'static Client, 
 #[cfg(test)]
 #[path = "listing_jobs_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "values_job_tests.rs"]
+mod values_tests;

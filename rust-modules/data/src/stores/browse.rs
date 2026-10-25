@@ -168,7 +168,7 @@ impl BrowseStore {
                 | LibraryWork::Requery, ..
         }) || matches!(&cmd, BrowseCmd::ApplyView { edit: ViewEdit::Facts { .. } | ViewEdit::Offset { .. }, .. });
         let quiet = matches!(&cmd, BrowseCmd::Addressed {
-            work: LibraryWork::Want { .. } | LibraryWork::Letters | LibraryWork::Genres | LibraryWork::HubPage { .. } | LibraryWork::HubPageCancel { .. }, ..
+            work: LibraryWork::Want { .. } | LibraryWork::Letters | LibraryWork::Genres | LibraryWork::Values { .. } | LibraryWork::HubPage { .. } | LibraryWork::HubPageCancel { .. }, ..
         });
         let roster_changed = if matches!(&cmd, BrowseCmd::RecheckShares) {
             self.sync_roster()
@@ -636,6 +636,12 @@ pub enum LibraryWork {
     },
     Letters,
     Genres,
+    /// The next page(s) of facet `facet`'s value list, until `want_rows` rows have landed (or the
+    /// list is complete). Idempotent: the picker sends it on every tick. STUB (red commit): ignored.
+    Values {
+        facet: String,
+        want_rows: usize,
+    },
     Hubs {
         may_publish: bool,
     },

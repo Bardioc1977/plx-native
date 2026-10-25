@@ -100,7 +100,7 @@ fn tick_directory_without_keys(browse: &mut TestBrowse, sid: plx_plex::plex::Ser
 /// Is the refusal of directory request `id` still on the adapter, unconsumed? (Consumes it if so.)
 fn directory_refusal_pending(browse: &TestBrowse, which: Directory, id: u32) -> bool {
     match which {
-        Directory::Genres => browse.adapter.genres.take_refused(id),
+        Directory::Values => browse.adapter.genres.take_refused(id),
         Directory::Letters => browse.adapter.letters.take_refused(id),
     }
 }
@@ -165,7 +165,7 @@ fn a_refused_page_is_asked_for_again_at_the_same_offset() {
 /// with the client back under a new key, asks again with THAT key.
 #[test]
 fn a_refused_directory_job_is_settled_by_the_next_step_and_the_one_after_asks_again_with_the_new_key() {
-    for (which, work) in [(Directory::Genres, LibraryWork::Genres), (Directory::Letters, LibraryWork::Letters)] {
+    for (which, work) in [(Directory::Values, LibraryWork::Genres), (Directory::Letters, LibraryWork::Letters)] {
         let _g = plx_base::testlock::serial();
         let (_cleanup, mut browse, sid, client) = loopback_page_source();
         let first = ClientKey::of(client);
@@ -207,7 +207,7 @@ fn a_refused_genre_read_leaves_the_letters_read_in_flight() {
     let StoreJob::BrowseDirectory(genres, port) = &jobs[0] else { panic!("genres first") };
     port.refused(genres.addr);
 
-    assert!(!Directory::Genres.busy(&browse.adapter), "the refused read gave its claim back");
+    assert!(!Directory::Values.busy(&browse.adapter), "the refused read gave its claim back");
     assert!(Directory::Letters.busy(&browse.adapter), "the other read is still out");
 }
 

@@ -543,6 +543,7 @@ pub mod listing_jobs;
 pub mod record;
 mod saved_view;
 pub mod section_hubs;
+pub mod values;
 pub mod view;
 
 /// A tier-three application bookmark, frozen only at navigation boundaries. It is not
@@ -590,6 +591,11 @@ struct SecState {
     /// can be told from one not yet read.
     facets: Arc<Vec<plx_plex::plex::Facet>>,
     facets_known: bool,
+    /// STUB (red commit of the value-list job): the value lists kept, most recently opened first.
+    #[allow(dead_code)]
+    values: Vec<(String, Arc<values::ValueList>)>,
+    #[allow(dead_code)]
+    values_gen: u32,
     // menus (kept across re-queries)
     sorts: Arc<Vec<SortEntry>>,
     genres: Arc<Vec<GenreEntry>>,
@@ -822,6 +828,8 @@ impl Default for SecState {
             filters: Arc::default(),
             facets: Arc::default(),
             facets_known: false,
+            values: Vec::new(),
+            values_gen: 0,
             sorts: Arc::default(),
             genres: Arc::default(),
             genres_done: false,
@@ -851,6 +859,16 @@ impl SecState {
             && (self.unwatched
                 || filters::FILTERS_DEPENDING_ON_VIEWING.iter().any(|facet| self.filters.get(facet).is_some())))
             || self.sorts.get(self.sort_idx).is_some_and(|sort| sort.key == "lastViewedAt")
+    }
+    /// STUB: has the genre list landed.
+    #[allow(dead_code)]
+    fn genres_done(&self) -> bool {
+        self.genres_done
+    }
+    /// STUB: the landed list of `facet`.
+    #[allow(dead_code)]
+    fn value_list(&self, _facet: &str) -> Option<&Arc<values::ValueList>> {
+        None
     }
     /// The genre filter, the first value of the `genre` term.
     fn genre(&self) -> Option<&GenreEntry> {
@@ -1763,7 +1781,7 @@ impl BrowseState {
         // Genres are asked once per listing type; the letters are asked whenever the list on hand
         // does not describe the grid ([`SecState::letters_owed`]).
         let owed = self.cur_state().map(|state| match which {
-            listing_jobs::Directory::Genres => !state.genres_done,
+            listing_jobs::Directory::Values => !state.genres_done,
             listing_jobs::Directory::Letters => state.letters_owed(),
         });
         if self.states.get(current).is_none() || !owed.unwrap_or(false) {
@@ -1785,11 +1803,11 @@ impl BrowseState {
         // The letters are asked with the terms the grid's pages are, from the same source, and keyed
         // by them; the genre list is scoped by the listing's type alone.
         let (filters, letters) = match which {
-            listing_jobs::Directory::Genres => (library_type.type_terms(kind), None),
+            listing_jobs::Directory::Values => (library_type.type_terms(kind), None),
             listing_jobs::Directory::Letters => (state.query_filters(kind), Some(state.letters_key())),
         };
         let id = match which {
-            listing_jobs::Directory::Genres => &mut self.genres_req,
+            listing_jobs::Directory::Values => &mut self.genres_req,
             listing_jobs::Directory::Letters => &mut self.letters_req,
         };
         *id = id.wrapping_add(1);
@@ -1799,7 +1817,7 @@ impl BrowseState {
             plx_machine::job::Job {
                 addr: listing_jobs::listing_addr(id),
                 req: listing_jobs::BrowseDirectoryReq::new(
-                    sid, key, self.table_epoch(), current, section, library_type, filters, letters, which),
+                    sid, key, self.table_epoch(), current, section, library_type, filters, letters, which, None),
             },
             listing_jobs::BrowseDirectoryPort::of(adapter, which),
         ));
@@ -1821,7 +1839,7 @@ impl BrowseState {
     }
     fn kick_genres(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
         jobs: &mut Vec<crate::stores::StoreJob>) {
-        self.kick_directory(adapter, keys, jobs, listing_jobs::Directory::Genres);
+        self.kick_directory(adapter, keys, jobs, listing_jobs::Directory::Values);
     }
     fn kick_letters(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
         jobs: &mut Vec<crate::stores::StoreJob>) {
@@ -1913,6 +1931,7 @@ impl BrowseState {
                     LibraryWork::Want { lo, hi, focus } => self.want(lo, hi, focus),
                     LibraryWork::Letters => self.kick_letters(adapter, keys, jobs),
                     LibraryWork::Genres => self.kick_genres(adapter, keys, jobs),
+                    LibraryWork::Values { .. } => {}
                     LibraryWork::Retry => self.retry_cur_source(),
                     LibraryWork::Requery => {
                         self.requery_stale();
