@@ -546,16 +546,22 @@ class FacetValues(unittest.TestCase):
         rated = values(self.pms, 1, "contentRating")
         self.assertIn("Not%20Rated", [r["key"] for r in rated])
         self.assertIn(movies[0]["ratingKey"], listing_keys(self.pms, 1, "contentRating=Not%20Rated"))
-        self.assertEqual(listing_keys(self.pms, 1, "contentRating=Not%2520Rated"), [],
-                         "a key encoded again matches nothing")
+        # PMS reads the value after the HTTP decode AND once more (measured on 1.43.5: one extra
+        # encoding of `Not%20Rated` still matches, two do not).
+        self.assertIn(movies[0]["ratingKey"], listing_keys(self.pms, 1, "contentRating=Not%2520Rated"))
+        self.assertEqual(listing_keys(self.pms, 1, "contentRating=Not%252520Rated"), [])
         studios = [r["key"] for r in values(self.pms, 1, "studio")]
         self.assertIn("X%2520Y", studios, "a studio key is a name encoded twice")
         self.assertEqual(listing_keys(self.pms, 1, "studio=X%2520Y"), [movies[1]["ratingKey"]])
-        self.assertEqual(listing_keys(self.pms, 1, "studio=X%252520Y"), [])
+        self.assertEqual(listing_keys(self.pms, 1, "studio=X%20Y"), [movies[1]["ratingKey"]],
+                         "the key decoded once matches as well")
+        self.assertEqual(listing_keys(self.pms, 1, "studio=X%252520Y"), [], "a key encoded again matches nothing")
         layouts = [r["key"] for r in values(self.pms, 1, "audioLayout")]
         self.assertIn("5%2E1", layouts)
         self.assertTrue(listing_keys(self.pms, 1, "audioLayout=5%2E1"))
-        self.assertEqual(listing_keys(self.pms, 1, "audioLayout=5%252E1"), [])
+        self.assertEqual(listing_keys(self.pms, 1, "audioLayout=5%2E1"), listing_keys(self.pms, 1, "audioLayout=5.1"))
+        self.assertEqual(listing_keys(self.pms, 1, "audioLayout=5%252E1"), [],
+                         "the layout is compared after the HTTP decode only")
 
     def test_a_single_encoded_comma_splits_and_a_double_encoded_one_does_not(self):
         """PMS decodes twice: `%2C` is the separator after the first decode, `%252C` a literal comma."""
@@ -696,7 +702,7 @@ class FacetsAndTheRail(unittest.TestCase):
         everything = self.check(pms, 1, "")
         for terms in ("resolution=4k", "hdr=1", "dovi=1", "atmos=1", "inProgress=1", "unmatched=1",
                       f"genre={genres[0]},{genres[1]}", f"genre!={genres[0]}", "year%3E%3E=2000",
-                      "audioLayout=5%2E1", "contentRating=PG-13",
+                      "audioLayout=5%2E1", "videoCodec=hevc", "audioLanguage=de", "subtitleLanguage=fr",
                       f"genre={genres[0]},{genres[1]}&resolution=4k&hdr=1"):
             with self.subTest(terms=terms):
                 self.assertLess(self.check(pms, 1, terms), everything)
@@ -704,7 +710,7 @@ class FacetsAndTheRail(unittest.TestCase):
 
     def test_shows_and_episodes_follow_their_own_facets(self):
         pms = MockPms(Library(movies=0, rail_fixture=True))
-        for terms, base in (("type=2&hdr=1", "type=2"), ("type=2&unmatched=1", "type=2"),
+        for terms, base in (("type=2&unmatched=1", "type=2"),
                             ("type=4&hdr=1", "type=4"), ("type=4&unwatched=1", "type=4"),
                             ("type=4&resolution=4k", "type=4")):
             with self.subTest(terms=terms):

@@ -75,9 +75,19 @@ part-way through, which is also the newest Continue Watching entry; 970002 has 3
 `OnDeck`. `OnDeck` rides `/library/metadata/<show>?includeOnDeck=1`, as one object, like PMS's.
 Boot with `plxnative-detail=970001` (or `970002`), or onto Home for the Continue Watching card.
 
+Library filters (`docs/library-filters-spec.md`): `includeMeta=1` carries the server's `Filter[]` per
+listing type (movie 28 facets, show 15, season none, episode 17, as measured on PMS 1.43.5), and
+`/library/sections/<k>/<facet>` answers a facet's value list, paged like a listing, scoped by the terms
+sent with it, with the server's already percent-encoded keys. Terms compose as PMS composes them (comma
+OR, AND across facets and repeats, `!=`, `>>=`, `<<=`, a value decoded twice). The facets the generated
+items have no field for (resolution, HDR flavours, codecs, layout, languages, unmatched) are derived from
+the ratingKey alone, so no generated item moves; `--people N` sizes the people pool, which sets how long
+the actor and director lists get.
+
     python3 tests/mock_pms.py --port 32499              # serve until Ctrl-C
     python3 tests/mock_pms.py --port 32499 --selftest   # prove the shapes without an app
     python3 tests/mock_pms.py --port 32499 --movies 321 --rail-fixture  # multi-page A–Z rail
+    python3 tests/mock_pms.py --port 32499 --movies 120 --people 300    # filter lists that page
     python3 tests/mock_pms.py --host 0.0.0.0 --media /path/to/mockverify  # account-free TV set
 
 `--catalog tests/demo_library/catalog.json` is the one exception to the closed alphabet, and a
@@ -357,6 +367,115 @@ def search_matcher(query):
     return hits
 
 
+# ------------------------------------------------------------------ library filter facets ----
+# What PMS 1.43.5 advertises in `Meta.Type[].Filter[]` (measured by read-only GET; the strings are
+# the protocol's own English constants, no household byte): the facet NAMES per listing type in the
+# server's order, with `filterType`, and where the `key` carries `?type=N`.
+FACET_TITLES = {
+    "genre": "Genre", "year": "Year", "decade": "Decade", "contentRating": "Content Rating",
+    "collection": "Collection", "director": "Director", "actor": "Actor", "writer": "Writer",
+    "producer": "Producer", "country": "Country", "studio": "Studio", "network": "Network",
+    "resolution": "Resolution", "hdr": "HDR", "dovi": "DOVI", "hdr10plus": "HDR10+",
+    "atmos": "Atmos", "unwatched": "Unwatched", "unwatchedLeaves": "Unwatched",
+    "inProgress": "In Progress", "unmatched": "Unmatched", "videoCodec": "Video Codec",
+    "audioCodec": "Audio Codec", "subtitleCodec": "Subtitle Codec", "audioLayout": "Audio Layout",
+    "audioLanguage": "Audio Language", "subtitleLanguage": "Subtitle Language",
+    "editionTitle": "Edition", "label": "Labels", "location": "Folder Location",
+}
+BOOLEAN_FACETS = frozenset(("hdr", "dovi", "hdr10plus", "atmos", "unwatched", "unwatchedLeaves",
+                            "inProgress", "unmatched"))
+INTEGER_FACETS = frozenset(("year", "decade"))
+PEOPLE_FACETS = ("actor", "director", "writer", "producer")
+MOVIE_FACETS = (
+    "genre", "year", "decade", "contentRating", "collection", "director", "actor", "writer",
+    "producer", "country", "studio", "resolution", "hdr", "dovi", "hdr10plus", "atmos", "unwatched",
+    "inProgress", "unmatched", "videoCodec", "audioCodec", "subtitleCodec", "audioLayout",
+    "audioLanguage", "subtitleLanguage", "editionTitle", "label", "location")
+SHOW_FACETS = (
+    "genre", "year", "contentRating", "studio", "network", "country", "collection", "director",
+    "actor", "writer", "producer", "unwatchedLeaves", "unmatched", "editionTitle", "label")
+EPISODE_FACETS = (
+    "year", "collection", "resolution", "hdr", "dovi", "hdr10plus", "atmos", "unwatched",
+    "inProgress", "videoCodec", "audioCodec", "subtitleCodec", "audioLayout", "audioLanguage",
+    "subtitleLanguage", "unmatched", "location")
+# Facets whose `key` carries no `?type=N` although the listing is typed: the value list is the same
+# with and without the type for them, or (shows' country) only the untyped form exists.
+SHOW_UNTYPED_FACETS = frozenset(("country", "unmatched", "editionTitle"))
+EPISODE_TYPED_FACETS = frozenset(("year", "collection", "resolution", "hdr", "dovi", "hdr10plus",
+                                  "atmos", "unwatched", "inProgress"))
+ALL_FACETS = frozenset(FACET_TITLES)
+TYPE_NUMBERS = {"1": "movie", "2": "show", "3": "season", "4": "episode"}
+TYPE_TITLES = {"movie": "Movies", "show": "TV Shows", "season": "Seasons", "episode": "Episodes"}
+FIELD_TYPES = {
+    **{n: "tag" for n in ("genre", "collection", "director", "writer", "producer", "actor", "country",
+                          "network", "label", "location", "contentRating", "videoCodec", "audioCodec",
+                          "subtitleCodec", "audioLayout")},
+    "year": "integer", "decade": "integer", "studio": "string", "editionTitle": "string",
+    "resolution": "resolution", "audioLanguage": "audioLanguage",
+    "subtitleLanguage": "subtitleLanguage",
+    **{n: "boolean" for n in BOOLEAN_FACETS},
+}
+# `Meta.FieldType[]`: the operators of each field type. `resolution` declares `=` only, so the
+# server reads `resolution!=4k` as `resolution=4k`.
+FIELD_TYPE_OPERATORS = [
+    {"type": "tag", "Operator": [{"key": "=", "title": "is"}, {"key": "!=", "title": "is not"}]},
+    {"type": "integer", "Operator": [{"key": "=", "title": "is"}, {"key": "!=", "title": "is not"},
+                                     {"key": ">>=", "title": "is greater than"},
+                                     {"key": "<<=", "title": "is less than"}]},
+    {"type": "string", "Operator": [{"key": "=", "title": "contains"},
+                                    {"key": "!=", "title": "does not contain"},
+                                    {"key": "==", "title": "is"}, {"key": "!==", "title": "is not"},
+                                    {"key": "<=", "title": "begins with"},
+                                    {"key": ">=", "title": "ends with"}]},
+    {"type": "boolean", "Operator": [{"key": "=", "title": "is true"},
+                                     {"key": "!=", "title": "is false"}]},
+    {"type": "date", "Operator": [{"key": "<<=", "title": "is before"},
+                                  {"key": ">>=", "title": "is after"}]},
+    {"type": "subtitleLanguage", "Operator": [{"key": "=", "title": "is"},
+                                              {"key": "!=", "title": "is not"}]},
+    {"type": "audioLanguage", "Operator": [{"key": "=", "title": "is"},
+                                           {"key": "!=", "title": "is not"}]},
+    {"type": "resolution", "Operator": [{"key": "=", "title": "is"}]},
+]
+RESOLUTION_ORDER = (("4k", "4K"), ("1080", "1080p"), ("720", "720p"), ("576", "576p"),
+                    ("480", "480p"), ("sd", "SD"))
+LANGUAGE_NAMES = {"en": "English", "de": "German", "fr": "French"}
+
+
+def quote_once(text):
+    """How PMS spells a tag name in a `key`: percent-encoded, `.` included (`5.1` is `5%2E1`)."""
+    return urllib.parse.quote(text, safe="").replace(".", "%2E")
+
+
+def facet_terms(pairs):
+    """`[(facet, op, wanted)]` of the facet terms in a query's `(name, value)` pairs, in order.
+
+    PMS decodes twice: the HTTP layer once (the pairs arrive decoded once), then the tag matcher on
+    every comma-separated piece (all measured facets but `audioLayout`). So a raw comma splits (and
+    `%2C` on the wire became one in the first decode), a `%252C` survives as a literal comma, and a
+    studio key (a name encoded twice) that is encoded once more matches nothing.
+    The operator rides on the name (`year>>=2015` arrives as `year>>`, `genre!=7` as `genre!`).
+    Names that are not facets (`type`, `sort`, `X-Plex-*`, a name PMS does not know) are ignored, as
+    PMS ignores an unknown one. A repeated parameter is a second term: AND."""
+    out = []
+    for name, raw in pairs:
+        op = "eq"
+        for suffix, kind in (("!", "ne"), (">>", "gt"), ("<<", "lt")):
+            if name.endswith(suffix):
+                name, op = name[:-len(suffix)], kind
+                break
+        if name == "tagId":  # the key of a `collection.related` hub: it filters as `collection` does
+            name = "collection"
+        if name not in ALL_FACETS:
+            continue
+        # `audioLayout` is compared after the HTTP decode only (`5%252E1` matches nothing on 1.43.5).
+        again = (lambda piece: piece) if name == "audioLayout" else urllib.parse.unquote
+        wanted = [again(piece) for piece in raw.split(",") if piece]
+        if wanted:
+            out.append((name, "eq" if name == "resolution" else op, wanted))
+    return out
+
+
 # ---------------------------------------------------------------- the generated library ----
 
 class Library:
@@ -398,6 +517,8 @@ class Library:
             raise ValueError("movies must be between 0 and 1000")
         if not 0 <= extras <= 9:
             raise ValueError("extras must be between 0 and 9 clips per movie")
+        if not 1 <= people <= 5000:
+            raise ValueError("people must be between 1 and 5000")
         # #266: whether a generated/verification audio stream carries canNormalizeLoudness.
         self.loudness_analysis = loudness_analysis
         if extras:
@@ -414,7 +535,7 @@ class Library:
             {"key": "1", "type": "movie", "title": sname(rng), "uuid": sname(rng)},
             {"key": "2", "type": "show", "title": sname(rng), "uuid": sname(rng)},
         ]
-        for i in range(1, 21):
+        for i in range(1, people + 1):
             self.people[i] = {"id": i, "tag": sname(rng), "tagKey": sname(rng),
                               "thumb": f"/library/metadata/people/{i}/thumb/1"}
         for i in range(1, 9):
@@ -1083,30 +1204,19 @@ class Library:
 
     # --- queries ---------------------------------------------------------------------------
 
-    def section_items(self, key, q):
-        kind = {"1": "movie", "2": "show"}.get(key)
+    def section_type(self, key):
+        return next((sec["type"] for sec in self.sections if sec["key"] == str(key)), None)
+
+    def section_items(self, key, q, pairs=None):
+        """The listing `/library/sections/{key}/all?{q}` shows. `q` is the query with the last value
+        of each name; `pairs` is the same query as `(name, value)` pairs when a name repeats (a
+        repeated facet is a second term: AND). Every facet term filters (see `facet_terms`)."""
+        kind = self.section_type(key)
         t = q.get("type")
         if t:
-            kind = {"1": "movie", "2": "show", "3": "season", "4": "episode"}.get(t, kind)
-        rows = [it for it in self.items.values() if it["type"] == kind
-                and it["librarySectionID"] == int(key)]
-        # `unwatchedLeaves` is the key the app sends for shows and seasons (their leaves, not the
-        # row itself, carry the watch state); an episode has no leaves, so it reads as `unwatched`.
-        # The mock keeps one predicate for both keys: a show is unwatched here while some leaf is.
-        if q.get("unwatched") == "1" or q.get("unwatchedLeaves") == "1":
-            rows = [it for it in rows if not self._watched(it)]
-        g = q.get("genre")
-        if g:
-            rows = [it for it in rows if any(str(t["id"]) == g for t in it.get("Genre", []))]
-        a = q.get("actor")
-        if a:
-            rows = [it for it in rows if any(str(t["id"]) == a for t in
-                    it.get("Role", []) + it.get("Director", []) + it.get("Writer", []))]
-        # `tagId` is the key of a `collection.related` hub, the only tag id these listings are
-        # asked for with; it filters the same way `collection` does.
-        c = q.get("collection") or q.get("tagId")
-        if c:
-            rows = [it for it in rows if any(str(t["id"]) == c for t in it.get("Collection", []))]
+            kind = TYPE_NUMBERS.get(t, kind)
+        rows = self.apply_terms(self.candidates(key, (kind,)),
+                                facet_terms(list(q.items()) if pairs is None else pairs))
         sort = q.get("sort", "titleSort")
         field, _, direction = sort.partition(":")
         keyf = {
@@ -1121,17 +1231,173 @@ class Library:
         rows.sort(key=keyf, reverse=(direction == "desc"))
         return rows
 
-    def first_characters(self, key, q=None):
+    def candidates(self, key, kinds):
+        return [it for it in self.items.values() if it["type"] in kinds
+                and it["librarySectionID"] == int(key)]
+
+    def apply_terms(self, rows, terms):
+        for name, op, wanted in terms:
+            rows = [it for it in rows if self.term_matches(it, name, op, wanted)]
+        return rows
+
+    # --- facet traits ---------------------------------------------------------------------------
+    # The generated items carry the fields a client draws; the filter predicates below read those
+    # where they exist (genre, year, contentRating, studio, country, people, collection, watch
+    # state) and derive the rest from the ratingKey alone (resolution, HDR flavours, codecs,
+    # layout, languages, unmatched), so no stored item moves. The item's own `Media` block is NOT
+    # rewritten to agree with them: a `resolution=4k` hit still says 1080 on its detail page.
+    # A show or a season has no media of its own: its media facets are those of its episodes, which
+    # is how PMS evaluates a facet the type does not advertise.
+
+    def leaf_items(self, it):
+        if it["type"] == "show":
+            return self.leaves(int(it["ratingKey"]))
+        if it["type"] == "season":
+            return self.children(int(it["ratingKey"]))
+        return []
+
+    def media_traits(self, it):
+        """Facet -> tokens (names, decoded) for an item that has media; booleans are `bool`."""
+        rk = int(it["ratingKey"])
+        media = (it.get("Media") or [{}])[0]
+        four_k = rk % 4 == 0
+        atmos = rk % 5 == 0
+        return {
+            "resolution": ["4k" if four_k else "720" if rk % 10 == 1 else str(media.get("videoResolution", "1080"))],
+            "hdr": rk % 3 == 0, "dovi": rk % 6 == 0, "hdr10plus": rk % 9 == 0, "atmos": atmos,
+            "videoCodec": ["hevc" if four_k else media.get("videoCodec", "h264")],
+            "audioCodec": ["eac3" if atmos else media.get("audioCodec", "ac3")],
+            "subtitleCodec": ["srt"],
+            "audioLayout": ["stereo" if rk % 7 == 0 else "5.1"],
+            "audioLanguage": ["en"] + (["de"] if rk % 5 == 0 else []),
+            "subtitleLanguage": ["en"] + (["de"] if rk % 3 == 0 else []) + (["fr"] if rk % 11 == 0 else []),
+            "location": [str(it["librarySectionID"])],
+        }
+
+    def flag(self, it, name):
+        """A boolean facet of one item."""
+        kind = it["type"]
+        if name == "unmatched":
+            return int(it["ratingKey"]) % 13 == 0
+        if name == "unwatched":
+            return not self._watched(it)
+        if name == "unwatchedLeaves":
+            return kind in ("show", "season") and it.get("leafCount", 0) > it.get("viewedLeafCount", 0)
+        if name == "inProgress":
+            if kind in ("show", "season"):
+                return any(self.flag(x, name) for x in self.leaf_items(it))
+            return it.get("viewOffset", 0) > 0
+        if kind in ("show", "season"):
+            return any(self.media_traits(x)[name] for x in self.leaf_items(it))
+        return self.media_traits(it)[name]
+
+    def tokens(self, it, name):
+        """The decoded values an item has for a non-boolean facet."""
+        if name in ("genre", "collection"):
+            return [str(t["id"]) for t in it.get("Genre" if name == "genre" else "Collection", [])]
+        if name in PEOPLE_FACETS:
+            # `actor=<id>` of a tag that is only a director lists that director's titles (measured:
+            # the same counts as `director=<id>`), so the people facets match a tag in any role.
+            return [str(t["id"]) for role in ("Role", "Director", "Writer", "Producer")
+                    for t in it.get(role, [])]
+        if name == "year":
+            return [str(it["year"])] if "year" in it else []
+        if name == "decade":
+            return [str(it["year"] // 10 * 10)] if "year" in it else []
+        if name == "contentRating":
+            return [it["contentRating"]] if it.get("contentRating") else []
+        if name == "studio":
+            return [it["studio"]] if it.get("studio") else []
+        if name == "country":
+            return [t["tag"] for t in it.get("Country", [])]
+        if name in ("network", "editionTitle", "label"):
+            return []
+        if it["type"] in ("show", "season"):
+            return sorted({tok for x in self.leaf_items(it) for tok in self.media_traits(x)[name]})
+        return self.media_traits(it)[name]
+
+    def term_matches(self, it, name, op, wanted):
+        if name in BOOLEAN_FACETS:
+            on = wanted[0] not in ("0", "false")
+            return self.flag(it, name) != on if op == "ne" else self.flag(it, name) == on
+        have = self.tokens(it, name)
+        if name in INTEGER_FACETS and op in ("gt", "lt"):
+            limit = int(wanted[0]) if wanted[0].lstrip("-").isdigit() else None
+            return limit is not None and any((int(t) > limit) if op == "gt" else (int(t) < limit)
+                                             for t in have)
+        hit = any(t in wanted for t in have)
+        return not hit if op == "ne" else hit
+
+    # --- value lists ----------------------------------------------------------------------------
+
+    def value_items(self, key, q, pairs=None):
+        """The items a value list is read from: the listing's type (a request with `type=`), else
+        every type the section lists (a TV section's shows and episodes), narrowed by the terms
+        that came with the request, the facet's own among them."""
+        t = q.get("type")
+        kind = self.section_type(key)
+        kinds = (TYPE_NUMBERS.get(t, kind),) if t else (("show", "episode") if kind == "show" else (kind,))
+        return self.apply_terms(self.candidates(key, kinds),
+                                facet_terms(list(q.items()) if pairs is None else pairs))
+
+    def facet_values(self, key, facet, q, pairs=None):
+        """`Directory[]` rows of the facet's value list in the server's order, or `None` for a
+        facet with no value endpoint (a boolean one)."""
+        if facet in BOOLEAN_FACETS or facet not in ALL_FACETS:
+            return None
+        items = sorted(self.value_items(key, q, pairs), key=lambda it: int(it["ratingKey"]))
+        fast = lambda value: f"/library/sections/{key}/all?{facet}={value}"
+        rows = []
+        if facet in ("genre", "collection"):
+            tags = {t["id"]: t for it in items for t in it.get("Genre" if facet == "genre" else "Collection", [])}
+            rows = [{"key": str(t["id"]), "title": t["tag"], "fastKey": fast(t["id"])}
+                    for t in sorted(tags.values(), key=lambda t: t["tag"].lower())]
+        elif facet in PEOPLE_FACETS:
+            role = {"actor": "Role", "director": "Director", "writer": "Writer", "producer": "Producer"}[facet]
+            seen = {}
+            for it in items:
+                for t in it.get(role, []):
+                    seen.setdefault(t["id"], t)
+            rows = [{"fastKey": fast(t["id"]), "thumb": t["thumb"], "key": str(t["id"]), "title": t["tag"]}
+                    for t in seen.values()]
+        elif facet in INTEGER_FACETS:
+            years = sorted({it["year"] for it in items if "year" in it}, reverse=True)
+            stops = years if facet == "year" else sorted({y // 10 * 10 for y in years}, reverse=True)
+            rows = [{"fastKey": fast(v), "key": str(v), "title": str(v) if facet == "year" else f"{v}s"}
+                    for v in stops]
+        elif facet in ("contentRating", "country", "studio"):
+            names = sorted({tok for it in items for tok in self.tokens(it, facet)}, key=str.lower)
+            twice = (lambda n: quote_once(quote_once(n))) if facet == "studio" else quote_once
+            rows = [{"fastKey": fast(n), "key": twice(n), "title": n} for n in names]
+        elif facet == "location":
+            if items:
+                rows = [{"fastKey": fast(int(key)), "key": str(int(key)), "title": "s%08x" % (0x10000 + int(key))}]
+        elif facet in ("network", "editionTitle", "label"):
+            rows = []
+        else:  # media facets: no fastKey
+            have = {tok for it in items for tok in self.tokens(it, facet)}
+            if facet == "resolution":
+                rows = [{"key": k, "title": t} for k, t in RESOLUTION_ORDER if k in have]
+            elif facet in ("audioLanguage", "subtitleLanguage"):
+                rows = [{"key": k, "title": LANGUAGE_NAMES[k]} for k in sorted(have)]
+            elif facet == "audioLayout":
+                rows = [{"key": quote_once(n), "title": n} for n in sorted(have)]
+            else:
+                rows = [{"key": n, "title": n} for n in sorted(have)]
+        return rows
+
+    def first_characters(self, key, q=None, pairs=None):
         """Counts in ascending titleSort order (the rail's order) of the listing `q` describes: the
         terms that scope `/all` (`type`, `unwatched`, `unwatchedLeaves`, `genre`, ...) scope the counts
         the same way, as PMS does, so the sum is the filtered `totalSize` and prefix sums are the
         offsets of each letter in that listing. `type=18` counts the section's collections."""
         q = q or {}
         counts = {}
+        scoped = {k: v for k, v in q.items() if k != "sort" and not k.startswith("X-Plex-")}
         rows = (sorted(self.collection_metadata(key), key=lambda c: c["titleSort"].lower())
                 if q.get("type") == "18"
-                else self.section_items(key, {k: v for k, v in q.items()
-                                              if k != "sort" and not k.startswith("X-Plex-")}))
+                else self.section_items(key, scoped, None if pairs is None else
+                                        [(k, v) for k, v in pairs if k != "sort" and not k.startswith("X-Plex-")]))
         for item in rows:
             letter = item["titleSort"][0].upper()
             counts[letter] = counts.get(letter, 0) + 1
@@ -2524,27 +2790,67 @@ class MockPms:
                 mc["size"] = len(mc[k])
         return {"MediaContainer": mc}
 
-    def sort_meta(self, kind=None):
+    MOVIE_SORTS = [
+        {"key": "titleSort", "defaultDirection": "asc", "title": "Title"},
+        {"key": "addedAt", "defaultDirection": "desc", "title": "Date Added"},
+        {"key": "originallyAvailableAt", "defaultDirection": "desc", "title": "Release Date"},
+        {"key": "rating", "defaultDirection": "desc", "title": "Critic Rating"},
+        {"key": "lastViewedAt", "defaultDirection": "desc", "title": "Date Viewed"},
+        {"key": "random", "defaultDirection": "asc", "title": "Randomly"}]
+
+    def meta(self, section, kind=None):
+        """`Meta` of `all?includeMeta=1`: the server-driven menus of a listing.
+
+        A Collections listing (`type=18`) declares ONE sort (probed on 1.43) and no filter. A movie
+        section has one `Type` (movie); a TV section has show, season and episode, the requested one
+        `active` (the shows without a `type`). Each type with facets carries the server's `Filter[]`
+        for it (PMS 1.43.5: movie 28, show 15, season none, episode 17; `FACET_TITLES` ff.) and its
+        `Field[]`; `FieldType[]` lists the operators. The sorts are the same six for every type: the
+        simulator has always offered those, and the facets are what this adds."""
+        section = str(section)
         if kind == "18":
-            # PMS's collection listing declares ONE sort (probed on 1.43): titleSort.
-            return {"Type": [{"key": "/library/sections/1/all?type=18", "type": "collection",
+            return {"Type": [{"key": f"/library/sections/{section}/all?type=18", "type": "collection",
                               "title": "Collections", "active": True,
                               "Sort": [{"key": "titleSort", "defaultDirection": "asc",
                                         "descKey": "titleSort:desc", "title": "Title"}]}]}
-        return {"Type": [{"key": "/library/sections/1/all?type=1", "type": "movie", "title": "movie",
-                          "active": True,
-                          "Sort": [{"key": "titleSort", "defaultDirection": "asc", "title": "Title"},
-                                   {"key": "addedAt", "defaultDirection": "desc", "title": "Date Added"},
-                                   {"key": "originallyAvailableAt", "defaultDirection": "desc", "title": "Release Date"},
-                                   {"key": "rating", "defaultDirection": "desc", "title": "Critic Rating"},
-                                   {"key": "lastViewedAt", "defaultDirection": "desc", "title": "Date Viewed"},
-                                   {"key": "random", "defaultDirection": "asc", "title": "Randomly"}]}]}
+        tv = self.lib.section_type(section) == "show"
+        order = ("show", "season", "episode") if tv else ("movie",)
+        number = {"movie": "1", "show": "2", "season": "3", "episode": "4"}
+        active = TYPE_NUMBERS.get(kind) if kind in ("2", "3", "4") and tv else order[0]
+        facets = {"movie": MOVIE_FACETS, "show": SHOW_FACETS, "season": (), "episode": EPISODE_FACETS}
+        prefix = {"movie": "", "show": "show.", "season": "", "episode": "episode."}
+
+        def filter_key(type_name, name):
+            base = f"/library/sections/{section}/{name}"
+            typed = ((type_name == "show" and name not in SHOW_UNTYPED_FACETS)
+                     or (type_name == "episode" and name in EPISODE_TYPED_FACETS))
+            return base + (f"?type={number[type_name]}" if typed else "")
+
+        types = []
+        for type_name in order:
+            entry = {"key": f"/library/sections/{section}/all?type={number[type_name]}", "type": type_name,
+                     "title": TYPE_TITLES[type_name], "active": type_name == active}
+            if facets[type_name]:
+                entry["Filter"] = [{"filter": n, "filterType": "boolean" if n in BOOLEAN_FACETS
+                                    else "integer" if n in INTEGER_FACETS else "string",
+                                    "key": filter_key(type_name, n), "title": FACET_TITLES[n],
+                                    "type": "filter"} for n in facets[type_name]]
+            entry["Sort"] = [dict(sort) for sort in self.MOVIE_SORTS]
+            if facets[type_name]:
+                entry["Field"] = ([{"key": f"{prefix[type_name]}title", "type": "string",
+                                    "title": f"{TYPE_TITLES[type_name]} Title"}]
+                                  + [{"key": prefix[type_name] + n, "type": FIELD_TYPES[n],
+                                      "title": FACET_TITLES[n]} for n in facets[type_name]])
+            types.append(entry)
+        return {"Type": types, "FieldType": FIELD_TYPE_OPERATORS}
 
     def handle(self, method, path, body=b"", headers=None):
         """Returns (status, content_type, bytes)."""
         u = urllib.parse.urlsplit(path)
         p = u.path
         q = {k: v[-1] for k, v in urllib.parse.parse_qs(u.query, keep_blank_values=True).items()}
+        # The same query with every repeat: a repeated facet is a second term (AND), which `q` loses.
+        pairs = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
         headers = headers or {}
         lib = self.lib
         j = lambda obj, status=200: (status, "application/json", json.dumps(obj).encode())
@@ -2798,10 +3104,10 @@ class MockPms:
                 }.get(field, lambda row: row["titleSort"])
                 rows.sort(key=keyf, reverse=(direction == "desc"))
             else:
-                rows = lib.section_items(segs[2], q)
+                rows = lib.section_items(segs[2], q, pairs)
             page, extra = paged(rows)
             if q.get("includeMeta") == "1":
-                extra["Meta"] = self.sort_meta(q.get("type"))
+                extra["Meta"] = self.meta(segs[2], q.get("type"))
             return j(self.container(Metadata=page, **extra))
         if len(segs) == 4 and segs[:2] == ["library", "sections"] and segs[3] == "recentlyAdded":
             kind = {"1": "movie", "2": "episode"}.get(segs[2], "movie")
@@ -2812,12 +3118,21 @@ class MockPms:
             if d == "collections":
                 rows, extra = paged(lib.collection_metadata(segs[2]))
                 return j(self.container(Metadata=rows, **extra))
-            if d == "genre":
-                return j(self.container(Directory=[{"key": str(g["id"]), "title": g["tag"],
-                                                    "fastKey": f"/library/sections/{segs[2]}/all?genre={g['id']}"}
-                                                   for g in lib.genres.values()]))
             if d == "firstCharacter":
-                return j(self.container(Directory=lib.first_characters(segs[2], q)))
+                return j(self.container(Directory=lib.first_characters(segs[2], q, pairs)))
+            if d == "unwatched":
+                # Not a value list: PMS answers the whole unwatched LISTING at this key (99 movies,
+                # 248 KB on 1.43.5), so a client that GETs a boolean facet's key downloads a listing.
+                terms = dict(q, unwatched="1")
+                page, extra = paged(lib.section_items(segs[2], terms, pairs + [("unwatched", "1")]))
+                return j(self.container(Metadata=page, **extra))
+            if d in ALL_FACETS:
+                rows = lib.facet_values(segs[2], d, q, pairs)
+                if rows is None:  # the other boolean facets have no endpoint: PMS answers an HTML 404
+                    return 404, "text/html", b"<html><head><title>Not Found</title></head><body><h1>404 Not Found</h1></body></html>"
+                page, extra = paged(rows)
+                # An empty list has no `Directory` key at all on PMS, only `size: 0`.
+                return j(self.container(**({"Directory": page} if page else {}), **extra))
             return j(self.container(Directory=[]))
         if len(segs) >= 3 and segs[:2] == ["library", "metadata"]:
             ids = segs[2]
@@ -3496,7 +3811,7 @@ def serve(port, seed=1, host="127.0.0.1", verbose=False, movies=48, rail_fixture
           home_users=1, second_account=False, link=(), link_faults=(), shows=6, seasons=2, episodes=6,
           resume_fixture=False, media_next_episode=False, next_episode_remux=False,
           media_forced_subtitle=False, smart_collections=False,
-          caption_edge_cases=False, multi_version=False):
+          caption_edge_cases=False, multi_version=False, people=20):
     """Start a mock PMS in a daemon thread; returns (server, pms). Loopback only by default: the
     app on the simulator is on this machine, and a LAN-facing listener would be one more thing
     the outbound guard has to reason about. `catalog` serves the demo library instead of a seed.
@@ -3543,7 +3858,8 @@ def serve(port, seed=1, host="127.0.0.1", verbose=False, movies=48, rail_fixture
                       media_next_episode=media_next_episode,
                       next_episode_remux=next_episode_remux,
                       media_forced_subtitle=media_forced_subtitle,
-                      caption_edge_cases=caption_edge_cases, multi_version=multi_version)
+                      caption_edge_cases=caption_edge_cases, multi_version=multi_version,
+                      people=people)
     lib.smart_collections = smart_collections
     pms = MockPms(lib)
     pms.link = link_conditioner.Conditioner(seed=seed)
@@ -4314,6 +4630,9 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--movies", type=int, default=48, help="movie count, 0–1000 (keys must not overlap shows)")
     ap.add_argument("--rail-fixture", action="store_true", help="synthetic A/C/F/M/Z sort-title groups for rail tests")
+    ap.add_argument("--people", type=int, default=20,
+                    help="people in the generated pool, 1-5000 (default 20); a large pool gives the "
+                         "actor/director filter lists more than one 100-row page to scroll")
     ap.add_argument("--media", type=pathlib.Path,
                     help="opt-in mockverify directory; ffprobe derives its stream metadata")
     ap.add_argument("--media-next-episode", action="store_true",
@@ -4516,7 +4835,8 @@ def main():
                          next_episode_remux=a.media_next_episode_remux,
                          media_forced_subtitle=a.media_forced_subtitle,
                          smart_collections=a.smart_collections,
-                         caption_edge_cases=a.caption_edge_cases, multi_version=a.multi_version)
+                         caption_edge_cases=a.caption_edge_cases, multi_version=a.multi_version,
+                         people=a.people)
     except ValueError as e:
         ap.error(str(e))
     what = f"catalog={a.catalog}" if a.catalog else f"seed={a.seed}"
