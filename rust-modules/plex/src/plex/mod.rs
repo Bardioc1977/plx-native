@@ -106,7 +106,7 @@ pub use paging::PageReq;
 pub use client::ArtFetch;
 pub use client::JsonDeadlineOutcome;
 // The one percent-encoder (RFC 3986 unreserved passthrough) — see its doc.
-pub use client::urlenc_str;
+pub use client::{urlenc_str, wire_len};
 // The one link/IP ⇄ u8 encode/decode pair — shared by `Client`'s own atomics and
 // `player::report`'s packed attempt snapshot, so the two never keep a private copy each.
 pub use client::{decode_ip, decode_link, encode_ip, encode_link};

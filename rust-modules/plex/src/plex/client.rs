@@ -926,6 +926,12 @@ fn wire_str(src: &str) -> String {
     out
 }
 
+/// How many bytes of a request line a filter value costs on the wire ([`wire_str`]): the budget
+/// the data layer holds a selection to, without building the request.
+pub fn wire_len(src: &str) -> usize {
+    wire_str(src).len()
+}
+
 /// Builds `path?k=enc(v)&k2=42…`. `.str` percent-encodes the value; `.int` does not
 /// (digits are unreserved). No op file ever formats a query by hand. `.query()` returns just
 /// the joined params (no path/`?`) for the transcode endpoints that embed them after a fixed
