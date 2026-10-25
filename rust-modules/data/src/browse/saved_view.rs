@@ -24,6 +24,10 @@ pub(super) enum ViewField {
     Sort,
     Unwatched,
     Genre,
+    /// The facet terms (not the genre, which is the legacy field's): an edit of the selection, or
+    /// a correction the server's answers made to it.
+    #[allow(dead_code)]
+    Filters,
     Listing,
 }
 
@@ -45,6 +49,10 @@ pub(super) struct ViewSnapshot {
     pub(super) unwatched: bool,
     /// The genre filter's tag id.
     pub(super) genre: Option<String>,
+    /// The facet terms of the SHOWN listing, as the record stores them (its own genre is not among
+    /// them). STUB (red commit of the saved view): ignored by the merge.
+    #[allow(dead_code)]
+    pub(super) filters: Vec<plx_plex::plex::session::StoredFilter>,
 }
 
 /// The record `edit` leaves for library (`machine`, `key`), given what is `stored` now and the
@@ -117,6 +125,7 @@ fn pair(sort: &Option<(String, bool)>) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plx_plex::plex::session::{StoredFilter, StoredValue};
 
     fn stored() -> LibraryView {
         LibraryView {
@@ -130,7 +139,7 @@ mod tests {
     fn before_the_menu(unwatched: bool) -> ViewSnapshot {
         ViewSnapshot {
             listing: LibraryType::Primary, sort_resolved: false, genre_resolved: false, sort: None,
-            unwatched, genre: None,
+            unwatched, genre: None, filters: Vec::new(),
         }
     }
 
@@ -159,7 +168,7 @@ mod tests {
         before.listing_sort = "addedAt".into();
         let snap = ViewSnapshot {
             listing: LibraryType::Collections, sort_resolved: false, genre_resolved: false,
-            sort: None, unwatched: false, genre: None,
+            sort: None, unwatched: false, genre: None, filters: Vec::new(),
         };
         let view = merge(Some(&before), "m", 1, &snap, ViewField::Listing);
         assert_eq!(view.listing, "collections");
@@ -176,7 +185,7 @@ mod tests {
         before.listing_desc = true;
         let snap = ViewSnapshot {
             listing: LibraryType::Episodes, sort_resolved: false, genre_resolved: false,
-            sort: None, unwatched: true, genre: None,
+            sort: None, unwatched: true, genre: None, filters: Vec::new(),
         };
         let view = merge(Some(&before), "m", 1, &snap, ViewField::Unwatched);
         assert_eq!(view.listing_sort(), Some(("addedAt", true)));
@@ -187,7 +196,7 @@ mod tests {
     fn a_sort_edit_records_the_listing_that_was_sorted() {
         let snap = ViewSnapshot {
             listing: LibraryType::Collections, sort_resolved: true, genre_resolved: true,
-            sort: Some(("titleSort".into(), true)), unwatched: false, genre: None,
+            sort: Some(("titleSort".into(), true)), unwatched: false, genre: None, filters: Vec::new(),
         };
         let view = merge(None, "m", 1, &snap, ViewField::Sort);
         assert_eq!(view.listing_sort(), Some(("titleSort", true)));
@@ -198,7 +207,7 @@ mod tests {
     fn a_default_main_view_is_the_forgotten_view() {
         let snap = ViewSnapshot {
             listing: LibraryType::Primary, sort_resolved: true, genre_resolved: true, sort: None,
-            unwatched: false, genre: None,
+            unwatched: false, genre: None, filters: Vec::new(),
         };
         assert!(merge(Some(&stored()), "m", 1, &snap, ViewField::Sort).is_default());
         assert!(merge(None, "m", 1, &snap, ViewField::Unwatched).is_default());
@@ -249,5 +258,70 @@ mod tests {
         let snap = ViewSnapshot { genre_resolved: true, ..after_a_failed_restore(true) };
         let view = merge(Some(&stored()), "m", 1, &snap, ViewField::Unwatched);
         assert!(view.genre.is_empty());
+    }
+
+    fn term(listing: &str, facet: &str, keys: &[&str]) -> StoredFilter {
+        StoredFilter {
+            listing: listing.into(), facet: facet.into(), flag: false,
+            values: keys.iter().map(|key| StoredValue { key: (*key).into(), title: format!("T{key}") }).collect(),
+        }
+    }
+
+    fn shown(listing: LibraryType, filters: Vec<StoredFilter>) -> ViewSnapshot {
+        ViewSnapshot {
+            listing, sort_resolved: true, genre_resolved: true, sort: None, unwatched: false, genre: None, filters,
+        }
+    }
+
+    #[test]
+    fn the_shown_listings_terms_are_the_live_ones() {
+        let mut before = stored();
+        before.filters = vec![term("", "actor", &["1"]), term("", "studio", &["9"])];
+        let live = shown(LibraryType::Primary, vec![term("", "actor", &["1", "2"])]);
+        let view = merge(Some(&before), "m", 1, &live, ViewField::Filters);
+        assert_eq!(view.filters, vec![term("", "actor", &["1", "2"])], "the studio the viewer cleared is gone");
+        let cleared = merge(Some(&before), "m", 1, &shown(LibraryType::Primary, vec![]), ViewField::Filters);
+        assert!(cleared.filters.is_empty());
+    }
+
+    #[test]
+    fn other_listings_terms_survive_an_edit() {
+        let mut before = stored();
+        before.listing = "episodes".into();
+        before.filters = vec![term("episodes", "year", &["2024"]), term("", "actor", &["1"]), term("seasons", "hdr", &[])];
+        // the viewer is on the episodes and edits the Unwatched switch
+        let live = ViewSnapshot { unwatched: true, ..shown(LibraryType::Episodes, vec![term("episodes", "year", &["2024", "2023"])]) };
+        let view = merge(Some(&before), "m", 1, &live, ViewField::Unwatched);
+        let facets: Vec<(&str, &str)> = view.filters.iter().map(|t| (t.listing.as_str(), t.facet.as_str())).collect();
+        assert_eq!(facets, [("", "actor"), ("seasons", "hdr"), ("episodes", "year")],
+            "the primary listing's and the seasons' terms are untouched, the shown listing's are live");
+        assert_eq!(view.filters.last().unwrap().values.len(), 2);
+    }
+
+    #[test]
+    fn collections_carry_no_terms_and_leave_the_others_alone() {
+        let mut before = stored();
+        before.filters = vec![term("", "actor", &["1"])];
+        let view = merge(Some(&before), "m", 1, &shown(LibraryType::Collections, vec![]), ViewField::Listing);
+        assert_eq!(view.filters, vec![term("", "actor", &["1"])], "the films' terms wait for the films");
+        assert_eq!(view.listing, "collections");
+    }
+
+    #[test]
+    fn the_own_genre_lives_in_the_legacy_field_only() {
+        let mut before = stored();
+        // a copy of the genre in `filters` (an older build edited the legacy field and left this one)
+        before.filters = vec![term("", "genre", &["28"]), term("", "actor", &["1"])];
+        let live = ViewSnapshot { genre: Some("12".into()), ..shown(LibraryType::Primary, vec![term("", "actor", &["1"])]) };
+        let view = merge(Some(&before), "m", 1, &live, ViewField::Genre);
+        assert_eq!(view.genre, "12", "the legacy field is the authority");
+        assert!(view.filters.iter().all(|t| t.facet != "genre"), "…and no stale copy is kept beside it");
+    }
+
+    #[test]
+    fn a_view_that_is_only_filters_is_not_the_forgotten_view() {
+        let live = shown(LibraryType::Primary, vec![term("", "actor", &["1"])]);
+        assert!(!merge(None, "m", 1, &live, ViewField::Filters).is_default());
+        assert!(merge(None, "m", 1, &shown(LibraryType::Primary, vec![]), ViewField::Filters).is_default());
     }
 }

@@ -205,3 +205,113 @@ fn seasons_advertise_no_facet_and_still_get_the_unwatched_row() {
     assert_eq!(state.facets.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["unwatchedLeaves"]);
     assert!(state.facets_known);
 }
+
+// ---- what the record keeps of the edits -----------------------------------------------------------
+
+use crate::browse::filters::{FilterSet, FilterValue};
+use crate::stores::browse::{LibraryWork, QueryEdit, SectionAddress};
+
+fn value(id: &str, title: &str) -> FilterValue {
+    FilterValue { id: id.into(), title: title.into() }
+}
+
+/// Send `work` to library 1 of `pms` through the store's own door.
+fn send(browse: &mut TestBrowse, pms: &Pms, work: LibraryWork) -> bool {
+    let target = SectionAddress { epoch: browse.state.table_epoch(), sid: pms.sid, section: 1 };
+    browse.state.addressed_with_adapter(&browse.adapter, target, work, &ClientKeys::default(), &mut Vec::new())
+}
+
+#[test]
+fn a_filter_edit_is_remembered_and_choosing_everything_back_forgets_the_entry() {
+    let _g = plx_base::testlock::serial();
+    let session = TempPins::new("filters-edit-remembered");
+    session.watching("u-filters");
+    plx_plex::plex::reset_servers_for_test();
+    let _cleanup = RegisteredCleanup;
+    let pms = loopback_pms("filter-machine", vec![MOVIE_PAGE]);
+    let mut browse = movies_on(&pms, "filter-machine");
+    pump_until_landed(&mut browse);
+
+    let set = FilterSet::default().with("actor", vec![value("5780", "Ann"), value("8810", "Bo")]).with_flag("hdr", true);
+    assert!(send(&mut browse, &pms, LibraryWork::Filters { set }));
+    let held = stored_view("u-filters", "filter-machine").expect("the edit is remembered");
+    let facets: Vec<(&str, usize, bool)> = held.filters.iter().map(|t| (t.facet.as_str(), t.values.len(), t.flag)).collect();
+    assert_eq!(facets, [("actor", 2, false), ("hdr", 0, true)]);
+    assert_eq!(held.filters[0].values[0].title, "Ann", "the title is stored with the key");
+    assert!(held.filters.iter().all(|t| t.listing.is_empty()));
+
+    switch_unwatched_on(&mut browse, &pms);
+    let held = stored_view("u-filters", "filter-machine").unwrap();
+    assert!(held.unwatched && held.filters.len() == 2, "an unrelated edit keeps the terms");
+
+    assert!(send(&mut browse, &pms, LibraryWork::Filters { set: FilterSet::default() }));
+    let held = stored_view("u-filters", "filter-machine").unwrap();
+    assert!(held.unwatched && held.filters.is_empty(), "clearing the terms clears them");
+    assert!(browse.state.set_unwatched(false));
+    assert!(send(&mut browse, &pms, LibraryWork::Commit { select: false, choice: false, query: Some(QueryEdit::Unwatched(false)) }));
+    assert!(stored_view("u-filters", "filter-machine").is_none(), "the default view is forgotten");
+}
+
+#[test]
+fn the_genre_is_written_to_the_legacy_field_only() {
+    let _g = plx_base::testlock::serial();
+    let session = TempPins::new("filters-genre-legacy");
+    session.watching("u-filters");
+    plx_plex::plex::reset_servers_for_test();
+    let _cleanup = RegisteredCleanup;
+    let pms = loopback_pms("filter-machine", vec![MOVIE_PAGE]);
+    let mut browse = movies_on(&pms, "filter-machine");
+    pump_until_landed(&mut browse);
+    browse.state.state_mut(0).unwrap().seed_genre_list(vec![value("28", "Action")]);
+
+    assert!(send(&mut browse, &pms, LibraryWork::Commit {
+        select: false, choice: false, query: Some(QueryEdit::Genre(Some("28".into()))),
+    }));
+    let held = stored_view("u-filters", "filter-machine").expect("remembered");
+    assert_eq!(held.genre, "28");
+    assert!(held.filters.is_empty(), "no copy of the genre in `filters` for a rolled-back build to leave stale");
+
+    // with another term present, still only the other term is written to `filters`
+    let set = browse.state.cur_state().unwrap().filters.with("actor", vec![value("5780", "Ann")]);
+    assert!(send(&mut browse, &pms, LibraryWork::Filters { set }));
+    let held = stored_view("u-filters", "filter-machine").unwrap();
+    assert_eq!(held.genre, "28");
+    assert_eq!(held.filters.iter().map(|t| t.facet.as_str()).collect::<Vec<_>>(), ["actor"]);
+}
+
+#[test]
+fn a_term_the_menu_proved_gone_is_forgotten_by_the_record_too() {
+    let _g = plx_base::testlock::serial();
+    let _session = remembered("filters-gone-forgotten", "u-filters",
+        view_of(vec![term("", "network", &["77"]), term("", "actor", &["5780"])]));
+    let _cleanup = RegisteredCleanup;
+    let pms = loopback_pms("filter-machine", vec![MOVIE_PAGE, AFTER_THE_DROP]);
+    let mut browse = movies_on(&pms, "filter-machine");
+    pump_until_landed(&mut browse);
+    let held = stored_view("u-filters", "filter-machine").expect("the record is still there");
+    assert_eq!(held.filters.iter().map(|t| t.facet.as_str()).collect::<Vec<_>>(), ["actor"]);
+}
+
+#[test]
+fn a_selected_key_a_complete_list_does_not_hold_is_forgotten_by_the_record_too() {
+    let _g = plx_base::testlock::serial();
+    let session = TempPins::new("filters-pruned-forgotten");
+    session.watching("u-filters");
+    plx_plex::plex::reset_servers_for_test();
+    let _cleanup = RegisteredCleanup;
+    let pms = loopback_pms("filter-machine", vec![MOVIE_PAGE, r#"{"MediaContainer":{"size":1,"totalSize":1,"Directory":[{"key":"s1","title":"Studio One"}]}}"#]);
+    let mut browse = movies_on(&pms, "filter-machine");
+    pump_until_landed(&mut browse);
+    let set = FilterSet::default().with("studio", vec![value("s1", "old"), value("gone", "stale")]);
+    assert!(send(&mut browse, &pms, LibraryWork::Filters { set }));
+    assert_eq!(stored_view("u-filters", "filter-machine").unwrap().filters[0].values.len(), 2);
+    browse.refill();
+    let target = SectionAddress { epoch: browse.state.table_epoch(), sid: pms.sid, section: 1 };
+    assert!(browse.state.addressed_with_adapter(&browse.adapter, target,
+        LibraryWork::Values { facet: "studio".into(), want_rows: 50 }, &browse.keys, &mut browse.jobs));
+    browse.run_listing_jobs();
+    let _ = browse.pump();
+    let held = stored_view("u-filters", "filter-machine").unwrap();
+    assert_eq!(held.filters[0].values.iter().map(|v| (v.key.as_str(), v.title.as_str())).collect::<Vec<_>>(),
+        [("s1", "Studio One")], "the stale key is gone and the title is the server's");
+}

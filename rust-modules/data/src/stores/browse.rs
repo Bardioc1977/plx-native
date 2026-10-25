@@ -636,6 +636,12 @@ pub enum LibraryWork {
     },
     Letters,
     Genres,
+    /// Replace the current section's facet terms with `set`: the absolute form of every filter edit
+    /// (a pending slot that keeps only the last edit loses nothing to it). STUB (red commit of the
+    /// saved view): ignored.
+    Filters {
+        set: crate::browse::filters::FilterSet,
+    },
     /// The next page(s) of facet `facet`'s value list, until `want_rows` rows have landed (or the
     /// list is complete). Idempotent: the picker sends it on every tick. STUB (red commit): ignored.
     Values {

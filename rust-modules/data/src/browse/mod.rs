@@ -1626,13 +1626,14 @@ impl BrowseState {
             sort,
             unwatched: state.unwatched,
             genre: state.genre().map(|genre| genre.id.clone()),
+            filters: Vec::new(),
         };
         // The viewer's own edit of a field settles it, whatever the restore had left.
         if let Some(state) = self.states.get_mut(i) {
             match edit {
                 ViewField::Sort => state.sort_resolved = true,
                 ViewField::Genre => state.genre_resolved = true,
-                ViewField::Unwatched | ViewField::Listing => {}
+                ViewField::Unwatched | ViewField::Filters | ViewField::Listing => {}
             }
         }
         let Some(section) = self.sections.get(i) else { return };
@@ -1980,6 +1981,7 @@ impl BrowseState {
                     LibraryWork::Want { lo, hi, focus } => self.want(lo, hi, focus),
                     LibraryWork::Letters => self.kick_letters(adapter, keys, jobs),
                     LibraryWork::Genres => self.kick_values(adapter, keys, jobs, "genre", usize::MAX),
+                    LibraryWork::Filters { .. } => {}
                     LibraryWork::Values { facet, want_rows } => self.kick_values(adapter, keys, jobs, &facet, want_rows),
                     LibraryWork::Retry => self.retry_cur_source(),
                     LibraryWork::Requery => {
