@@ -7,7 +7,7 @@
 //! `profile_prefs`:
 //!
 //! ```json
-//! "profile_prefs": [ { "user": "<home uuid, or \"\" for the account owner>", "account": "<grant::account_key>",
+//! "profile_prefs": [ { "user": "<home uuid, or \"\" for the account owner>", "account": "<account_stamp>",
 //!                      "prefs": { "subtitle_size": "large", "playback_quality": "720p_4_mbps" } } ]
 //! ```
 //!
@@ -26,11 +26,15 @@
 //!   [`super::de_soft_opt`], which turns anything it cannot read into `None` (the per-type `de_soft_*`
 //!   functions of [`Preferences`] turn garbage into the DEFAULT, which would shadow the fallback).
 //! * **Account-bound.** A record is visible only while its `account` equals the non-empty stamp of
-//!   the signed-in account (`grant::account_key` of the account token). The owner's `""` record of
-//!   two accounts therefore never mixes, a re-login that replaced the token without a sign-out
+//!   the signed-in account ([`account_stamp`](crate::plex::session::account_stamp): the OWNER's
+//!   stamp once the roster names one, else the token's fingerprint). The owner's `""` record of
+//!   two accounts therefore never mixes. A re-login by the SAME owner keeps its records (the stamp
+//!   does not follow the token; the older build's token-stamped records are adopted into the owner
+//!   stamp), while a re-login that replaced the credentials of a DIFFERENT owner without a sign-out
 //!   leaves the previous records unreachable, and the next write prunes them ([`put_own`]).
 //! * **Written only through [`persist_profile_pref`]**, which refuses without a seat, across a
-//!   tenure or credential change, and with an empty stamp.
+//!   tenure or client change, when the file's account stamp is no longer the seat's (another
+//!   owner's login; a new token under the SAME owner does not refuse), and with an empty stamp.
 //! * **No `extensions`**: a field a later build adds is not carried by this one.
 use super::{
     Fallback, Parse, ProfileKeyed, ProfileRecords, Preferences, Row, Scope, Setting, SettingsWrite, StampedRecord,
@@ -132,8 +136,8 @@ impl ProfilePrefs {
 pub struct ProfilePrefsRecord {
     /// The Plex Home user's `uuid`, or empty for the account owner.
     pub user: String,
-    /// `grant::account_key` of the account the values were picked under; a record is visible only
-    /// while this equals the signed-in account's non-empty stamp.
+    /// [`account_stamp`](crate::plex::session::account_stamp) of the account the values were picked
+    /// under; a record is visible only while this equals the signed-in account's non-empty stamp.
     #[serde(deserialize_with = "super::de_soft_string", skip_serializing_if = "String::is_empty")]
     pub account: String,
     pub prefs: ProfilePrefs,
@@ -256,10 +260,11 @@ pub fn put_own<S: ProfileSetting>(records: &mut Vec<ProfilePrefsRecord>, user: &
 }
 
 /// **Who a pick is for, captured on the main thread when the viewer picks**: the seat, the
-/// revocation tenure and the credentials the record belonged to. The worker's write is refused when
-/// any of them moved (the account-data guard of `queue_update_ticket`), so a pick queued before a
-/// sign-out or a different login lands nowhere, and a pick made as profile A lands on A's record
-/// whoever is seated when the write runs.
+/// revocation tenure and the client the record belonged to. The worker's write is refused when the
+/// tenure or the client moved, or when the file's account stamp ([`account_stamp`](crate::plex::session::account_stamp))
+/// is no longer the seat's, so a pick queued before a sign-out or a login by another owner lands
+/// nowhere, a pick queued across a re-sign-in by the SAME owner (a new token, the same stamp) lands,
+/// and a pick made as profile A lands on A's record whoever is seated when the write runs.
 #[derive(Clone, Debug)]
 pub struct ProfileWrite {
     user: String,
@@ -306,7 +311,7 @@ impl ProfileWrite {
 /// has: a legacy absent quality must not be reinterpreted by a later readiness change. `true` is a
 /// `Durable` write, or no write at all because the profile already held the value (`read &&
 /// unchanged`). `false` is a refused or failed write, an unreadable record, a pick whose tenure or
-/// credentials moved, and the revocation guard of
+/// client moved or whose account stamp is no longer the file's, and the revocation guard of
 /// [`update_guarded_with_outcome`](super::super::update_guarded_with_outcome).
 pub fn persist_profile_pref<S: ProfileSetting>(w: &ProfileWrite, v: S::Value) -> bool {
     let (mut read, mut unchanged) = (false, false);

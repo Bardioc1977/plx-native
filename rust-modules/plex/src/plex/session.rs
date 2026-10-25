@@ -72,8 +72,10 @@ static CURRENT: Mutex<Option<std::sync::Arc<CurrentProfile>>> = Mutex::new(None)
 pub struct CurrentProfile {
     pub user: Option<UserRef>,
     pub generation: u32,
-    /// `grant::account_key` of the account token the owner published this profile under: the half of
-    /// the [`Seat`] that says WHICH sign-in the profile belongs to. Empty before a sign-in and in a
+    /// [`account_stamp`] of the persisted session the owner published this profile under: the half of
+    /// the [`Seat`] that says WHICH account the profile belongs to. It follows the OWNER (the roster
+    /// admin) once the roster names one, so a new sign-in by the same person publishes the same stamp,
+    /// and is the token fingerprint while the owner is unknown. Empty before a sign-in and in a
     /// publication recorded before the field existed.
     pub stamp: String,
 }
@@ -95,8 +97,11 @@ impl CurrentProfile {
 ///   change-profile, a sign-out, a dev token and a controlled replay. Nothing is restored for it and
 ///   nothing may be written for it.
 /// * [`Seat::Seated`] names the Plex Home user's `uuid` (`""` for the account owner) and the
-///   account stamp. Two seats are the same seat only when both match, so a re-login as the same
-///   person with a different token is a new seat.
+///   account stamp ([`account_stamp`]). Two seats are the same seat only when both match. The stamp
+///   follows the OWNER, so a re-login as the same person with a different token is the SAME seat
+///   (nothing is restored again, a pick in flight lands), while another owner's sign-in is a new
+///   one; while the roster has not named the owner yet the stamp is the token's, and the owner
+///   republishes the seat when the roster lands.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum Seat {
     #[default]
@@ -180,7 +185,7 @@ impl ProfilePublisher {
         }
     }
     /// Publish `user` as the active profile under the owner's `generation` and the account `stamp`
-    /// (`grant::account_key` of the account token) the owner published it under.
+    /// ([`account_stamp`] of the persisted session) the owner published it under.
     pub fn publish(&mut self, user: Option<UserRef>, generation: u32, stamp: String) {
         #[cfg(any(test, feature = "test-support"))]
         self.publish_with(user, generation, stamp, |_, _| {});
@@ -2759,7 +2764,8 @@ impl Session {
 /// with no Home selection AND for "no profile published yet" (the boot picker, a sign-out), which
 /// this cannot tell apart from the owner. It does not say whether anyone is SEATED either: a profile
 /// published without a sign-in stamp (a dev token) has a key here and seats nobody. Who is seated,
-/// as a comparable value that also names the sign-in, is [`current_seat`] / [`Seat`]; the ten
+/// as a comparable value that also names the account (the owner's stamp, not the sign-in's
+/// token), is [`current_seat`] / [`Seat`]; the ten
 /// per-profile settings (the player's nine and trailer autoplay) key on that, never on this. One accessor, so the reader and the
 /// writer cannot key on different things — which would look exactly like the leak this scoping
 /// exists to prevent.
@@ -4215,6 +4221,12 @@ pub fn replace_after_reauthentication_guarded_with_outcome(
     // never the token: a fresh QR sign-in always mints a new plex.tv token, so the same person
     // signing in again differs by token and must keep their pins, searches and library memory.
     // Unknown on either side (a roster not yet fetched, or one without a nameable admin) clears.
+    //
+    // The three STAMPED lists (`profile_prefs`, `track_memory`, `subtitle_offsets`) need none of this:
+    // their stamp is the owner's (`account_stamp`), so the same person keeps them across the new
+    // token, a different owner's read as nothing, and that owner's first write prunes them. `cur`
+    // is the adopted read (`read_live_locked`), so the older build's token-stamped records are the
+    // owner's by now, BEFORE the credentials below are swapped.
     if !cur.account_token.is_empty() && !same_owner(&cur.home_users, &next.home_users) {
         next.prefs.last_library.clear();
         next.prefs.library_views.clear();

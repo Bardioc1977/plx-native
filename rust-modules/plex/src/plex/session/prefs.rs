@@ -35,6 +35,16 @@
 //! [`ProfileMemory::upsert_with`], which merges, prunes and budgets, never through a `Vec`
 //! assignment. `subtitle_offsets` is the other tenant of the door and is declared the same way
 //! ([`SubtitleOffsetsPref`]).
+//!
+//! **The stamped lists follow the OWNER.** `profile_prefs`, `track_memory` and `subtitle_offsets`
+//! carry an account stamp per record, and that stamp is [`account_stamp`](super::account_stamp): the
+//! plex.tv account that administers the signed-in Home (`o1:` and a hash), not the sign-in's token,
+//! so a person who signs in again keeps their memory (#830). While the roster has not named the
+//! owner the stamp is the token's fingerprint, which is also what every older build wrote; a record
+//! under that stamp is ADOPTED into the owner stamp when the owner becomes known
+//! ([`Preferences::restamp`], run wherever a session is read or written), and a write made while the
+//! owner is unknown prunes the foreign records but keeps the owner-stamped ones. Plaintext consent
+//! is the exception and stays bound to the sign-in (`grant::account_key`).
 use super::{
     DeckPress, DirectPlayMode, HdrOverlayBrightness, LastLibrary, LibraryViews, NextEpisodeMode, OpaqueExtensions, PlaintextConsent,
     HoldHintTaught, PlaybackQuality, ServerKeyPin, Session, SkipInterval, SubtitleOffsetEntry, SubtitleOffsets, SubtitlePosition,
@@ -691,8 +701,9 @@ pub struct ProfileList<E> {
     /// The Plex Home user's `uuid`, or **empty for the account owner** (`LastLibrary`'s
     /// convention, and for the same reason).
     pub user: String,
-    /// The account stamp of an account-bound list (`grant::account_key`), else empty. A value
-    /// that is not a string reads as empty: an unreadable stamp binds to no account.
+    /// The account stamp of an account-bound list ([`account_stamp`](super::account_stamp): the
+    /// OWNER's, or the token's fingerprint while the owner is unknown), else empty. A value that is
+    /// not a string reads as empty: an unreadable stamp binds to no account.
     #[serde(deserialize_with = "de_soft_string", skip_serializing_if = "String::is_empty")]
     pub account: String,
     /// Oldest first: a re-recorded entry moves to the end and the cap drains the front.
@@ -716,7 +727,7 @@ impl<E> Default for ProfileList<E> {
 pub trait ProfileKeyed: Sized {
     /// The Plex Home user's `uuid`, or empty for the account owner.
     fn user(&self) -> &str;
-    /// The account stamp (`grant::account_key`), else empty.
+    /// The account stamp ([`account_stamp`](super::account_stamp)), else empty.
     fn account(&self) -> &str;
     /// Nothing left to remember: the record goes when a write leaves it so.
     fn is_empty(&self) -> bool;
@@ -829,8 +840,9 @@ pub trait MemoryEntry: Serialize + DeserializeOwned + Clone + PartialEq {
     /// The most entries one profile keeps; the oldest are dropped first.
     const CAP: usize;
     /// The list belongs to the signed-in ACCOUNT, not to the television: its records carry the
-    /// account stamp (`grant::account_key`), a record stamped for another account reads as nothing,
-    /// a write is refused without a stamp, and a write prunes every record that is not its own.
+    /// account stamp ([`account_stamp`](super::account_stamp)), a record stamped for another account
+    /// reads as nothing, a write is refused without a stamp, and a write prunes every record that is
+    /// not its own (except the owner-stamped ones, while the owner is still unknown).
     /// Pair it with the key in `storage::state::ACCOUNT_BOUND_PREFERENCES` (`prefs_tests`' T-account
     /// holds the row to it), which is what makes sign-out drop the whole key. `false` leaves a
     /// tenant exactly as it was before this knob existed.
