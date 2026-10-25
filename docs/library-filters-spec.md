@@ -2,7 +2,7 @@
 
 Spec for filtering a library listing by the facets the server declares. Status: **proposed; the data
 half (wire, model, persistence, value-list jobs) lands first in two PRs that change no pixel, the
-panel follows in a third.** Third of the Plex-server parity specs. Every number below was measured by
+panel and the picker's search follow in two more (section 8).** Third of the Plex-server parity specs. Every number below was measured by
 read-only GET on PMS 1.43.5 (counts and shapes only; the mock reproduces the shapes with synthetic
 strings).
 
@@ -19,7 +19,7 @@ them:
   no menu contents" is true for the Sort menu only. The Filter menu has an **Unwatched** toggle and a **Genre** row
   (`screens/src/library/menu.rs`, `filter_section`), `QueryEdit` is
   `{Sort, Unwatched, Genre, LibraryType}` (`data/src/stores/browse.rs`). `SecState::query_filters`
-  (`data/src/browse/mod.rs`) can emit nothing else, and `Meta.Type[].Filter[]` is not parsed.
+  (`data/src/browse/mod.rs`) can emit nothing else; `Meta.Type[].Filter[]` was not parsed until the wire PR (1a) of this spec.
 - Everything the viewer can already do (Sort, A–Z rail, paging, Seasons/Episodes views, per-profile
   memory of the view in `library_sorts` / `LibraryView`) keeps working with any query; only the
   query builder and the menu are narrow.
@@ -243,9 +243,10 @@ when a list lands.
 
 ## 4. Data and wire changes
 
-- `plex`: parse `Meta.Type[].Filter[]` (`Facet { filter, filter_type, key, title }`) leniently; a
-  `facet_values(path, page)` read for a facet's `key`. Keys of `Filter` go through the existing lenient
-  string adapters. The listing request takes `&[FilterTerm]`.
+- `plex`: parse `Meta.Type[].Filter[]` leniently into `Facet { name, kind, title }` (the record's `key`
+  is deliberately not read); `Client::facet_values(section, facet, kind, type_terms, start, size)` reads
+  a facet's value list from the facet NAME and the listing's type terms. Filter values go on the wire
+  verbatim (`QueryBuilder::wire`).
 - `data::browse`: `SecState` replaces `unwatched: bool` and `genre: Option<GenreEntry>` with a
   `FilterSet` plus the cached facet list per type; `QueryEdit` gains
   `Filters(FilterSet)`, an ABSOLUTE replacement (the Library page's pending slot is last-wins, so a delta

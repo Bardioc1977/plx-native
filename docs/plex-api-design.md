@@ -235,8 +235,9 @@ impl StreamUrl {
 1. **JSON reads** (library/hubs/metadata/related/children) → `Client::get_json` →
    `stream::http_get` + `serde_json::from_slice::<Envelope>` → typed. No op writes the socket.
 2. **Token** appears in exactly one function, `with_token`. No op writes `X-Plex-Token`.
-3. **Percent-encoding** happens in exactly one function, `enc` (via `QueryBuilder::str` and the
-   transcode `path=`). No op writes `%2F` or calls a URL encoder.
+3. **Percent-encoding** happens in `client.rs` only: `urlenc_str` (via `QueryBuilder::str` and the
+   transcode `path=`), and `wire_str` (via `QueryBuilder::wire`) for a filter value the server listed
+   already encoded, which it passes through unchanged. No op writes `%2F` or calls a URL encoder.
 4. **Streaming ops do not touch the socket.** `transcode_start_url`, `direct_play_url`,
    `transcode_subtitles_url` return `StreamUrl { host, port, path }`. The player feeds
    `url.host` (numeric) / `url.port` / `url.path` to `stream::http_open`. **Byte-Range headers
