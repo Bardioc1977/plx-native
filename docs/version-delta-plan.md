@@ -945,3 +945,38 @@ simulator-only, no TV, no tv-session, no deploy.
   remembered pick across a relaunch on the set (the simulator restores a seated session; the device needs the
   `--mock-plextv` boot), the label fit on LG's rasterizer (the fit tests use the host metric), and frame pacing of the
   panel.
+
+## Implementation notes, merge of origin/main
+
+- **Merge `a11469e8`** (ordinary `git merge origin/main`, git's default message plus the trailer; upstream head
+  `b835afb8`, nine upstream commits: #1006 ru catalogue, #1028 Browse directory/listing store jobs, #1000 simulator
+  1:1 drawable, #1026 ViewState writes as store jobs keyed by `ClientKey`, #1023 metadata season switch and episode
+  pages as store jobs, #1017 Home ground, #1021 Browse section hubs as store jobs, #950 FLAC as PCM). No textual
+  conflict, and no semantic break in our code: the delta's contracts were not touched by the new rules.
+  `fetch_playing_item(client, sid, rk, want)` is still called from `build_stream`, which holds the `&'static Client`
+  and is not a store job; `VersionLookup`, the `Detail`/`PlayingItem` versions and the subtitle scope compile and pass
+  unchanged. #1026's drop rule (a write whose profile or client moved is dropped) governs the view-state write path
+  and the runner's launch check; the version memory is a different door (the preference list through the memory
+  mirror, resolved on the main thread by `memory_scope`: the CURRENT profile key and `client_for(sid)`'s machine id),
+  exactly like the track memory, so no remembered pick is written by a worker for a client or profile that moved and no
+  new design question arises. Open observation, not caused by upstream: `settle_version` keys the write on the profile
+  that is seated when the landing is applied, not on the one that made the request; a profile switch tears the
+  playback down before a landing is applied (same as the track memory), so the two cannot differ today.
+- **Adaptation `8522ac25`** (forced by #1006): the Russian catalogue landed without `browse.detail.play_version`,
+  `browse.menu.play_version`, `browse.menu.play_version_title` (Play Version, #955), `widgets.menu.speed` and
+  `widgets.speed.normal`, so `plx_platform`'s build script fails with "5 error(s)" on `origin/main` itself. The five
+  strings are the net of `origin/fix/ru-missing-keys` (not on `main` yet; identical text merges cleanly when it
+  lands). Our delta adds no `en` key, so nothing else is missing.
+- **Ledgers** (`ci/allow/**`, non-comment lines): 193 before, 174 after, all shrinkage upstream's (`globals/data-browse`
+  20 -> 15, `globals/data-metadata` 8 -> 6, `globals/data-viewstate` 5 -> 0, `workers/data-browse` 5 -> 1,
+  `workers/data-metadata` 4 -> 2, `workers/data-viewstate` 1 -> 0). `ci/check-deps.sh` pins workers/globals/forks/fxlanes:
+  16/78/58/11 before, 9/66/58/11 after. Nothing of ours was added.
+- **Gates** on the committed tree (`git status --short` empty before and after): `make check-cargo` exit 0, `make
+  check-python-harness` `Ran 544 tests ... OK (skipped=1)`, `make test-hostsim` `test result: ok. 1178 passed; 0 failed`,
+  `make test-hostsim C=plx_media` `test result: ok. 1956 passed; 0 failed; 64 ignored`, `make check-nodef`, `make lint`,
+  `make check-replay` (`3 fixtures, 6 replays, 0 failures`; no shape pin or anchor moved, nothing re-recorded),
+  `ci/check-deps.sh` ("all gates green"), `ci/check-module-layers.py`, `ci/check-list-caps.py` (289 sites),
+  `tests/test_harness.py` `OK (skipped=1)`, `tests/test_mock_pms_library.py` `OK (skipped=8)`, `tests/mock_pms.py
+  --selftest` ok. `ci/test_disk_preflight.py` still fails its free-space assertion on this machine (22 GiB free;
+  upstream did not change it), so the whole `make check` still stops there. The simulator was not started: the merge
+  moved no pixel or layout of ours.
