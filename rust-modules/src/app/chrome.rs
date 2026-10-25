@@ -6,6 +6,7 @@ use plx_machine::machine::{FocusKey, Measure};
 use plx_ui::icons::Icon;
 use plx_ui::widgets::{self, ChromeRead, ProfileChipRead, TabFace, TabLabels, TopFocus};
 use plx_data::stores::browse::{DirectoryView, SecKind};
+use plx_screens::registry::HomeTab;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Pill {
@@ -15,16 +16,36 @@ pub(crate) enum Pill {
     Search,
 }
 
+impl Pill {
+    /// The destination this pill opens: the one map to [`HomeTab`] (and so to its strip key).
+    pub(crate) fn tab(self) -> HomeTab {
+        match self {
+            Pill::Home => HomeTab::Home,
+            Pill::Section(kind) => HomeTab::of_kind(kind),
+            Pill::Watchlist => HomeTab::Watchlist,
+            Pill::Search => HomeTab::Search,
+        }
+    }
+
+    /// The pill of a destination. The inverse of [`tab`](Self::tab).
+    fn of_tab(tab: HomeTab) -> Pill {
+        match (tab, tab.section()) {
+            (_, Some(kind)) => Pill::Section(kind),
+            (HomeTab::Watchlist, None) => Pill::Watchlist,
+            (HomeTab::Search, None) => Pill::Search,
+            (_, None) => Pill::Home,
+        }
+    }
+}
+
 /// The strip's destination keys in strip order: Home, one key per type pill, the Watchlist
 /// bookmark, Search. The one
 /// place that order is written; `refresh` publishes it and the pill maps below read it, so no
 /// map assumes which index Search holds.
 fn strip_keys(directory: DirectoryView<'_>) -> Vec<u32> {
     let mut keys = vec![widgets::TAB_KEY_HOME];
-    keys.extend((0..directory.tab_count()).filter_map(|i| directory.tab_kind(i)).map(|kind| match kind {
-        SecKind::Movie => widgets::TAB_KEY_MOVIES,
-        SecKind::Show => widgets::TAB_KEY_SHOWS,
-    }));
+    keys.extend((0..directory.tab_count()).filter_map(|i| directory.tab_kind(i))
+        .map(|kind| HomeTab::of_kind(kind).strip_key()));
     keys.push(widgets::TAB_KEY_WATCHLIST);
     keys.push(widgets::TAB_KEY_SEARCH);
     keys
@@ -36,13 +57,7 @@ pub(crate) fn pill_at(directory: DirectoryView<'_>, i: usize) -> Pill {
 
 /// The destination a strip index names, by the KEY published at that index.
 fn pill_in(i: usize, keys: &[u32]) -> Pill {
-    match keys.get(i).copied() {
-        Some(widgets::TAB_KEY_MOVIES) => Pill::Section(SecKind::Movie),
-        Some(widgets::TAB_KEY_SHOWS) => Pill::Section(SecKind::Show),
-        Some(widgets::TAB_KEY_WATCHLIST) => Pill::Watchlist,
-        Some(widgets::TAB_KEY_SEARCH) => Pill::Search,
-        _ => Pill::Home,
-    }
+    keys.get(i).copied().and_then(HomeTab::from_strip_key).map_or(Pill::Home, Pill::of_tab)
 }
 
 pub(crate) fn pill_of(directory: DirectoryView<'_>, pill: Pill) -> Option<usize> {
@@ -50,13 +65,7 @@ pub(crate) fn pill_of(directory: DirectoryView<'_>, pill: Pill) -> Option<usize>
 }
 
 fn pill_index(pill: Pill, keys: &[u32]) -> Option<usize> {
-    let key = match pill {
-        Pill::Home => widgets::TAB_KEY_HOME,
-        Pill::Section(SecKind::Movie) => widgets::TAB_KEY_MOVIES,
-        Pill::Section(SecKind::Show) => widgets::TAB_KEY_SHOWS,
-        Pill::Watchlist => widgets::TAB_KEY_WATCHLIST,
-        Pill::Search => widgets::TAB_KEY_SEARCH,
-    };
+    let key = pill.tab().strip_key();
     keys.iter().position(|&k| k == key)
 }
 

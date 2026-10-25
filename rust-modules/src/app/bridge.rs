@@ -777,11 +777,7 @@ impl Bridge {
     }
 
     pub(crate) fn search_tab_available(&self, tab: HomeTab) -> bool {
-        match tab {
-            HomeTab::Movies => self.directory.view().preferred(plx_data::browse::SecKind::Movie).is_some(),
-            HomeTab::Shows => self.directory.view().preferred(plx_data::browse::SecKind::Show).is_some(),
-            _ => true,
-        }
+        tab.section().is_none_or(|kind| self.directory.view().preferred(kind).is_some())
     }
 
     pub(crate) fn library_selection(&self, d: &Dispatcher<AppHost>, entry: EntryId, focus: Option<FocusKey<u32>>)
@@ -3560,26 +3556,18 @@ pub(crate) fn nav_tab(
     focus_pill: Option<crate::app::chrome::Pill>,
     ret: Option<ReturnState<u32, PageMemory>>,
 ) {
-    use crate::app::chrome::Pill;
     let arg = match tab {
         HomeTab::Home => {
             // Keep the pill the user was standing on under focus. An IDENTITY, not an index: a
             // pill can appear or disappear while the dip runs, and `HomeCmd::FocusStrip` is
             // delivered when Home MOUNTS, not now.
             if let Some(pill) = focus_pill.filter(|pill| crate::app::chrome::pill_of(rig.directory.view(), *pill).is_some()) {
-                let want = match pill {
-                    Pill::Home => HomeTab::Home,
-                    Pill::Search => HomeTab::Search,
-                    Pill::Watchlist => HomeTab::Watchlist,
-                    Pill::Section(plx_data::browse::SecKind::Movie) => HomeTab::Movies,
-                    Pill::Section(plx_data::browse::SecKind::Show) => HomeTab::Shows,
-                };
-                rig.home_command(HomeCmd::FocusStrip(want));
+                rig.home_command(HomeCmd::FocusStrip(pill.tab()));
             }
             AppArg::Home
         }
         HomeTab::Movies | HomeTab::Shows => {
-            let kind = if tab == HomeTab::Movies { plx_data::browse::SecKind::Movie } else { plx_data::browse::SecKind::Show };
+            let Some(kind) = tab.section() else { return };
             rig.enter_library(kind);
             if d.top_arg() != Some(&AppArg::Library) { rig.aim_library(kind); }
             AppArg::Library

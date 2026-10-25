@@ -1048,12 +1048,7 @@ fn home_tab_available(
     directory: plx_data::stores::browse::DirectoryView<'_>,
     tab: HomeTab,
 ) -> bool {
-    let kind = match tab {
-        HomeTab::Movies => Some(plx_data::stores::browse::SecKind::Movie),
-        HomeTab::Shows => Some(plx_data::stores::browse::SecKind::Show),
-        _ => None,
-    };
-    kind.is_none_or(|kind| directory.tab_of_kind(kind).is_some())
+    tab.section().is_none_or(|kind| directory.tab_of_kind(kind).is_some())
 }
 
 /// **The Library pages' publication gate**: may the store land the hubs it staged, this frame?

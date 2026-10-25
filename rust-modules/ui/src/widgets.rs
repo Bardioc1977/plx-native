@@ -6389,18 +6389,48 @@ const TAB_ICON_PILL_W: f32 = TAB_PILL_H;
 /// The mark inside it, at 1.15× the strip's own type rung (BODY 28 → 32) — the design system's
 /// `--btn-icon-ratio`, the same ratio every icon-and-label control in the app uses.
 const TAB_ICON_D: f32 = 32.0;
-/// The strip's control keys, by destination identity. A destination is looked up by its key, never
-/// by its position among the captured faces: Search is always `+3` and the profile chip `+4`,
-/// whatever type pills sit between Home and Search.
-pub const TAB_KEY_HOME: u32 = crate::dispatch::STRIP_BASE;
-pub const TAB_KEY_MOVIES: u32 = crate::dispatch::STRIP_BASE + 1;
-pub const TAB_KEY_SHOWS: u32 = crate::dispatch::STRIP_BASE + 2;
-pub const TAB_KEY_SEARCH: u32 = crate::dispatch::STRIP_BASE + 3;
-pub const TAB_KEY_CHIP: u32 = crate::dispatch::STRIP_BASE + 4;
-/// The Watchlist mark, `+5`: appended after the chip's `+4` so no existing key moves, and placed
-/// BEFORE Search in the strip's visual order (`app::chrome::strip_keys`) — a key is a destination's
-/// identity, never its position.
-pub const TAB_KEY_WATCHLIST: u32 = crate::dispatch::STRIP_BASE + 5;
+/// Declares the strip's control keys and the one list of them. A key is a destination's IDENTITY,
+/// `STRIP_BASE` + a stable offset, never its position among the captured faces; a new destination is
+/// one line here, and only here: the list [`TAB_KEYS`] is built from the same lines, so a key cannot
+/// be declared and left out of it. A `pub const TAB_KEY_*` written outside this macro is a test
+/// failure (`widgets_strip_key_tests.rs`), and two keys with one value are a build error.
+macro_rules! strip_keys {
+    ($($(#[$meta:meta])* $name:ident = $offset:expr;)+) => {
+        $($(#[$meta])* pub const $name: u32 = crate::dispatch::STRIP_BASE + $offset;)+
+        /// Every strip control key, in declaration order.
+        pub const TAB_KEYS: &[u32] = &[$($name),+];
+    };
+}
+
+strip_keys! {
+    /// The strip's control keys, by destination identity. A destination is looked up by its key,
+    /// never by its position among the captured faces: Search is always `+3` and the profile chip
+    /// `+4`, whatever type pills sit between Home and Search.
+    TAB_KEY_HOME = 0;
+    TAB_KEY_MOVIES = 1;
+    TAB_KEY_SHOWS = 2;
+    TAB_KEY_SEARCH = 3;
+    TAB_KEY_CHIP = 4;
+    /// The Watchlist mark, `+5`: appended after the chip's `+4` so no existing key moves, and placed
+    /// BEFORE Search in the strip's visual order (`app::chrome::strip_keys`) — a key is a
+    /// destination's identity, never its position.
+    TAB_KEY_WATCHLIST = 5;
+}
+
+/// Two destinations with one key would be one pill answering for both; the second to land (two
+/// open pull requests each take "the next free offset") fails the build instead.
+const _: () = {
+    let mut i = 0;
+    while i < TAB_KEYS.len() {
+        assert!(TAB_KEYS[i] >= crate::dispatch::STRIP_BASE, "a strip key below STRIP_BASE");
+        let mut j = i + 1;
+        while j < TAB_KEYS.len() {
+            assert!(TAB_KEYS[i] != TAB_KEYS[j], "two strip destinations share one key");
+            j += 1;
+        }
+        i += 1;
+    }
+};
 /// The top chrome band's y — the chip and the pills sit on it (Home and Library alike).
 ///
 /// **Derived from the overscan safe area, not chosen.** It was a bare `44.0` until 2026-08-23, which
@@ -9146,6 +9176,10 @@ mod control_face_tests;
 #[cfg(test)]
 #[path = "widgets_measure_tests.rs"]
 mod measure_tests;
+
+#[cfg(test)]
+#[path = "widgets_strip_key_tests.rs"]
+mod strip_key_tests;
 
 #[cfg(test)]
 #[path = "widgets_glass_budget_tests.rs"]
