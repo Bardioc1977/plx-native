@@ -3,6 +3,7 @@
 //! one listing type; an edit that changes nothing changes nothing.
 
 use super::filters::*;
+use super::test_support::*;
 use super::*;
 
 fn value(id: &str, title: &str) -> FilterValue {
@@ -182,4 +183,40 @@ fn the_genre_is_the_first_value_of_the_genre_term() {
     assert_eq!(listing.view().genre().map(|genre| (genre.id.as_str(), genre.title.as_str())), Some(("7", "Comedy")));
     assert!(state.set_library_type(LibraryType::Episodes));
     assert!(state.listing_snapshot().view().genre().is_none());
+}
+
+#[test]
+fn the_rail_is_available_under_every_term_while_the_letters_describe_the_selection() {
+    let _guard = plx_base::testlock::serial();
+    let mut state = on_the_tv_library();
+    state.states[1].sorts = Arc::new(vec![SortEntry {
+        desc_key: String::new(), key: "titleSort".into(), title: "Title".into(), default_desc: false,
+    }]);
+    for set in [selection(), FilterSet::default().with_flag("hdr", true), FilterSet::default().with("studio", vec![value("S", "s")])] {
+        assert!(state.set_filters(set.clone()));
+        assert!(!state.listing_snapshot().view().rail_available(), "the counts on hand were for another selection");
+        let key = state.states[1].letters_key();
+        state.states[1].land_letters(key, vec![("A".into(), 2), ("B".into(), 3)]);
+        assert!(state.listing_snapshot().view().rail_available(), "the letters were counted with this selection's terms: {set:?}");
+    }
+}
+
+#[test]
+fn a_filter_edit_with_a_page_out_drops_that_page() {
+    let _guard = plx_base::testlock::serial();
+    let (_cleanup, mut browse, _sid, client) = loopback_source_at(9, SecKind::Movie);
+    browse.maybe_spawn();
+    assert!(browse.adapter.page.busy(), "premise: the first page is out");
+    let asked_under = browse.state.query_gen();
+    assert!(browse.state.set_filters(FilterSet::default().with_flag("hdr", true)));
+    assert_ne!(browse.state.query_gen(), asked_under);
+    browse.adapter.page.post(PageResult {
+        client, token_gen: client.token_gen(), gen: asked_under, sec: 0, start: 0,
+        items: vec![PmsMovie::default(), PmsMovie::default()], total: 2, sorts: None, restored: None,
+        genres: None, genre: None, facets: None, resolved: Default::default(),
+    }, |_| true);
+    let _ = browse.pump();
+    let state = browse.state.cur_state().unwrap();
+    assert_eq!((state.total, state.fetch), (-1, SecFetch::Loading), "the page for the old selection never lands");
+    assert!(state.items.get(0).is_none());
 }

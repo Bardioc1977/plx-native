@@ -12,8 +12,8 @@
 //! `StoreJob::BrowsePage` ([`listing_jobs`]) that the app's runner starts on a worker, and its
 //! answer waits in a claim-guarded mailbox (`Fetch`) stamped with the request's generation (a
 //! re-query supersedes in-flight landings), applied on the main thread by [`pump`] once a frame
-//! while the Library screen is up. The filter menus' value lists (genres, first letters) leave the
-//! same way, as `StoreJob::BrowseDirectory`.
+//! while the Library screen is up. The filter menus' value lists (a facet's values, the genres among
+//! them, and the first letters) leave the same way, as `StoreJob::BrowseDirectory`.
 //!
 //! The sort/filter MENUS are server-driven: the first page of a section is requested with
 //! `includeMeta=1` and the response's `Meta.Type[]` supplies the Sort entries; the genre
@@ -29,7 +29,7 @@
 //! Everything a viewer chose in a library's view is remembered across restarts, per profile, by
 //! (machine id, section key), as ONE record (`plex::session::Preferences::library_views`, issues #278
 //! and #441; [`saved_view`] holds the merge rules): the sort and its direction, the Unwatched
-//! switch, the genre and the listing type. A sort is recorded by its KEY, never its menu
+//! switch, the genre, the other filter terms of each listing and the listing type. A sort is recorded by its KEY, never its menu
 //! position, and applied on the section's first page only after that page's menu has offered the
 //! key again — the discovery request never carries it, for the 500 above — and the unsorted
 //! discovery page is then never published ([`fetch_listing_page`]). A key the menu no longer
@@ -414,15 +414,17 @@ impl LibraryType {
 
     /// The `type=` term of a listing of this type ([`Self::plex_type`]) as the wire pair a listing
     /// request carries: empty for the section's own default listing. The first of
-    /// [`SecState::query_filters`]' terms, and the whole of what the genre list is asked with.
+    /// [`SecState::query_filters`]' terms, and the whole of what a facet's value list is asked with
+    /// ([`filters::value_type_terms`]).
     pub fn type_terms(self, kind: SecKind) -> Vec<(String, String)> {
         self.plex_type(kind).map(|ty| ("type".to_owned(), ty.to_string())).into_iter().collect()
     }
 
-    /// Do the Unwatched and Genre filters apply? A collection has no watch state of its own and
-    /// no genre, so both are hidden — and not sent — while collections are listed. The section's
-    /// Unwatched switch is kept for when its own type is listed again (a genre never survives a
-    /// type change, in the session or in the saved view: it names one type's menu).
+    /// Do the Unwatched switch and the facet terms apply? A collection has no watch state of its own
+    /// and no facets, so both are hidden — and not sent — while collections are listed. The
+    /// section's Unwatched switch is kept for when its own type is listed again (the terms are the
+    /// listing's own: a type change clears them, the genre for good, the others restored from the
+    /// saved view of the listing it lands on).
     pub fn filters(self) -> bool {
         self != Self::Collections
     }
@@ -645,8 +647,8 @@ struct SecState {
     membership_stale: bool,
 }
 
-/// What the Collections page borrows the section's single query from: the grid's sort, genre and
-/// the menus that describe them. `set_library_type` resets all of it for the new type, so the page
+/// What the Collections page borrows the section's single query from: the grid's sort, facet terms
+/// (the genre among them) and the menus that describe them. `set_library_type` resets all of it for the new type, so the page
 /// that listed Films, sorted by Date Added and filtered to Drama, would come back title-sorted and
 /// unfiltered; the loan hands it back whole instead. The letter counts are NOT part of it: what the
 /// section lists can change while Collections is shown, so they are asked again on the way back.
