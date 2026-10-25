@@ -283,7 +283,8 @@ fn household_verdict(source: &BrowseSource, household: &[i64]) -> bool {
 
 // ---- section table (discovered per source) ---------------------------------------------------
 
-/// One browsable library section (movie or show), from one source's `GET /library/sections`.
+/// One browsable library section (movies, TV shows or Other Videos: [`SecKind`]), from one source's
+/// `GET /library/sections`.
 #[derive(Clone)]
 pub struct BrowseSection {
     /// index into [`BrowseState`]'s source table — the server half of this row's address. A bare `key` names two
@@ -314,7 +315,9 @@ pub struct BrowseSection {
     /// favourite-library hits first.
     ///
     /// Your HOUSEHOLD's libraries start favourite and a friend's start favourite only where the
-    /// household has no library of that type ([`plx_plex::plex::pins::default_on`]); the last
+    /// household has no library of that type ([`plx_plex::plex::pins::default_on`]); a friend's
+    /// Other Videos library never does, whatever the household has (personal media of a source that
+    /// is not the household's is never on by default, [`BrowseState::lib_refs`]); the last
     /// favourite cannot be turned off, or the app has nothing. The household and not the account
     /// — see [`BrowseSource::household`] and [`BrowseState::lib_refs`] for why plex.tv's raw
     /// `owned` cannot answer this for a Plex Home managed profile.
@@ -322,8 +325,8 @@ pub struct BrowseSection {
 }
 
 /// **What a library lists** — the TYPE menu's value. Separate from the section's kind: choosing
-/// episodes or collections changes the query, while the section stays a movie or TV library in
-/// the tab strip.
+/// episodes or collections changes the query, while the section keeps its kind (and so its pill)
+/// in the tab strip.
 ///
 /// [`LibraryType::Primary`] is the section's own metadata type — films in a movie library, shows
 /// in a TV library — and the only type the user's Unwatched/Genre filters and the client-side

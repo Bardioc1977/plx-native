@@ -7324,8 +7324,10 @@ const CHIP_CAP_MAX_R: f32 = CHIP_CAP_MAX.x + CHIP_CAP_MAX.w;
 /// source-pass note measures from the other direction. Nothing in the shader can undo that, so the
 /// geometry has to keep them apart, and the test below is what keeps them apart.
 ///
-/// What it costs is stated plainly: the product's own strip is 572px, so the material survives
-/// today's bar with room for one more library and not two. What it buys is that the band is never
+/// What it costs is stated plainly: the product's strip of two types is 648px against this limit
+/// of 672, so the material survives a household of Movies and TV Shows and NOT a third type: any
+/// further pill, even a bare 60px mark, makes it 724 and flat (Other Videos is that pill:
+/// `a_strip_with_a_third_type_pill_is_flat_by_the_budget`). What it buys is that the band is never
 /// two materials and never a doubled one, and never over the budget a measurement set.
 const GLASS_TRACK_MAX: f32 = if GLASS_TRACK_TOUCH_MAX < GLASS_TRACK_BUDGET_MAX {
     GLASS_TRACK_TOUCH_MAX

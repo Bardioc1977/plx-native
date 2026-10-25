@@ -85,7 +85,10 @@ pub struct LibRef<'a> {
 /// makes that true at the default rather than only after a visit to Settings.
 ///
 /// Your household's libraries are unaffected, and so is the case the rule was written for: a
-/// friend's films still default Off while the household has films of its own.
+/// friend's films still default Off while the household has films of its own. One kind is the
+/// exception in the other direction: `browse::lib_refs` reports Other Videos as a type the household
+/// always has, so a friend's Other Videos library stays Off even when the household owns none
+/// (their personal clips must not reach every member's Home unasked).
 pub fn default_on(lib: LibRef<'_>) -> bool {
     lib.household || !lib.household_type
 }

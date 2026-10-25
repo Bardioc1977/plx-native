@@ -557,7 +557,9 @@ Step 1's registry now has its first real consumer, and deliverable A of the desi
   state; it performs no HTTP. A dead share becomes a recoverable failed source without parking SDL.
 - **Pinning** is the design's one control and, since 2026-09-05, governs the whole app rather than
   Home alone (above): your HOUSEHOLD's libraries start favourite, a friend's start favourite only
-  if the household has no library of that type, and the last favourite cannot be turned off.
+  if the household has no library of that type (never a friend's Other Videos library: personal media
+  of a source that is not the household's is Off until switched on), and the last favourite cannot be
+  turned off.
   `pinned_libraries()` is its read side. The household and not the account, because plex.tv grades
   a Plex Home managed profile's own family server `owned:false` — read on ownership, such a profile
   had nothing of its own, no type of its own, and therefore every library it could see starting

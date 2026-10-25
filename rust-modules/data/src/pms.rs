@@ -2312,7 +2312,8 @@ fn merge_with_scope(srcs: &[Src], scope: &BrowseScope) -> HubBuild {
     for hub in &new_hubs {
         // Match on the locale-independent hubIdentifier, not the localized display title:
         // "home.continue" plus every Recently Added variant (home.movies.recent,
-        // home.television.recent, promoted <type>.recentlyadded.<id>) all carry "recent".
+        // home.television.recent, promoted <type>.recentlyadded.<id>) all carry "recent". The
+        // personal-video families (home.videos.*, video.*) carry it too and are never a billboard.
         let eligible = (hub.hub_id == "home.continue" || hub.hub_id.contains("recent"))
             && !personal_video_hub(&hub.hub_id);
         if !eligible {
