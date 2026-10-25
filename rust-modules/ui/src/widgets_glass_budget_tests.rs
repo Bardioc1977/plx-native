@@ -497,7 +497,7 @@ fn the_two_type_track_is_measured_per_language_against_the_budget() {
 /// This pins the consequence so nobody finds it by accident; re-solving the budget is a separate,
 /// measured GPU change. The same arithmetic applies to any other fourth destination (Live TV's
 /// pill, #993): with a short label it keeps the glass in German, French, Italian and Portuguese
-/// and not in English, Hungarian, Russian, Belarusian or (by 0.7 px) Spanish, on this model.
+/// and not in English, Hungarian, Russian, Belarusian or Spanish (a narrow miss), on this model; not pinned by a test.
 #[test]
 fn the_translated_other_videos_pill_is_flat_in_every_language() {
     use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
