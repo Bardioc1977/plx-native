@@ -520,7 +520,8 @@ const LEGACY: &str = "aaaaaaaaaaaaaaaa";
 const OWNER: &str = "o1:19afc47bcea99412";
 
 /// **T-stamp.** Every account-bound row that stamps its records must be re-stamped by
-/// `Preferences::restamp`, so a new tenant that forgets its one registration line fails here instead
+/// `Preferences::restamp` AND seen by `Preferences::restamp_pending` (two registrations: the write
+/// funnel skips the adoption when the scan sees nothing), so a new tenant that forgets its one registration line fails here instead
 /// of silently losing its records at the next re-sign-in. Held to `DESCRIPTORS`, both ways: a name
 /// in `NOT_STAMPED` that is not an account-bound row is stale.
 #[test]
@@ -531,6 +532,7 @@ fn t_stamp_every_stamped_account_bound_list_is_restamped() {
     let mut checked = Vec::new();
     for d in DESCRIPTORS.iter().filter(|d| d.account_bound && !NOT_STAMPED.contains(&d.key)) {
         let mut prefs: Preferences = serde_json::from_value(json!({ d.key: [{"user": "", "account": LEGACY}] })).unwrap();
+        assert!(prefs.restamp_pending(&[LEGACY.to_string()]), "`{}`: restamp_pending (the write funnel's scan) does not see its records", d.key);
         assert!(prefs.restamp(&[LEGACY.to_string()], OWNER), "`{}`: restamp did not touch its records", d.key);
         let value = serde_json::to_value(&prefs).unwrap();
         assert_eq!(value[d.key][0]["account"], json!(OWNER), "`{}`: its record is still stamped for the old sign-in", d.key);

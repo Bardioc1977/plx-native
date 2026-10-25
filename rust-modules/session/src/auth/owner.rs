@@ -1541,6 +1541,9 @@ impl SessionMachine {
             // `admitted_persistence` slot, so a Seat completion it overtook is dropped above: the
             // seat then keeps the stamp it has, which still matches what Invariant I lets a reader
             // use, and the next restore converges (fail closed).
+            // `!released` is deliberately DEFENSIVE: a Seat commit is planned only with no held
+            // handoff, so its completion never releases one; the conjunct keeps a future change
+            // from publishing twice (the release already published) if that ever stops holding.
             let republish = completion.purpose == PersistencePurpose::Seat && !released
                 && !self.state.authorized_in_flow && self.state.held_handoff.is_none()
                 && self.state.active_profile.is_some()
@@ -2516,6 +2519,12 @@ impl SessionMachine {
     ///   the STAMP, not on the roster: a respelling that maps to the same stamp republishes nothing.
     fn commit_moves_a_published_seat(&self, plan: &CommitPlan, delta: &CommitDelta) -> bool {
         let Some(patch) = &plan.credentials else { return false };
+        // `purpose == Background` and `!delta.activate_profile` are deliberately DEFENSIVE. The one
+        // call site runs for every resource observation, but the other credential commits there are
+        // Discovery (Login, Rediscover) or Profile (ProfileSwitch) by `purpose`, and no Background
+        // observation sets `activate_profile`, so neither conjunct can be false today. They stay so
+        // that a future op, or a future caller of this predicate, cannot republish around the
+        // held-handoff gate of a sign-in or a profile switch.
         if plan.purpose != PersistencePurpose::Background
             || plan.authority != plx_plex::plex::session::SaveAuthority::Routine
             || self.state.authorized_in_flow || self.state.held_handoff.is_some()
