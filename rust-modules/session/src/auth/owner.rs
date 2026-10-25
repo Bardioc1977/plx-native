@@ -2935,6 +2935,8 @@ mod tests {
     use super::*;
     use super::scenarios::{roster_refresh_fixture, step, step_at, OwnerHost};
 
+    mod stamp_tests;
+
     /// The session-cache refresh bookkeeping (`CacheRefresh`): driven by tick values, no sleeping.
     mod cache_refresh {
         use super::*;

@@ -4234,6 +4234,11 @@ pub fn owner_identity(roster: &[HomeUserRef]) -> Option<String> {
     else { None }
 }
 
+/// Every spelling of the roster admin's identity, primary first (STUB: the primary alone).
+pub fn owner_identities(roster: &[HomeUserRef]) -> Vec<String> {
+    owner_identity(roster).into_iter().collect()
+}
+
 /// Do two rosters name the SAME account? Fails safe: an identity either side cannot name is "no".
 pub fn same_owner(a: &[HomeUserRef], b: &[HomeUserRef]) -> bool {
     matches!((owner_identity(a), owner_identity(b)), (Some(x), Some(y)) if x == y)
@@ -5497,6 +5502,10 @@ pub mod prefs;
 mod prefs_tests;
 #[cfg(test)]
 mod memory_tests;
+mod stamp;
+pub use stamp::{account_stamp, is_owner_stamp};
+#[cfg(test)]
+mod stamp_tests;
 
 #[cfg(test)]
 mod v0;

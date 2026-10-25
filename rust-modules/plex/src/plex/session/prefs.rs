@@ -639,6 +639,15 @@ impl Session {
     }
 }
 
+impl Preferences {
+    /// Re-stamp every stamped, account-bound list: records whose `account` is in `from` become `to`.
+    /// STUB (tests-first commit): changes nothing. Returns whether anything changed.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn restamp(&mut self, _from: &[String], _to: &str) -> bool {
+        false
+    }
+}
+
 // ---- the memory door: per-profile, per-item lists ---------------------------------------------
 
 /// **One profile's remembered entries of one kind**, oldest first: the record shape a per-profile
