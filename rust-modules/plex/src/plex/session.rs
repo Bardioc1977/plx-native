@@ -2018,7 +2018,7 @@ pub struct LibraryView {
     /// (listing, facet). Omitted while empty, so a view without filters serializes as it always
     /// did; soft per element. The legacy `unwatched` and `genre` fields above stay the authority
     /// for the Unwatched switch and the own listing's genre (see [`StoredFilter`]).
-    #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "de_soft_filters", skip_serializing_if = "Vec::is_empty")]
     pub filters: Vec<StoredFilter>,
     #[serde(flatten, default, skip_serializing_if = "OpaqueExtensions::is_empty")]
     pub extensions: OpaqueExtensions,
@@ -2074,11 +2074,12 @@ impl LibraryView {
     pub fn is_default(&self) -> bool {
         self.sort.is_empty() && !self.desc && !self.unwatched && self.genre.is_empty()
             && self.listing.is_empty() && self.listing_sort.is_empty() && !self.listing_desc
-            && self.extensions.is_empty()
+            && self.filters.is_empty() && self.extensions.is_empty()
     }
     /// This view with every field a record may not carry dropped back to its default: a sort
     /// longer than [`LibraryViews::MAX_SORT`], a genre longer than [`LibraryViews::MAX_GENRE`], a
-    /// listing that is not one of [`LibraryView::LISTINGS`].
+    /// listing that is not one of [`LibraryView::LISTINGS`], and the filters [`sanitize_filters`]
+    /// refuses.
     pub fn sanitized(mut self) -> Self {
         if self.sort.len() > LibraryViews::MAX_SORT {
             self.sort.clear();
@@ -2096,8 +2097,75 @@ impl LibraryView {
             self.listing_sort.clear();
             self.listing_desc = false;
         }
+        self.filters = sanitize_filters(std::mem::take(&mut self.filters));
         self
     }
+}
+
+/// The soft parse of [`LibraryView::filters`]: a malformed element costs itself
+/// ([`de_soft_vec`]), and what is left is held to what a record may carry
+/// ([`sanitize_filters`]) on READ as well as on write, because a stored facet name is later
+/// interpolated into a request path and the file may have been written by anything.
+fn de_soft_filters<'de, D>(d: D) -> Result<Vec<StoredFilter>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(sanitize_filters(de_soft_vec(d)?))
+}
+
+/// The filters a view may remember. A term survives only whole:
+///
+/// * its listing is the library's own (`""`) or `seasons` / `episodes` (Collections carry no terms);
+/// * its facet is `[A-Za-z0-9_.]{1,48}` (`valid_facet_name`), and the first term of a (listing,
+///   facet) wins;
+/// * a boolean term holds no values; a list term holds at least one, each a non-empty key with no
+///   comma or control character (it would not travel as one value), repeats collapsed, a title cut
+///   to [`LibraryViews::MAX_FILTER_TITLE`] characters; a key longer than
+///   [`LibraryViews::MAX_FILTER_KEY`] drops the whole term, because a term with a value missing
+///   means something else than the one the viewer chose.
+///
+/// Then the encoded list is held to [`LibraryViews::MAX_FILTER_BYTES`] by dropping whole terms from
+/// the END, never by cutting the values of one.
+fn sanitize_filters(filters: Vec<StoredFilter>) -> Vec<StoredFilter> {
+    let mut kept: Vec<StoredFilter> = Vec::new();
+    'terms: for mut term in filters {
+        let listing_ok = term.listing.is_empty() || matches!(term.listing.as_str(), "seasons" | "episodes");
+        if !listing_ok
+            || term.facet.len() > LibraryViews::MAX_FILTER_FACET
+            || !super::facets::valid_facet_name(&term.facet)
+            || kept.iter().any(|seen| seen.listing == term.listing && seen.facet == term.facet)
+        {
+            continue;
+        }
+        if term.flag {
+            term.values.clear();
+        } else {
+            let mut values: Vec<StoredValue> = Vec::new();
+            for mut value in std::mem::take(&mut term.values) {
+                if value.key.len() > LibraryViews::MAX_FILTER_KEY {
+                    continue 'terms;
+                }
+                if value.key.is_empty()
+                    || value.key.contains(',')
+                    || value.key.chars().any(char::is_control)
+                    || values.iter().any(|seen| seen.key == value.key)
+                {
+                    continue;
+                }
+                value.title = value.title.chars().take(LibraryViews::MAX_FILTER_TITLE).collect();
+                values.push(value);
+            }
+            if values.is_empty() {
+                continue;
+            }
+            term.values = values;
+        }
+        kept.push(term);
+    }
+    while !kept.is_empty() && serde_json::to_string(&kept).map_or(0, |json| json.len()) > LibraryViews::MAX_FILTER_BYTES {
+        kept.pop();
+    }
+    kept
 }
 
 impl LibraryViews {

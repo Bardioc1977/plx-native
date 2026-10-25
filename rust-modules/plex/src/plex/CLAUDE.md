@@ -577,6 +577,17 @@ a dead source is **absent** from Home and states itself in its own library secti
   pruned by the next write. The media half (`route/prefs.rs` `remember`) stamps its mirror write with
   the stamp the mirror was seeded under (`decision_memory_tests`
   `a_retune_or_a_forget_reaches_the_stamped_record_the_restore_seeded`).
+- **`library_sorts` records carry the viewer's filters in one additive field, `LibraryView::filters`**
+  (`StoredFilter`/`StoredValue`, `session.rs`): one term per (listing, facet), plain strings because
+  this layer cannot name the data layer's `FilterSet`. It is omitted while empty (a view without
+  filters serializes byte for byte as before), soft per element, and held to what a record may carry on
+  read AND write (`sanitize_filters`): a facet name must pass `valid_facet_name` (it is interpolated into
+  a request path at restore), a boolean term holds no values, and the whole list is bounded by BYTES
+  (`MAX_FILTER_BYTES`, 1.5 KiB) by dropping whole terms from the end, never by cutting a term's values. The
+  legacy `unwatched` and `genre` fields stay authoritative for the Unwatched switch and the own listing's
+  genre; an older build ignores `filters` and keeps it through its own rewrite (`extensions`). The
+  server's filter facets and a facet's value list are `facets.rs`; the filter value a request carries
+  goes through `QueryBuilder::wire`, never `.str` (the server's keys arrive percent-encoded).
 - **The contract for a new setting.** Step 4 is a review rule: no test or CI check enforces it.
   1. **Add the field** to `Preferences`, with explicit serde attributes. Pick the parse policy (a
      soft scalar, `de_soft_vec` for lists, `de_soft_bool_on` when absence or garbage means on) and

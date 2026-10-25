@@ -722,6 +722,42 @@ fn a_list_is_shed_oldest_first_from_the_largest_record(key: &str, field: &str) {
     }
 }
 
+/// **Remembered filters are counted by the guard like any other byte of a view.** Six views that
+/// each carry filters at their byte budget: the guard sheds `library_sorts` oldest first, and the
+/// number it takes is what the freed bytes need, fat entries included.
+#[test]
+fn the_guard_counts_remembered_filters_and_sheds_fat_views_oldest_first() {
+    use super::super::{StoredFilter, StoredValue};
+    let fat = |facet: &str| StoredFilter {
+        facet: facet.into(),
+        values: (0..6).map(|i| StoredValue { key: format!("{i}{}", "k".repeat(70)), title: "t".repeat(20) }).collect(),
+        ..Default::default()
+    };
+    let mut session = household(1, 1);
+    for k in 0..6 {
+        let mut one = view(k);
+        one.filters = vec![fat("genre"), fat("actor")];
+        session.set_view_for(&uuid(0), one);
+    }
+    let kept = session.views_for(&uuid(0)).unwrap().libs.clone();
+    assert!(kept.iter().all(|v| v.filters.len() == 2), "the fixture's filters fit the byte budget");
+    let (public, _) = split_canonical(&session).expect("a splittable session");
+    let base = canonical(&public, 2_000);
+    let size = |public: &state::PublicPayload| {
+        persistence::projected_size(&base, public, persistence::DocumentWrite::Update, "").unwrap() as i64
+    };
+    let full = size(&public);
+    let mut expected = public.clone();
+    expected.preferences["library_sorts"][0]["libs"].as_array_mut().unwrap().drain(..2);
+    let freed = full - size(&expected);
+    assert!(freed > 2 * 1_000, "two views with filters free {freed} bytes: the filters are in the measure");
+    let mut next = over_by(&base, public.clone(), freed);
+    let shed = persistence::fit_document(&base, &mut next, persistence::DocumentWrite::Update, "");
+    next.preferences.as_object_mut().unwrap().remove("future_pad");
+    assert_eq!(shed.into_iter().collect::<Vec<_>>(), vec![("library_sorts", 2)]);
+    assert_eq!(next.preferences["library_sorts"], expected.preferences["library_sorts"]);
+}
+
 /// A payload whose lists do not parse as this build's types is left alone, not rewritten: shedding
 /// is for data this build wrote.
 #[test]
