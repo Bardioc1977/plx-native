@@ -378,7 +378,7 @@ mod tests {
     mod other_videos_pill {
         use super::*;
         use plx_base::fontcov::advances::ShippedMeasure;
-        use plx_platform::i18n::{language_on_this_thread_for_test, Preference};
+        use plx_platform::i18n::{language_on_this_thread_for_test, Preference, SHIPPED};
 
         /// A household's section table: kind, the server's title for it, whether it is a favourite.
         fn libraries(rows: &[(SecKind, &str, bool)]) -> DirectorySnapshot {
@@ -517,12 +517,15 @@ mod tests {
         fn the_title_is_not_translated() {
             let two = libraries(&[(SecKind::Video, "Home Movies", true), (SecKind::Video, "Holiday Clips", true)]);
             let one = libraries(&[(SecKind::Video, "Home Movies", true)]);
-            for (preference, generic) in [(Preference::En, "Other Videos"), (Preference::De, "Andere Videos"),
-                (Preference::Ru, "Другие видео")] {
+            let mut type_words = std::collections::BTreeSet::new();
+            for preference in SHIPPED {
                 let _language = language_on_this_thread_for_test(preference);
                 assert_eq!(video_label(&strip(&one)), "Home Movies", "{preference:?}: the server's word");
+                let generic = plx_platform::i18n::msg::browse_kind_other_videos();
                 assert_eq!(video_label(&strip(&two)), generic, "{preference:?}: the type word is translated");
+                type_words.insert(generic);
             }
+            assert!(type_words.len() > 1, "the type word differs between languages: {type_words:?}");
         }
 
         #[test]
