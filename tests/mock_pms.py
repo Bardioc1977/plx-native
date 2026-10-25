@@ -384,7 +384,8 @@ class Library:
     def __init__(self, seed=1, movies=48, shows=6, seasons=2, episodes=6, rail_fixture=False,
                  media=None, extra_media=None, loudness_analysis=True, extras=0,
                  resume_fixture=False, media_next_episode=False, next_episode_remux=False,
-                 media_forced_subtitle=False, caption_edge_cases=False, multi_version=False):
+                 media_forced_subtitle=False, caption_edge_cases=False, multi_version=False,
+                 people=20):
         if media_next_episode and media is None:
             raise ValueError("--media-next-episode needs --media")
         if media_forced_subtitle and media is None:

@@ -317,6 +317,400 @@ class LetterRailFilters(unittest.TestCase):
         self.assertEqual(with_unwatched, self.counts(pms, 1, "type=18"))
 
 
+# --- the server's facets (docs/library-filters-spec.md) -------------------------------------------
+
+MOVIE_FACETS = [
+    "genre", "year", "decade", "contentRating", "collection", "director", "actor", "writer",
+    "producer", "country", "studio", "resolution", "hdr", "dovi", "hdr10plus", "atmos", "unwatched",
+    "inProgress", "unmatched", "videoCodec", "audioCodec", "subtitleCodec", "audioLayout",
+    "audioLanguage", "subtitleLanguage", "editionTitle", "label", "location"]
+SHOW_FACETS = [
+    "genre", "year", "contentRating", "studio", "network", "country", "collection", "director",
+    "actor", "writer", "producer", "unwatchedLeaves", "unmatched", "editionTitle", "label"]
+EPISODE_FACETS = [
+    "year", "collection", "resolution", "hdr", "dovi", "hdr10plus", "atmos", "unwatched",
+    "inProgress", "videoCodec", "audioCodec", "subtitleCodec", "audioLayout", "audioLanguage",
+    "subtitleLanguage", "unmatched", "location"]
+BOOLEAN_FACETS = ("hdr", "dovi", "hdr10plus", "atmos", "unwatched", "unwatchedLeaves", "inProgress",
+                  "unmatched")
+INTEGER_FACETS = ("year", "decade")
+# The server's own `key` carries `?type=N` on most facets of a TV section, not on all (PMS 1.43.5).
+SHOW_UNTYPED = ("country", "unmatched", "editionTitle")
+EPISODE_TYPED = ("year", "collection", "resolution", "hdr", "dovi", "hdr10plus", "atmos",
+                 "unwatched", "inProgress")
+MOVIE_SORTS = ["titleSort", "addedAt", "originallyAvailableAt", "rating", "lastViewedAt", "random"]
+
+
+def meta(pms, section, type_arg=None):
+    suffix = f"&type={type_arg}" if type_arg else ""
+    return get(pms, f"/library/sections/{section}/all?includeMeta=1{suffix}"
+                    "&X-Plex-Container-Start=0&X-Plex-Container-Size=0")["Meta"]
+
+
+def type_entry(meta_block, kind):
+    return next((t for t in meta_block.get("Type", []) if t["type"] == kind), {})
+
+
+def listing_keys(pms, section, terms=""):
+    """The ratingKeys `/all?{terms}` lists, unpaged."""
+    query = f"?{terms}" if terms else ""
+    return [row["ratingKey"] for row in get(pms, f"/library/sections/{section}/all{query}")["Metadata"]]
+
+
+def values(pms, section, facet, terms=""):
+    """The rows of a facet's value list (absent `Directory` is an empty list, as PMS answers one)."""
+    query = f"?{terms}" if terms else ""
+    return get(pms, f"/library/sections/{section}/{facet}{query}").get("Directory", [])
+
+
+class FacetMeta(unittest.TestCase):
+    """`includeMeta=1` carries the server's `Filter[]` per type, as measured on PMS 1.43.5: movies
+    28, shows 15, seasons none, episodes 17, each `{filter, filterType, key, title, type}`."""
+
+    def test_a_movie_section_advertises_28_facets_in_the_servers_order(self):
+        facets = type_entry(meta(MockPms(Library()), 1, 1), "movie").get("Filter", [])
+        self.assertEqual([f["filter"] for f in facets], MOVIE_FACETS)
+        for f in facets:
+            with self.subTest(facet=f["filter"]):
+                self.assertEqual(set(f), {"filter", "filterType", "key", "title", "type"})
+                self.assertEqual(f["type"], "filter")
+                expect = ("boolean" if f["filter"] in BOOLEAN_FACETS
+                          else "integer" if f["filter"] in INTEGER_FACETS else "string")
+                self.assertEqual(f["filterType"], expect)
+                self.assertEqual(f["key"], f"/library/sections/1/{f['filter']}")
+                self.assertTrue(f["title"].strip())
+
+    def test_a_tv_section_has_a_type_entry_for_shows_seasons_and_episodes(self):
+        m = meta(MockPms(Library()), 2, 2)
+        self.assertEqual([t["type"] for t in m["Type"]], ["show", "season", "episode"])
+        shows = type_entry(m, "show")
+        self.assertEqual([f["filter"] for f in shows.get("Filter", [])], SHOW_FACETS)
+        for f in shows["Filter"]:
+            want = f"/library/sections/2/{f['filter']}" + ("" if f["filter"] in SHOW_UNTYPED else "?type=2")
+            self.assertEqual(f["key"], want, f["filter"])
+        self.assertEqual(type_entry(m, "season").get("Filter", []), [], "a season advertises none")
+        episodes = type_entry(m, "episode")
+        self.assertEqual([f["filter"] for f in episodes.get("Filter", [])], EPISODE_FACETS)
+        for f in episodes["Filter"]:
+            want = f"/library/sections/2/{f['filter']}" + ("?type=4" if f["filter"] in EPISODE_TYPED else "")
+            self.assertEqual(f["key"], want, f["filter"])
+
+    def test_the_active_type_follows_the_request(self):
+        pms = MockPms(Library())
+        active = lambda block: [t["type"] for t in block["Type"] if t.get("active")]
+        self.assertEqual(active(meta(pms, 2)), ["show"], "a TV section opens on its shows")
+        for arg, kind in ((2, "show"), (3, "season"), (4, "episode")):
+            with self.subTest(type=arg):
+                self.assertEqual(active(meta(pms, 2, arg)), [kind])
+        self.assertEqual(active(meta(pms, 1)), ["movie"])
+
+    def test_every_type_with_filters_names_its_fields_and_the_operators(self):
+        m = meta(MockPms(Library()), 2, 2)
+        for kind, prefix in (("show", "show."), ("episode", "episode.")):
+            fields = type_entry(m, kind).get("Field", [])
+            self.assertTrue(fields, kind)
+            self.assertTrue(all(f["key"].startswith(prefix) for f in fields), kind)
+        ops = {ft["type"]: [o["key"] for o in ft["Operator"]] for ft in m.get("FieldType", [])}
+        self.assertEqual(ops.get("integer"), ["=", "!=", ">>=", "<<="])
+        self.assertEqual(ops.get("tag"), ["=", "!="])
+        self.assertEqual(ops.get("boolean"), ["=", "!="])
+        self.assertEqual(ops.get("resolution"), ["="], "resolution has no negation")
+        movie = type_entry(meta(MockPms(Library()), 1, 1), "movie")
+        self.assertIn("genre", [f["key"] for f in movie.get("Field", [])])
+
+    def test_another_movie_section_advertises_the_movie_list(self):
+        """PMS's "Other videos" (section type movie, no agent) advertises the same names."""
+        lib = Library()
+        lib.sections.append({"key": "3", "type": "movie", "title": "s00000003", "uuid": "s00000004"})
+        facets = type_entry(meta(MockPms(lib), 3, 1), "movie").get("Filter", [])
+        self.assertEqual([f["filter"] for f in facets], MOVIE_FACETS)
+        self.assertEqual(facets[0]["key"], "/library/sections/3/genre")
+
+    def test_the_sorts_and_the_collection_menu_do_not_move(self):
+        pms = MockPms(Library())
+        self.assertEqual([s["key"] for s in type_entry(meta(pms, 1, 1), "movie").get("Sort", [])],
+                         MOVIE_SORTS)
+        self.assertEqual([s["key"] for s in type_entry(meta(pms, 2, 2), "show").get("Sort", [])],
+                         MOVIE_SORTS, "the sim's shows keep the sorts they always had")
+        kinds = meta(pms, 1, 18)["Type"]
+        self.assertEqual([k["type"] for k in kinds], ["collection"])
+        self.assertNotIn("Filter", kinds[0])
+
+    def test_titles_are_the_servers_english_constants(self):
+        facets = {f["filter"]: f["title"]
+                  for f in type_entry(meta(MockPms(Library()), 1, 1), "movie").get("Filter", [])}
+        self.assertEqual({k: facets.get(k) for k in ("dovi", "inProgress", "location", "hdr10plus")},
+                         {"dovi": "DOVI", "inProgress": "In Progress", "location": "Folder Location",
+                          "hdr10plus": "HDR10+"})
+        shows = {f["filter"]: f["title"]
+                 for f in type_entry(meta(MockPms(Library()), 2, 2), "show").get("Filter", [])}
+        self.assertEqual(shows.get("unwatchedLeaves"), "Unwatched")
+
+
+class FacetValues(unittest.TestCase):
+    """`GET /library/sections/{k}/{facet}`: the value list of a facet (docs/pms-api.md, section 2b)."""
+
+    def setUp(self):
+        self.lib = Library(movies=120, people=300)
+        self.pms = MockPms(self.lib)
+
+    def movie_items(self):
+        return [it for it in self.lib.items.values() if it["type"] == "movie"
+                and it["librarySectionID"] == 1]
+
+    def test_the_people_knob_sets_the_pool_and_the_default_does_not_move(self):
+        self.assertEqual(len(self.lib.people), 300)
+        self.assertEqual(len(Library().people), 20)
+        self.assertEqual(json.dumps(Library(people=20).__dict__, sort_keys=True),
+                         json.dumps(Library().__dict__, sort_keys=True))
+
+    def test_a_long_list_pages_like_the_listing(self):
+        every = self.pms.handle("GET", "/library/sections/1/actor")
+        unpaged = json.loads(every[2])["MediaContainer"]
+        rows = unpaged.get("Directory", [])
+        self.assertGreater(len(rows), 100, "the fixture's actor list is longer than one page")
+        self.assertNotIn("totalSize", unpaged)
+        self.assertNotIn("offset", unpaged)
+        self.assertEqual(unpaged["size"], len(rows))
+        cast = {str(t["id"]) for it in self.movie_items() for t in it["Role"]}
+        self.assertEqual({r["key"] for r in rows}, cast)
+        stitched = []
+        for start in range(0, len(rows) + 100, 100):
+            page = fetch(self.pms, *window("/library/sections/1/actor", start, 100, headers=bool(start % 200)))
+            self.assertEqual(page["totalSize"], len(rows))
+            self.assertEqual(page["offset"], start)
+            self.assertEqual(page["size"], len(page.get("Directory", [])))
+            stitched += page.get("Directory", [])
+        self.assertEqual(stitched, rows, "windows are contiguous slices of the unpaged list")
+
+    def test_size_zero_reads_the_count_and_a_start_past_the_end_is_empty(self):
+        total = len(values(self.pms, 1, "actor"))
+        self.assertGreater(total, 100)
+        count = fetch(self.pms, window("/library/sections/1/actor", 0, 0)[0])
+        self.assertEqual((count.get("totalSize"), count.get("offset"), count["size"]), (total, 0, 0))
+        self.assertEqual(count.get("Directory", []), [])
+        past = fetch(self.pms, window("/library/sections/1/actor", 5000, 10)[0])
+        self.assertEqual((past.get("totalSize"), past.get("offset"), past["size"]), (total, 5000, 0))
+        self.assertEqual(past.get("Directory", []), [])
+        ignored = fetch(self.pms, "/library/sections/1/actor?X-Plex-Container-Size=5")
+        self.assertEqual(len(ignored["Directory"]), total, "a Size without a Start is ignored")
+        self.assertNotIn("totalSize", ignored)
+
+    def test_rows_carry_what_the_server_puts_on_them(self):
+        for facet, fast, thumb in (("genre", True, False), ("year", True, False), ("decade", True, False),
+                                   ("actor", True, True), ("director", True, True),
+                                   ("contentRating", True, False), ("resolution", False, False),
+                                   ("videoCodec", False, False), ("audioLayout", False, False),
+                                   ("audioLanguage", False, False), ("subtitleLanguage", False, False)):
+            rows = values(self.pms, 1, facet)
+            with self.subTest(facet=facet):
+                self.assertTrue(rows, "the facet has values in the generated library")
+                for row in rows:
+                    self.assertEqual("fastKey" in row, fast)
+                    self.assertEqual("thumb" in row, thumb)
+                    self.assertTrue(row["key"] and row["title"])
+        row = values(self.pms, 1, "genre")[0]
+        self.assertEqual(row["fastKey"], f"/library/sections/1/all?genre={row['key']}")
+
+    def test_year_and_decade_come_newest_first(self):
+        years = sorted({it["year"] for it in self.movie_items()}, reverse=True)
+        self.assertEqual([r["key"] for r in values(self.pms, 1, "year")], [str(y) for y in years])
+        self.assertEqual([r["title"] for r in values(self.pms, 1, "year")], [str(y) for y in years])
+        decades = sorted({y // 10 * 10 for y in years}, reverse=True)
+        rows = values(self.pms, 1, "decade")
+        self.assertEqual([r["key"] for r in rows], [str(d) for d in decades])
+        self.assertEqual([r["title"] for r in rows], [f"{d}s" for d in decades])
+
+    def test_a_facet_with_no_values_answers_an_empty_directory_without_the_key(self):
+        for facet in ("label", "editionTitle"):
+            with self.subTest(facet=facet):
+                container = get(self.pms, f"/library/sections/1/{facet}")
+                self.assertEqual(container["size"], 0)
+                self.assertNotIn("Directory", container)
+
+    def test_a_boolean_facets_key_is_not_a_value_list(self):
+        """`hdr`, `dovi`, `atmos`, `inProgress` and `unmatched` answer 404; `unwatched` answers the
+        whole LISTING (99 movies, 248 KB on PMS 1.43.5), so a client that GETs it downloads a listing."""
+        for facet in ("hdr", "dovi", "hdr10plus", "atmos", "inProgress", "unmatched"):
+            with self.subTest(facet=facet):
+                self.assertEqual(self.pms.handle("GET", f"/library/sections/1/{facet}")[0], 404)
+        listing = get(self.pms, "/library/sections/1/unwatched")
+        self.assertNotIn("Directory", listing)
+        self.assertEqual([m["ratingKey"] for m in listing["Metadata"]],
+                         listing_keys(self.pms, 1, "unwatched=1"))
+
+    def test_keys_are_percent_encoded_and_match_after_one_more_decode(self):
+        movies = sorted(self.movie_items(), key=lambda it: int(it["ratingKey"]))
+        movies[0]["contentRating"] = "Not Rated"
+        movies[1]["studio"] = "X Y"
+        rated = values(self.pms, 1, "contentRating")
+        self.assertIn("Not%20Rated", [r["key"] for r in rated])
+        self.assertIn(movies[0]["ratingKey"], listing_keys(self.pms, 1, "contentRating=Not%20Rated"))
+        self.assertEqual(listing_keys(self.pms, 1, "contentRating=Not%2520Rated"), [],
+                         "a key encoded again matches nothing")
+        studios = [r["key"] for r in values(self.pms, 1, "studio")]
+        self.assertIn("X%2520Y", studios, "a studio key is a name encoded twice")
+        self.assertEqual(listing_keys(self.pms, 1, "studio=X%2520Y"), [movies[1]["ratingKey"]])
+        self.assertEqual(listing_keys(self.pms, 1, "studio=X%252520Y"), [])
+        layouts = [r["key"] for r in values(self.pms, 1, "audioLayout")]
+        self.assertIn("5%2E1", layouts)
+        self.assertTrue(listing_keys(self.pms, 1, "audioLayout=5%2E1"))
+        self.assertEqual(listing_keys(self.pms, 1, "audioLayout=5%252E1"), [])
+
+    def test_a_single_encoded_comma_splits_and_a_double_encoded_one_does_not(self):
+        """PMS decodes twice: `%2C` is the separator after the first decode, `%252C` a literal comma."""
+        movie = next(it for it in self.movie_items())
+        movie["studio"] = "A,B"
+        self.assertIn("A%252CB", [r["key"] for r in values(self.pms, 1, "studio")])
+        self.assertEqual(listing_keys(self.pms, 1, "studio=A%252CB"), [movie["ratingKey"]])
+        self.assertEqual(listing_keys(self.pms, 1, "studio=A%2CB"), [], "two values, A and B")
+
+    def test_a_list_asked_with_terms_is_scoped_by_them_and_by_its_own_facet(self):
+        bare = values(self.pms, 1, "actor")
+        unwatched = values(self.pms, 1, "actor", "unwatched=1")
+        self.assertTrue({r["key"] for r in unwatched} < {r["key"] for r in bare})
+        genre = values(self.pms, 1, "genre")[0]["key"]
+        years = {str(it["year"]) for it in self.movie_items()
+                 if any(str(t["id"]) == genre for t in it["Genre"])}
+        self.assertEqual({r["key"] for r in values(self.pms, 1, "year", f"genre={genre}")}, years)
+        together = {str(t["id"]) for it in self.movie_items()
+                    if any(str(x["id"]) == genre for x in it["Genre"]) for t in it["Genre"]}
+        self.assertEqual({r["key"] for r in values(self.pms, 1, "genre", f"genre={genre}")}, together)
+
+    def test_an_untyped_list_in_a_tv_section_spans_its_types(self):
+        shows = {r["key"] for r in values(self.pms, 2, "year", "type=2")}
+        episodes = {r["key"] for r in values(self.pms, 2, "year", "type=4")}
+        self.assertEqual({r["key"] for r in values(self.pms, 2, "year")}, shows | episodes)
+        self.assertEqual(values(self.pms, 2, "director", "type=2"), [], "directors hang off episodes")
+        self.assertTrue(values(self.pms, 2, "director", "type=4"))
+        self.assertTrue(values(self.pms, 2, "director"))
+
+
+class FacetComposition(unittest.TestCase):
+    """Terms compose as PMS composes them: AND across facets (and across a repeated parameter), OR
+    within one comma-joined value, negation, an unknown name ignored."""
+
+    def setUp(self):
+        self.pms = MockPms(Library(movies=120, people=60))
+        self.lib = self.pms.lib
+        self.genres = [r["key"] for r in values(self.pms, 1, "genre")]
+
+    def ids(self, terms, section=1):
+        return set(listing_keys(self.pms, section, terms))
+
+    def test_a_comma_is_or_and_an_encoded_comma_is_the_same(self):
+        a, b = self.genres[:2]
+        either = self.ids(f"genre={a},{b}")
+        self.assertEqual(either, self.ids(f"genre={a}") | self.ids(f"genre={b}"))
+        self.assertGreater(len(either), len(self.ids(f"genre={a}")))
+        self.assertEqual(self.ids(f"genre={a}%2C{b}"), either)
+
+    def test_facets_and_repeated_parameters_are_and(self):
+        a, b = self.genres[:2]
+        self.assertEqual(self.ids(f"genre={a}&resolution=4k"), self.ids(f"genre={a}") & self.ids("resolution=4k"))
+        self.assertTrue(self.ids(f"genre={a}&resolution=4k"))
+        both = self.ids(f"genre={a}&genre={b}")
+        self.assertEqual(both, self.ids(f"genre={a}") & self.ids(f"genre={b}"))
+        self.assertLess(both, self.ids(f"genre={a},{b}"))
+
+    def test_three_facets_intersect(self):
+        a = self.genres[0]
+        want = self.ids("unwatched=1") & self.ids(f"genre={a}") & self.ids("resolution=4k")
+        self.assertEqual(self.ids(f"unwatched=1&genre={a}&resolution=4k"), want)
+        self.assertTrue(want, "the generated library has such a title")
+        self.assertTrue(self.ids("resolution=4k&hdr=1") < self.ids("resolution=4k"))
+        self.assertTrue(self.ids("resolution=4k&hdr=1"))
+
+    def test_an_unknown_name_is_ignored_and_a_bogus_value_matches_nothing(self):
+        everything = self.ids("")
+        self.assertEqual(self.ids("foo=1"), everything)
+        self.assertEqual(self.ids("genre=99999999"), set())
+        self.assertEqual(self.ids("resolution=nosuch"), set())
+
+    def test_negation_is_the_complement_and_a_resolution_cannot_be_negated(self):
+        everything = self.ids("")
+        a, b = self.genres[:2]
+        self.assertEqual(self.ids(f"genre!={a}"), everything - self.ids(f"genre={a}"))
+        self.assertEqual(self.ids(f"genre!={a},{b}"), everything - self.ids(f"genre={a},{b}"))
+        self.assertEqual(self.ids("resolution!=4k"), self.ids("resolution=4k"),
+                         "resolution declares `=` only, so the server reads `!=` as `=`")
+
+    def test_a_range_on_an_integer_facet(self):
+        later = {k for k in self.ids("") if self.lib.items[int(k)]["year"] > 2010}
+        self.assertEqual(self.ids("year%3E%3E=2010"), later)
+        earlier = {k for k in self.ids("") if self.lib.items[int(k)]["year"] < 2010}
+        self.assertEqual(self.ids("year%3C%3C=2010"), earlier)
+
+    def test_unwatched_and_unwatched_leaves_are_two_predicates(self):
+        movies = self.ids("unwatchedLeaves=1")
+        self.assertEqual(movies, set(), "a movie has no leaves")
+        lib = Library(movies=0, caption_edge_cases=True)
+        pms = MockPms(lib)
+        show = next(it for it in lib.items.values() if it["type"] == "show" and it["leafCount"] == 0)
+        own = set(listing_keys(pms, 2, "type=2&unwatched=1"))
+        leaves = set(listing_keys(pms, 2, "type=2&unwatchedLeaves=1"))
+        self.assertIn(show["ratingKey"], own, "a show with no episodes has no watched state of its own")
+        self.assertNotIn(show["ratingKey"], leaves, "and no unwatched leaf")
+        self.assertTrue(leaves < own)
+
+    def test_a_trait_the_type_does_not_advertise_is_evaluated_unpredictably_but_answers(self):
+        """PMS evaluates `hdr=1` on shows through their episodes and answers 0 for `genre` on episodes."""
+        shows = set(listing_keys(self.pms, 2, "type=2&hdr=1"))
+        episodes = set(listing_keys(self.pms, 2, "type=4&hdr=1"))
+        self.assertTrue(shows)
+        self.assertEqual(shows, {self.lib.items[int(k)]["grandparentRatingKey"] for k in episodes})
+        genre = self.genres[0]
+        self.assertEqual(self.ids(f"type=4&genre={genre}", 2), set())
+
+    def test_the_people_facets_match_a_tag_id_in_any_people_role(self):
+        movie = next(it for it in self.lib.items.values() if it["type"] == "movie")
+        director = str(movie["Director"][0]["id"])
+        self.assertTrue(self.ids(f"director={director}"))
+        self.assertEqual(self.ids(f"director={director}"), self.ids(f"actor={director}"))
+        self.assertEqual(self.ids(f"director={director}"), self.ids(f"writer={director}"))
+
+
+class FacetsAndTheRail(unittest.TestCase):
+    """`firstCharacter` honours every facet: its counts sum to the filtered `totalSize` and its prefix
+    sums land on the first title of each letter (24 of 24 combinations on PMS 1.43.5)."""
+
+    def check(self, pms, section, terms):
+        """Sum == the filtered `totalSize`, and the title at each prefix-summed offset starts its
+        letter (the first character of its sort title, so it holds for episodes too)."""
+        joined = (terms + "&" if terms else "")
+        letters = get(pms, f"/library/sections/{section}/firstCharacter" + (f"?{terms}" if terms else ""))["Directory"]
+        total = get(pms, f"/library/sections/{section}/all?{joined}"
+                         "X-Plex-Container-Start=0&X-Plex-Container-Size=0")["totalSize"]
+        self.assertEqual(sum(r["size"] for r in letters), total, terms)
+        offset = 0
+        for letter in letters:
+            first = get(pms, f"/library/sections/{section}/all?{joined}sort=titleSort"
+                             f"&X-Plex-Container-Start={offset}&X-Plex-Container-Size=1")["Metadata"][0]
+            self.assertEqual(first["titleSort"][0].upper(), letter["title"], (terms, letter, offset))
+            offset += letter["size"]
+        return total
+
+    def test_every_term_scopes_the_counts_like_the_listing(self):
+        pms = MockPms(Library(movies=120, people=60, rail_fixture=True))
+        genres = [r["key"] for r in values(pms, 1, "genre")][:2]
+        everything = self.check(pms, 1, "")
+        for terms in ("resolution=4k", "hdr=1", "dovi=1", "atmos=1", "inProgress=1", "unmatched=1",
+                      f"genre={genres[0]},{genres[1]}", f"genre!={genres[0]}", "year%3E%3E=2000",
+                      "audioLayout=5%2E1", "contentRating=PG-13",
+                      f"genre={genres[0]},{genres[1]}&resolution=4k&hdr=1"):
+            with self.subTest(terms=terms):
+                self.assertLess(self.check(pms, 1, terms), everything)
+        self.assertLess(self.check(pms, 1, "resolution=4k&hdr=1"), self.check(pms, 1, "resolution=4k"))
+
+    def test_shows_and_episodes_follow_their_own_facets(self):
+        pms = MockPms(Library(movies=0, rail_fixture=True))
+        for terms, base in (("type=2&hdr=1", "type=2"), ("type=2&unmatched=1", "type=2"),
+                            ("type=4&hdr=1", "type=4"), ("type=4&unwatched=1", "type=4"),
+                            ("type=4&resolution=4k", "type=4")):
+            with self.subTest(terms=terms):
+                self.assertLess(self.check(pms, 2, terms), self.check(pms, 2, base))
+
+
 class ResumeFixture(unittest.TestCase):
     """`--resume-fixture`: a show that has been watched up to S12E14, and one that has not."""
 
