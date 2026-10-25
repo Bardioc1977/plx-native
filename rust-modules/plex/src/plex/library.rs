@@ -1,7 +1,7 @@
 //! Library operations (impl Client): sections, section items (`section_items_query`), metadata,
 //! children (`children`, `children_paged`), related (`related`) — plus the two part-level playback ops (stream selection, direct-play target).
 use super::client::{urlenc_str, Client, QueryBuilder, StreamUrl};
-use super::facets::{FacetKind, FacetPage};
+use super::facets::{valid_facet_name, FacetKind, FacetPage};
 use super::models::{ListingFacts, MediaContainer, Metadata};
 use super::paging::{paged_path, PageReq};
 use super::params::{SectionQuery, StreamSelection};
@@ -145,7 +145,11 @@ impl Client {
     }
 
     /// The facet's value list, one window: `GET /library/sections/{k}/{facet}` with the listing's
-    /// own `type=` terms and no filter terms. STUB (red commit): never asks.
+    /// own `type=` terms ([`facet_values_path`]) and NO filter terms, so the answer is the whole
+    /// stable list, not one narrowed by what is already chosen. `None` when the request must not be
+    /// made (a boolean facet, a name outside the safe set) or could not be answered.
+    ///
+    /// Always paged, Start and Size both: a people list is 800 rows, 140 KB unpaged.
     pub fn facet_values(
         &self,
         section_key: i64,
@@ -437,30 +441,39 @@ pub(super) fn section_items_path(q: &SectionQuery) -> String {
     }
     b = b.opt_str("sort", q.sort);
     for (k, v) in q.filters {
-        b = b.str(k, v);
+        b = b.wire(k, v);
     }
     paged_path(&b.build(), PageReq::window(q.start, q.size))
 }
 
-/// The path of a facet's value list, or `None` for a request that must never be made: a boolean
-/// facet has no value list (STUB in the red commit: always `None`).
+/// The path of a facet's value list, or `None` for a request that must never be made.
+///
+/// Built from the facet NAME and the listing's own `type` terms and from nothing the server said
+/// about the list (its record's `key` is not even read), so a restore can ask before `Meta` has
+/// landed and a hostile key has nowhere to go. A boolean facet has no value list: `hdr`, `dovi`,
+/// `atmos`, `inProgress` and `unmatched` answer 404 and `unwatched` answers the whole unwatched
+/// LISTING (248 KB on a 400-film library), so the kind the caller knows is checked here, where no
+/// caller can forget it; a name outside [`valid_facet_name`] is refused for the same reason.
 pub(super) fn facet_values_path(
-    _section_key: i64,
-    _facet: &str,
-    _kind: FacetKind,
-    _type_terms: &[(String, String)],
-    _req: PageReq,
+    section_key: i64,
+    facet: &str,
+    kind: FacetKind,
+    type_terms: &[(String, String)],
+    req: PageReq,
 ) -> Option<String> {
-    None
+    if kind == FacetKind::Boolean || !valid_facet_name(facet) {
+        return None;
+    }
+    Some(paged_path(&section_directory_path(section_key, facet, type_terms), req))
 }
 
 /// The path of a section's secondary directory, `filters` appended the way
-/// [`Client::section_items_query`] appends its own (one `QueryBuilder::str` per pair, in order), so
+/// [`Client::section_items_query`] appends its own (one `QueryBuilder::wire` per pair, in order), so
 /// the grid page and the directory it is read against are built by the same call shape.
 fn section_directory_path(section_key: i64, directory: &str, filters: &[(String, String)]) -> String {
     let mut query = QueryBuilder::new(format!("/library/sections/{section_key}/{directory}"));
     for (k, v) in filters {
-        query = query.str(k, v);
+        query = query.wire(k, v);
     }
     query.build()
 }

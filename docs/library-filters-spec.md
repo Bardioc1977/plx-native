@@ -76,9 +76,11 @@ The union of facet names the server advertises across the four listings is 30. V
   and `decade` newest first; `actor`, `director`, `writer`, `producer` follow neither title nor
   frequency order (opaque server order).
 - **Keys arrive already percent-encoded** (`Not%20Rated`, audioLayout `5%2E1`, a studio key `X%2520Y`,
-  that is a name encoded twice); the server decodes twice (HTTP layer, then the tag matcher). A client
-  must send each key verbatim. Re-encoding breaks it (`X%252520Y` matches nothing). 187 of 215 studio
-  keys carry `%25xx`: verbatim matches 1, re-encoded 0.
+  that is a name encoded twice); the server decodes what it is sent twice (HTTP layer, then the tag
+  matcher; `audioLayout` once only). A client must send each key verbatim. Re-encoding breaks the
+  double-encoded ones (`X%252520Y` matches nothing; `audioLayout=5%252E1` matches nothing), while a
+  single-encoded key survives one more encoding by luck (`Not%2520Rated` 23, `Not%252520Rated` 0). 187 of
+  215 studio keys carry `%25xx`: verbatim matches 1, re-encoded 0.
 - Composition works: `resolution=4k&hdr=1` matches 221 movies; `unwatched=1` 99; `inProgress=1` 20;
   `year>>=2015` (URL-encoded `year%3E%3E=2015`) 283. Across facets the terms AND; a comma inside one
   term is OR (`genre=<a>,<b>` is the union; `%2C` is accepted as the comma); a REPEATED parameter is AND

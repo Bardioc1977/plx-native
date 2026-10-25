@@ -878,6 +878,54 @@ pub fn urlenc_str(src: &str) -> String {
     out
 }
 
+/// A filter value that is already wire-ready, made safe to place in a query.
+///
+/// The server's filter keys are percent-encoded when it lists them (`Not%20Rated`, audioLayout
+/// `5%2E1`, a studio `X%2520Y`, which is a name encoded twice), and it decodes what it is sent
+/// twice: once as HTTP, once more when it matches the tag. Encoding a key again therefore breaks
+/// it (`X%252520Y` matches nothing), so [`urlenc_str`] cannot be used for it. The rules:
+///
+/// * unreserved bytes, the comma (the OR separator the caller joined keys with) and every
+///   well-formed `%XX` triple pass through unchanged;
+/// * everything else (a lone `%`, `&`, `#`, `+`, `=`, `>`, space, control and non-ASCII bytes) is
+///   percent-encoded, so no key can end the parameter or start another;
+/// * one exception, the comma rule: a single-encoded `%2C` is rewritten to `%252C`. The server reads
+///   `%2C` as the separator after the first decode, so it would split one key in two; `%252C`
+///   survives the first decode as `%2C` and is a literal comma to the matcher. The only such key
+///   measured (one studio) already arrives as `%252C` and is left alone. This rewrite is exercised
+///   against the mock only; it is not verified against a real server.
+fn wire_str(src: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'%' {
+            let triple = i + 2 < bytes.len() && bytes[i + 1].is_ascii_hexdigit() && bytes[i + 2].is_ascii_hexdigit();
+            if triple && bytes[i + 1] == b'2' && bytes[i + 2].eq_ignore_ascii_case(&b'C') {
+                out.push_str("%252C");
+                i += 3;
+            } else if triple {
+                out.push_str(&src[i..i + 3]);
+                i += 3;
+            } else {
+                out.push_str("%25");
+                i += 1;
+            }
+        } else if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b',') {
+            out.push(b as char);
+            i += 1;
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 15) as usize] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Builds `path?k=enc(v)&k2=42…`. `.str` percent-encodes the value; `.int` does not
 /// (digits are unreserved). No op file ever formats a query by hand. `.query()` returns just
 /// the joined params (no path/`?`) for the transcode endpoints that embed them after a fixed
@@ -901,9 +949,11 @@ impl QueryBuilder {
         self.parts.push(format!("{k}={}", urlenc_str(v)));
         self
     }
-    /// STUB (red commit): the old behaviour, `v` percent-encoded whole.
-    pub(super) fn wire(self, k: &str, v: &str) -> Self {
-        self.str(k, v)
+    /// A FILTER term's value, already wire-ready ([`wire_str`]): the server's keys arrive
+    /// percent-encoded and go back verbatim, joined by the raw comma that means OR.
+    pub(super) fn wire(mut self, k: &str, v: &str) -> Self {
+        self.parts.push(format!("{k}={}", wire_str(v)));
+        self
     }
     pub(super) fn int(mut self, k: &str, v: i64) -> Self {
         self.parts.push(format!("{k}={v}"));

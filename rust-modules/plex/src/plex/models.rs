@@ -133,11 +133,11 @@ pub struct MediaContainer {
 /// directory entry, or a filter value ({key = tag id, title}).
 #[derive(Deserialize, Default)]
 pub struct LibrarySection {
-    #[serde(default)]
-    pub key: String, // "1" — parse to i64 at the call site (keep raw)
+    #[serde(default, deserialize_with = "de_str")]
+    pub key: String, // "1" — parse to i64 at the call site (keep raw); a filter value's key may be a number
     #[serde(rename = "type", default)]
     pub kind: String, // movie | show | artist
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_str")]
     pub title: String,
     /// firstCharacter rows: the letter's item count (PMS string-encodes it).
     #[serde(default, deserialize_with = "de_i64")]
@@ -152,21 +152,32 @@ pub struct Meta {
 }
 
 /// One browsable type of the section (movie / show / season / episode / folder) with its
-/// server-defined sort menu. The `active:true` entry matches the current `type=` of the
-/// listing. (The wire also carries a `Filter[]` menu — docs/pms-api.md §2b — modelled again
-/// when the v1.5 facet menu consumes it; DTOs here keep only consumed fields.)
+/// server-defined sort and filter menus. The `active:true` entry matches the current `type=` of the
+/// listing. (`Filter[]` is read as facets, `facets.rs`; the record's `Field[]` and the block's
+/// `FieldType[]` are not modelled yet — DTOs here keep only consumed fields.)
 #[derive(Deserialize, Default)]
 pub struct MetaType {
     #[serde(default, deserialize_with = "de_i64")]
     pub active: i64, // bool on the wire; de_i64 folds true/false/"1"
     #[serde(rename = "Sort", default)]
     pub sort: Vec<SortOption>,
+    /// `Filter[]`: the facets this type can be filtered by (`facets.rs`). Element-lenient: one
+    /// record of the wrong shape costs itself, never the Meta block or the page it rides on.
+    #[serde(rename = "Filter", default, deserialize_with = "de_lenient_vec")]
+    pub filters: Vec<super::facets::FilterOption>,
 }
 
 impl MetaType {
-    /// The filters this listing type offers, in the server's order.
+    /// The filters this listing type offers, in the server's order: a record without a usable
+    /// name is skipped and the first of a repeated name wins.
     pub fn facets(&self) -> Vec<super::facets::Facet> {
-        Vec::new()
+        let mut out: Vec<super::facets::Facet> = Vec::new();
+        for facet in self.filters.iter().filter_map(super::facets::FilterOption::facet) {
+            if !out.iter().any(|seen| seen.name == facet.name) {
+                out.push(facet);
+            }
+        }
+        out
     }
 }
 
@@ -1142,6 +1153,23 @@ pub(super) fn de_i64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::E
         Some(IntFloatStrBool::S(s)) => s.trim().parse().unwrap_or(0),
         Some(IntFloatStrBool::B(b)) => b as i64,
         None => 0,
+    })
+}
+
+/// Lenient list, ELEMENT by element: a JSON array whose elements that do not read as `T` are
+/// skipped, and anything that is not an array (a `null`, an object) is no list. [`de_vec`] saves a
+/// null; this also saves the siblings of one malformed element, which matters where the list is a
+/// menu the server composes (`Filter[]`) and one odd record must not take the others with it.
+pub(super) fn de_lenient_vec<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Array(items) => {
+            items.into_iter().filter_map(|item| serde_json::from_value::<T>(item).ok()).collect()
+        }
+        _ => Vec::new(),
     })
 }
 
