@@ -2014,8 +2014,44 @@ pub struct LibraryView {
     /// The direction of `listing_sort`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub listing_desc: bool,
+    /// The server-declared filters the viewer chose (`facets.rs`), one [`StoredFilter`] per
+    /// (listing, facet). Omitted while empty, so a view without filters serializes as it always
+    /// did; soft per element. The legacy `unwatched` and `genre` fields above stay the authority
+    /// for the Unwatched switch and the own listing's genre (see [`StoredFilter`]).
+    #[serde(default, deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<StoredFilter>,
     #[serde(flatten, default, skip_serializing_if = "OpaqueExtensions::is_empty")]
     pub extensions: OpaqueExtensions,
+}
+
+/// One remembered filter term of a library view: the chosen values of one facet in one listing.
+///
+/// Plain strings, because this layer cannot name the data layer's `FilterSet`. `listing` is empty
+/// for the library's own listing, else a [`LibraryView::LISTINGS`] word (Collections carry no
+/// terms). `flag` is a boolean facet that is on; its `values` stay empty. A value is the server's
+/// key, verbatim, with the title it had when it was chosen (shown at once on the next boot; refreshed
+/// when the list lands). The term of the library's own listing named `genre` is also mirrored into
+/// [`LibraryView::genre`] for an older build, and while no other term exists that legacy field,
+/// not this list, is what the data layer reads.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct StoredFilter {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub listing: String,
+    pub facet: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flag: bool,
+    #[serde(deserialize_with = "de_soft_vec", skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<StoredValue>,
+}
+
+/// One chosen value of a [`StoredFilter`].
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct StoredValue {
+    pub key: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub title: String,
 }
 
 impl LibraryView {
@@ -2077,6 +2113,17 @@ impl LibraryViews {
     const MAX_SORT: usize = 96;
     /// Longest genre id recorded. A genre's `key` is a tag id — a number or a short slug.
     const MAX_GENRE: usize = 64;
+    /// Longest facet name recorded (the wire layer's `MAX_FACET_NAME`; a stored name is interpolated
+    /// into a request path at restore, so it also has to pass `valid_facet_name`).
+    pub const MAX_FILTER_FACET: usize = 48;
+    /// Longest value key recorded (`MAX_VALUE_KEY`): a term holding a longer one is dropped whole.
+    pub const MAX_FILTER_KEY: usize = 96;
+    /// Longest value title recorded, in characters; a longer one is cut on a character boundary.
+    pub const MAX_FILTER_TITLE: usize = 64;
+    /// What one view's remembered filters may take once serialized. Terms are dropped WHOLE, last
+    /// first, until the rest fits, and a term is never cut, so a remembered term means what it
+    /// meant. The live selection is not bounded by this (only by the request line).
+    pub const MAX_FILTER_BYTES: usize = 1536;
 
     /// This profile's remembered view of one library, if it ever changed it. `None` for a library
     /// with no machine id, which is never recorded.
@@ -5497,6 +5544,8 @@ pub mod prefs;
 mod prefs_tests;
 #[cfg(test)]
 mod memory_tests;
+#[cfg(test)]
+mod library_filters_tests;
 
 #[cfg(test)]
 mod v0;

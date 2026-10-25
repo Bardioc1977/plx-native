@@ -104,6 +104,8 @@ pub(super) fn merge(
         listing: snap.listing.wire().to_string(),
         listing_sort,
         listing_desc,
+        // The viewer's other filters are not what this edit changed: a stored record keeps them.
+        filters: stored.filters.clone(),
         extensions: stored.extensions.clone(),
     }
 }
