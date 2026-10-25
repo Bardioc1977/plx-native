@@ -901,6 +901,10 @@ impl QueryBuilder {
         self.parts.push(format!("{k}={}", urlenc_str(v)));
         self
     }
+    /// STUB (red commit): the old behaviour, `v` percent-encoded whole.
+    pub(super) fn wire(self, k: &str, v: &str) -> Self {
+        self.str(k, v)
+    }
     pub(super) fn int(mut self, k: &str, v: i64) -> Self {
         self.parts.push(format!("{k}={v}"));
         self

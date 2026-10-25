@@ -1,6 +1,7 @@
 //! Library operations (impl Client): sections, section items (`section_items_query`), metadata,
 //! children (`children`, `children_paged`), related (`related`) — plus the two part-level playback ops (stream selection, direct-play target).
 use super::client::{urlenc_str, Client, QueryBuilder, StreamUrl};
+use super::facets::{FacetKind, FacetPage};
 use super::models::{ListingFacts, MediaContainer, Metadata};
 use super::paging::{paged_path, PageReq};
 use super::params::{SectionQuery, StreamSelection};
@@ -140,16 +141,22 @@ impl Client {
     /// `GET /library/sections/{k}/all?includeMeta=1&sort=…&genre=…` plus the paging window
     /// → `.metadata[]` + `total_size` (+ `.meta` when `include_meta`).
     pub fn section_items_query(&self, q: &SectionQuery) -> Option<MediaContainer> {
-        let mut b = QueryBuilder::new(format!("/library/sections/{}/all", q.section_key));
-        if q.include_meta {
-            b = b.int("includeMeta", 1);
-        }
-        b = b.opt_str("sort", q.sort);
-        for (k, v) in q.filters {
-            b = b.str(k, v);
-        }
-        let path = paged_path(&b.build(), PageReq::window(q.start, q.size));
-        self.get_json(&path)
+        self.get_json(&section_items_path(q))
+    }
+
+    /// The facet's value list, one window: `GET /library/sections/{k}/{facet}` with the listing's
+    /// own `type=` terms and no filter terms. STUB (red commit): never asks.
+    pub fn facet_values(
+        &self,
+        section_key: i64,
+        facet: &str,
+        kind: FacetKind,
+        type_terms: &[(String, String)],
+        start: i64,
+        size: i64,
+    ) -> Option<FacetPage> {
+        let path = facet_values_path(section_key, facet, kind, type_terms, PageReq::window(start, size))?;
+        self.get_json(&path).map(FacetPage::from_container)
     }
 
     /// GET /library/sections/{key}/{directory} — a secondary directory: the filter value
@@ -419,6 +426,32 @@ fn guid_lookup_paths(kind: GuidKind, guids: &[String]) -> Vec<(String, Vec<Strin
             (format!("/library/all?type={t}&guid={joined}"), chunk.iter().map(|g| (*g).clone()).collect())
         })
         .collect()
+}
+
+/// The path of the Library grid's page, `q`'s filters appended in order (see
+/// [`Client::section_items_query`]).
+pub(super) fn section_items_path(q: &SectionQuery) -> String {
+    let mut b = QueryBuilder::new(format!("/library/sections/{}/all", q.section_key));
+    if q.include_meta {
+        b = b.int("includeMeta", 1);
+    }
+    b = b.opt_str("sort", q.sort);
+    for (k, v) in q.filters {
+        b = b.str(k, v);
+    }
+    paged_path(&b.build(), PageReq::window(q.start, q.size))
+}
+
+/// The path of a facet's value list, or `None` for a request that must never be made: a boolean
+/// facet has no value list (STUB in the red commit: always `None`).
+pub(super) fn facet_values_path(
+    _section_key: i64,
+    _facet: &str,
+    _kind: FacetKind,
+    _type_terms: &[(String, String)],
+    _req: PageReq,
+) -> Option<String> {
+    None
 }
 
 /// The path of a section's secondary directory, `filters` appended the way

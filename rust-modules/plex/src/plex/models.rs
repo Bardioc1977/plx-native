@@ -163,6 +163,13 @@ pub struct MetaType {
     pub sort: Vec<SortOption>,
 }
 
+impl MetaType {
+    /// The filters this listing type offers, in the server's order.
+    pub fn facets(&self) -> Vec<super::facets::Facet> {
+        Vec::new()
+    }
+}
+
 /// One sort menu entry. `descKey` carries the server's descending expression when it is
 /// different from appending `:desc` (Show ordering reverses the show, not each episode).
 #[derive(Deserialize, Default)]

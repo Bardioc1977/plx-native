@@ -20,6 +20,9 @@ mod client;
 // WHICH client a slot holds, as a value a step is handed instead of reading the registry itself.
 mod client_keys;
 pub mod identity; // ONE X-Plex-* identity for both transports (plex.tv headers + PMS query)
+mod facets;
+#[cfg(test)]
+mod facets_tests;
 mod models;
 mod params;
 mod paging;
