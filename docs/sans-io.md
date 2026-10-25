@@ -505,13 +505,20 @@ from `data/src/metadata.rs`. The household's watch-state writes are the eleventh
     the system refused, refuses the job: the claim is lowered in the refusing call and the
     request id remembered. `settle_refused_reads` takes the three markers at the head of the next
     step and wakes the pump (`idle::invalidate`); nothing is recorded and nothing backs off. The
-    directory is owed again (`*_done` is still false, and the menu's tick sends the work again),
+    directory is owed again (`genres_done` is still false, or the letters are still not current
+    (`SecState::letters_current`), and the menu's tick sends the work again),
     and the page is still the first one missing, so the next pump asks again with the then-current
     key, exactly what the old `!spawned` arms left.
   - **The guard is in the body, the landing outside it.** A page read that panics lands as a failed
-    page (`total < 0`: the listing keeps what it had and `retry_cd` backs the pump off), a directory
-    read that panics lands as an empty list. The seams `finish_page_with` and
+    page (`total < 0`: the listing keeps what it had and `retry_cd` backs the pump off), a genre read
+    that panics lands as an empty list, and a letters read that fails or panics lands as `ok: false`:
+    the landed list stays as it was (hidden, it no longer describes the grid) and the same key waits
+    120 steps (`SecState::letters_backoff`), an edit asking at once. The seams `finish_page_with` and
     `finish_directory_with` take the read as a closure so a test can swap in one that panics.
+  - **The letters carry the grid's terms.** The Letters job is asked with `SecState::query_filters`,
+    the terms of the page read, and a `LettersKey` (applied Unwatched, applied genre, a membership
+    generation; `data/src/browse/letters.rs`) that the answer returns. A list is current, and
+    shown, only while its key is the section's present one, checked where it is read.
 - **The Metadata reads.** The season tabs and the long-season page window (`data/src/metadata.rs`)
   are the tenth store reads on the lane. `load_season` flips the tab and emits
   `StoreJob::MetaSeason(Job<MetaSeasonReq>, MetaSeasonPort)`, addressed by the season generation it
