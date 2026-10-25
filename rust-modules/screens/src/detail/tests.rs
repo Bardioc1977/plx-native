@@ -4961,6 +4961,37 @@ fn item_menu_acts(effects: &[plx_machine::machine::Stamped<TestHost>]) -> Vec<cr
         .collect()
 }
 
+/// **BACK to an episode page keeps the viewer's place on the Go to Show disc through the reload.**
+/// The page that BACK reveals asks its server for its item again, and until that lands the hero is
+/// what a page without an item offers (Play and the watch disc); the disc is not gone, only not here
+/// yet. Sent to Play for the length of the load, the focus would be Play's by the time the item
+/// landed (the sim showed exactly that: BACK from the show landed on Play), so a returning page
+/// holds the hero control it was left on, the restore then seats the disc by its column, and a page
+/// that is not returning (or whose request failed) still falls back to Play.
+#[test]
+fn a_returning_episode_page_holds_the_go_to_show_focus_while_its_item_reloads() {
+    let sid = ServerId::from_raw(1);
+    let guard = install(episode_of(sid, "show-7", 3));
+    let mut screen = bare(&guard, sid, "ep-5");
+    let measure = plx_ui::fixture::FixtureMeasure;
+    let want = FocusKey { entry: EntryId(7), elem: hero::ELEM_GO_SHOW };
+    let held = |screen: &DetailScreen, focus: u32| Focusable::<TestHost>::reconcile(screen, want, &cx(&measure, Some(focus))).elem;
+    // The page was left with the disc focused (its column in the row: Play, Watch, Go to Show).
+    let spot = Spot { section: 0, col: 2, ..Default::default() };
+    assert_eq!(hero::index_of(screen.hero_set(test_store().view()), hero::HeroCtl::GoToShow), Some(2));
+    clear();
+    screen.restore(&spot, test_store().view());
+    screen.return_pending = true;
+    assert_eq!(held(&screen, hero::ELEM_GO_SHOW), hero::ELEM_GO_SHOW, "the item is on its way: the disc keeps the focus");
+    screen.return_pending = false;
+    assert_eq!(held(&screen, hero::ELEM_GO_SHOW), hero::ELEM_PLAY, "a page that is not returning has no disc to keep");
+    // The item lands: the disc is in the row again and the held focus is valid.
+    plx_data::metadata::set_current_for_test(test_store().state_mut(), Some(episode_of(sid, "show-7", 3)));
+    screen.return_pending = true;
+    assert_eq!(held(&screen, hero::ELEM_GO_SHOW), hero::ELEM_GO_SHOW, "and it is still the disc's once the item is in");
+    clear();
+}
+
 /// **The page offers the Go to Show disc exactly when it can say where it goes**: an episode page
 /// that names its show has it (last in the row, a disc with the 5th unfurl slot's verb), and a
 /// movie, a show, a season, an episode that names no show and a page whose item is not the one

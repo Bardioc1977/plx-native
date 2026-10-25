@@ -526,7 +526,13 @@ impl World {
     /// pushed over Home over the same scripted plex.tv, settled. Nothing is watched, so the hero
     /// row is Play and the watch disc, plus whatever the page adds for an episode.
     pub(super) fn detail_episode(name: &str, sid: plx_plex::plex::ServerId, rk: &str, show_rk: &str, season: i64) -> World {
-        Self::detail_page_at(name, detail_arg_for(sid, rk), plx_data::metadata::Detail {
+        Self::detail_page_at(name, detail_arg_for(sid, rk), Self::episode_detail(sid, rk, show_rk, season))
+    }
+
+    /// The Detail [`Self::detail_episode`] installs, for a test that re-lands it (a page that left
+    /// and came back asks its server again).
+    pub(super) fn episode_detail(sid: plx_plex::plex::ServerId, rk: &str, show_rk: &str, season: i64) -> plx_data::metadata::Detail {
+        plx_data::metadata::Detail {
             sid,
             rk: rk.into(),
             kind: "episode".into(),
@@ -537,7 +543,7 @@ impl World {
             index: 5,
             part: format!("/library/parts/{rk}"),
             ..Default::default()
-        })
+        }
     }
 
     /// [`Self::detail_page`] for the page `arg` names: the argument is the identity the page mounts
