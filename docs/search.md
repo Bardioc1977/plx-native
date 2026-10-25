@@ -54,7 +54,11 @@ every page maps a pressed key to its destination through the one `HomeTab::from_
 bookmark, then Search: three to six stops, because
 `browse::tab_count()` now counts `tab_kinds()`, and a type whose last favourite is switched off
 draws no pill. The types are still type destinations whose concrete owned/shared section
-is resolved later.
+is resolved later. One exception to "a pill is a type": the Other Videos pill wears the library's own
+(server) title when exactly one favourite Other Videos library exists (`DirectoryView::tab_library_title`,
+the title cleaned and elided by `widgets::fit_title_face` to the room the strip leaves, never translated),
+and the translated type word otherwise; Movies and TV Shows always keep theirs. `tabs_gen` moves when that
+title does, so the faces are rebuilt on a rename or on a second library appearing.
 
 **So an INDEX is no longer a stable name for a destination** — this paragraph used to claim exactly
 that, and the claim was the load-bearing half. Store a `Pill` (`Pill::Section` carries a

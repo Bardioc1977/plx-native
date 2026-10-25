@@ -6376,7 +6376,9 @@ impl Drop for InkClipScope {
 /// Watchlist mark and Search** — three to six of them (the types are Movies, TV Shows and Plex's
 /// Other Videos, in that order; `browse::TAB_KINDS`).
 ///
-/// The types are still TYPE pills rather than discovered Plex sections, so discovery,
+/// The types are still TYPE pills rather than discovered Plex sections (Movies and TV Shows always
+/// wear their type word; the one exception is the Other Videos pill, which wears the title of its
+/// library when exactly one is a favourite, [`fit_title_face`]), so discovery,
 /// failure and roster changes never REORDER navigation and a friend's tenth film library never adds
 /// a stop. **What changed on 2026-09-05 is that they can be REMOVED**: the Favorite libraries
 /// switch governs the strip, so a type left with no favourite draws no pill at all

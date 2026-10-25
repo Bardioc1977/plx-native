@@ -172,7 +172,8 @@ A re-encode still burns the selected subtitle on the server; over a remux the ap
 
 I built this for how *I* watch, so it's narrower than Plex's:
 
-- **Movies, TV shows and Other Videos libraries.** No music, no photos, no live TV or DVR.
+- **Movies, TV shows and Other Videos libraries.** No music, no photos, no live TV or DVR. An Other Videos
+  library gets its own tab, named after the library when it is the only one.
 - **No typing in server addresses.** Servers come from your Plex account; set them up on a phone or
   PC and choose from what's there. Servers reached through Plex's relay, or that require an
   encrypted connection, are supported but haven't been watched end to end.

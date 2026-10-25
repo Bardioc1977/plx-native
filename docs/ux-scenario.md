@@ -173,8 +173,8 @@ it never takes focus and it has no hit rect. The hero is paged by **RIGHT past t
 dots under the row show the position.
 
 **Above it**, the top tab strip: **Home**, then **one pill per library type that has a favourite
-library** (here *Movies* and *TV Shows*; a Plex "Other Videos" library has its own *Other Videos*
-pill after them), then the Watchlist bookmark and the **Search** pill — drawn as marks, not words.
+library** (here *Movies* and *TV Shows*; a Plex "Other Videos" library has its own pill after them,
+named after the library when it is the only one you follow, else *Other Videos*), then the Watchlist bookmark and the **Search** pill — drawn as marks, not words.
 The strip scrolls once it outgrows the bar. At the left margin, outside the group, sits the
 **profile chip** (§5.7).
 

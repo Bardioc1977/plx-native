@@ -3514,6 +3514,9 @@ fn activate_source_of(_i: usize) {
 // The consequence is the property B was written for: the strip is a constant width at one friend
 // or at ten. Put source in the strip instead and three friends measure 2133px against a 1540 track.
 // Source rides inside the library pill's own label instead, so adding people never reshapes this strip.
+// The one exception to "a pill is a TYPE" is a lone Other Videos library: its pill wears that
+// library's own title (`sole_favorite_title`), and goes back to the type word the moment a second
+// favourite library of the type appears.
 //
 // **What DOES reshape it is the favourite switch, and that is the change of 2026-09-05.** Movies
 // and TV Shows were permanent destinations — `tab_count` was a constant 2 and `tabs_gen` a
@@ -3537,8 +3540,8 @@ pub const TAB_KINDS: [SecKind; 3] = [SecKind::Movie, SecKind::Show, SecKind::Vid
 /// word": no favourite, two or more (a favourite on a friend's server counts like any other), a
 /// kind that never wears one, or a title that names nothing. The single place the rule lives:
 /// [`BrowseState::refresh_tab_shape`] stamps it and `DirectoryView::tab_library_title` publishes
-/// it, so what the strip draws cannot disagree with what bumped it. A library that must not
-/// lend its name (a disguised one, `docs/disguised-libraries-spec.md`) is excluded here.
+/// it, so what the strip draws cannot disagree with what bumped it. Nothing here excludes a library
+/// the user has hidden or disguised: that rule would belong in this one function.
 fn sole_favorite_title<'a>(
     rows: impl Iterator<Item = (SecKind, bool, &'a str)>,
     kind: SecKind,

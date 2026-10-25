@@ -354,11 +354,16 @@ no longer priced by §2.
 when you cross between those three breaks the one illusion that code was written to preserve. Either
 all three or none; "glass on Home only" is not an option, however tempting the frame budget makes it.
 It ships, and `/tmp/plxnative-flattabs` is the way back to the flat capsule for a comparison.
-The track wears the material only while it is no wider than the budget (`GLASS_TRACK_MAX`, 672 px at
-1920): the strip of Home, Movies, TV Shows, the Watchlist bookmark and Search is 648, so a third type
-pill (Other Videos, for a household that has such a library) takes the whole strip to the flat capsule.
-`a_strip_with_a_third_type_pill_is_flat_by_the_budget` pins that arithmetic; how it looks on a television
-is not verified here.
+The track wears the material only while it is no wider than the budget (`GLASS_TRACK_MAX`, 672.3 px at
+1920). On the shipped font's advances (a model of the television's text, not a measurement of it) the strip
+of Home, Movies, TV Shows, the Watchlist bookmark and Search is 621 px in English and 529-679 px across the
+nine UI languages (Belarusian is over the budget already). A third type pill (Other Videos, for a household
+that has such a library) wearing the translated type word takes the strip to the flat capsule in every
+language (`the_translated_other_videos_pill_is_flat_in_every_language`); wearing a library title it keeps
+the glass only while the title is at most 91 px of text in German, 71 Portuguese, 65 Italian, 59 French,
+38 Spanish, and never in English, Hungarian, Russian or Belarusian
+(`a_library_title_keeps_the_glass_only_where_the_track_has_room`). How it looks on a television is not
+verified here.
 Its density is not a constant — see §6.
 
 **No:** anything on the player route (§1), and a second far-away glass cluster that the frame walk merges
