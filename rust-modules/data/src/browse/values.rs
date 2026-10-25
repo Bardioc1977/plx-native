@@ -22,6 +22,9 @@ use super::{Arc, SecState};
 pub struct ValueList {
     /// In the server's order.
     pub rows: Vec<FilterValue>,
+    /// Rows the server has SENT so far, the ones that could not travel as a value included: the next
+    /// window starts here and completeness is judged on it, never on `rows.len()`.
+    pub fetched: usize,
     /// The `totalSize` the server reported, when it did.
     pub total: Option<i64>,
     /// Every row is here: the reported total is reached, or a page came back short or empty.
@@ -35,16 +38,18 @@ pub struct ValueList {
 }
 
 impl ValueList {
-    /// Append `rows` (a page of at most `size`) and decide whether the list is complete.
-    fn append(&mut self, rows: Vec<FilterValue>, total: Option<i64>, size: usize) {
-        let (short, empty) = (rows.len() < size, rows.is_empty());
+    /// Append a window: `rows` are the ones of its `fetched` rows that could be offered, `size` is
+    /// what was asked for. Decide whether the list is complete.
+    fn append(&mut self, rows: Vec<FilterValue>, fetched: usize, total: Option<i64>, size: usize) {
         self.rows.extend(rows);
+        self.fetched += fetched;
         self.total = total.or(self.total);
-        // A reported total decides; without one a page that came back short ends the list, and an
-        // empty page always does (nothing would ever advance past it).
-        self.complete = empty || match self.total {
-            Some(total) => self.rows.len() as i64 >= total,
-            None => short,
+        // A reported total decides; without one a window that came back short ends the list, and an
+        // empty one always does (nothing would ever advance past it). Counted on the rows the server
+        // sent, so a skipped row is neither a gap in the next window nor a short page.
+        self.complete = fetched == 0 || match self.total {
+            Some(total) => self.fetched as i64 >= total,
+            None => fetched < size,
         };
         self.failed = None;
         self.revision = self.revision.wrapping_add(1);
@@ -77,7 +82,7 @@ impl SecState {
         match self.value_list(facet) {
             None => Some(0),
             Some(list) if list.complete || list.failed.is_some() || list.rows.len() >= want_rows => None,
-            Some(list) => Some(list.rows.len()),
+            Some(list) => Some(list.fetched),
         }
     }
 
@@ -113,12 +118,12 @@ impl SecState {
 
     /// Install `rows` as `facet`'s complete-or-not list outright (the restore's genre vouch brings one
     /// with the first page).
-    pub(super) fn install_values(&mut self, facet: &str, rows: Vec<FilterValue>, total: Option<i64>, size: usize) {
+    pub(super) fn install_values(&mut self, facet: &str, rows: Vec<FilterValue>, fetched: usize, total: Option<i64>, size: usize) {
         if self.value_list(facet).is_some() {
             return;
         }
         let mut list = ValueList { generation: self.values_gen, ..ValueList::default() };
-        list.append(rows, total, size);
+        list.append(rows, fetched, total, size);
         self.values.insert(0, (facet.to_owned(), Arc::new(list)));
         self.values.truncate(VALUE_LISTS_KEPT);
     }
@@ -130,7 +135,7 @@ impl SecState {
             return Landed::default();
         }
         let at = self.values.iter().position(|(name, _)| *name == ask.facet);
-        let have = at.map_or(0, |at| self.values[at].1.rows.len());
+        let have = at.map_or(0, |at| self.values[at].1.fetched);
         if ask.start != have {
             return Landed::default();
         }
@@ -139,7 +144,7 @@ impl SecState {
             None => ValueList { generation: self.values_gen, ..ValueList::default() },
         };
         if ok {
-            list.append(rows, ask.total, ask.size);
+            list.append(rows, ask.fetched, ask.total, ask.size);
         } else {
             list.failed = Some(LETTERS_RETRY_STEPS);
             list.revision = list.revision.wrapping_add(1);

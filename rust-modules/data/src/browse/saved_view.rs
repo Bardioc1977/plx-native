@@ -112,14 +112,18 @@ pub(super) fn merge(
     // shown listing's are the live ones. The own listing's genre is never among them: the legacy
     // `genre` field above is its one store, and a copy here is what a rolled-back build would leave
     // stale for an upgrade to resurrect.
+    //
+    // The shown listing's terms come FIRST: the record is held to a byte budget by dropping whole
+    // terms from the end, and the listing the viewer is editing must be the last to lose any.
     let shown = snap.listing.wire();
-    let mut filters: Vec<StoredFilter> = stored
-        .filters
-        .iter()
-        .filter(|term| term.listing != shown && !(term.listing.is_empty() && term.facet == "genre"))
-        .cloned()
-        .collect();
-    filters.extend(snap.filters.iter().cloned());
+    let mut filters: Vec<StoredFilter> = snap.filters.to_vec();
+    filters.extend(
+        stored
+            .filters
+            .iter()
+            .filter(|term| term.listing != shown && !(term.listing.is_empty() && term.facet == "genre"))
+            .cloned(),
+    );
     LibraryView {
         machine_id: machine.to_string(),
         key,

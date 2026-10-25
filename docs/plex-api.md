@@ -11,7 +11,7 @@ Sections: Movies=1, TV Shows=2, Music=3. Default response is XML; send `Accept: 
 
 ## Library browsing + home (Apple-TV layout)
 - `GET /library/sections` → `Directory[]`: key(=section id), type, title.
-- `GET /library/sections/{id}/all?type=1&sort=titleSort:asc&<tagfilters>` → `Metadata[]`. Filters by id: `genre=`, `year=`, `collection=`, `contentRating=`, `unwatched=1`, `originallyAvailableAt>=-1y`, etc. Pagination: `X-Plex-Container-Start`/`Size` (header OR query). `totalSize` only populated when paginating.
+- `GET /library/sections/{id}/all?type=1&sort=titleSort:asc&<tagfilters>` → `Metadata[]`. Filters by the key the facet's value list gives (`/library/sections/{id}/{facet}`; send it verbatim, it is already percent-encoded: `Not%20Rated`, a studio name encoded twice): `genre=`, `year=`, `collection=`, `contentRating=`, `unwatched=1`, `originallyAvailableAt>=-1y`, etc. Pagination: `X-Plex-Container-Start`/`Size` (header OR query). `totalSize` only populated when paginating.
 - **`GET /hubs`** (global home) / **`GET /hubs/sections/{id}`** (per-library) → `Hub[]`, each with `title`, `style` (`hero` = the big Continue-Watching banner; `shelf` = poster row), `hubIdentifier`/`context`, `more` (has "see all"), `key` (full-row query), and inline `Metadata[]`. GOTCHA: skip hubs with `size=0` / no Metadata (empty genre/person rows come back empty).
 - `GET /library/onDeck` — global next-up. `/library/sections/{id}/collections` + `/library/collections/{rk}/children`. `/library/sections/{id}/filters` + `/sorts` + `/library/sections/{id}/genre` (value lists; tag ids are per-server — discover live, never hardcode).
 

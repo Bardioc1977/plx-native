@@ -173,7 +173,7 @@ fn an_out_of_order_value_page_is_dropped() {
     // a stale duplicate of the first window arrives after it
     let stale = BrowseDirectoryReq::new(browse.state.section_sid(0).unwrap(), ClientKey::of(client),
         browse.state.table_epoch(), 0, 1, LibraryType::Primary, Vec::new(), None, Directory::Values,
-        Some(ValuesAsk { facet: "actor".into(), start: 0, size: VALUE_PAGE, generation: browse.state.states()[0].values_gen, total: None }));
+        Some(ValuesAsk { facet: "actor".into(), start: 0, size: VALUE_PAGE, generation: browse.state.states()[0].values_gen, total: None, fetched: 0 }));
     let port = BrowseDirectoryPort::of(&browse.adapter, Directory::Values);
     Directory::Values.claim(&browse.adapter, 99);
     finish_directory_with(&port, listing_addr(99), client, stale, || Some(window("a", 0, VALUE_PAGE, Some(250))));

@@ -499,9 +499,9 @@ from `data/src/metadata.rs`. The household's watch-state writes are the eleventh
   The landings are as they were (`land_directory_owned_with_gate` and the page landing inside
   `pump_owned_with_gate`): the answer carries the client the key resolved and `key.token`, and the
   landing's `commit_if_current` / `commit_reachability_if_current` is the one identity check.
-  - **Three claims, three mailboxes.** The page, the genres and the letters each hold their own
-    `Fetch` on the adapter, with their own request counter on `BrowseState` (`page_req`,
-    `genres_req`, `letters_req`), and each claim is raised at the step.
+  - **Three claims, three mailboxes.** The page, the facet value lists and the letters each hold
+    their own `Fetch` on the adapter, with their own request counter on `BrowseState` (`page_req`,
+    `values_req`, `letters_req`), and each claim is raised at the step.
   - **A refusal is settled by the store's next step.** A key that moved by the launch, or a thread
     the system refused, refuses the job: the claim is lowered in the refusing call and the
     request id remembered. `settle_refused_reads` takes the three markers at the head of the next

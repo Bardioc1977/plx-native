@@ -262,7 +262,7 @@ pub(super) fn registered_directory_source(
     // a genre list that has begun but not finished: one row on hand, the rest owed
     state.values.clear();
     state.install_values("genre", vec![GenreEntry { id: "new".into(), title: "New Genre".into() }],
-        Some(2), filters::VALUE_PAGE);
+        1, Some(2), filters::VALUE_PAGE);
     state.letters = Arc::new(vec![("N".into(), 7)]);
     state.letters_for = None;
     (cleanup, browse, sid, client)
@@ -309,7 +309,7 @@ pub(super) fn queue_directories_from(
     let epoch = browse.state.table_epoch();
     let ask = listing_jobs::ValuesAsk {
         facet: "genre".into(), start: 1, size: filters::VALUE_PAGE,
-        generation: browse.state.states[0].values_gen, total: Some(2),
+        generation: browse.state.states[0].values_gen, total: Some(2), fetched: 1,
     };
     browse.adapter.values.post(DirectoryResult {
         library_type: browse.state.states[0].library_type,

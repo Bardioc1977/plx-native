@@ -59,9 +59,15 @@ pub fn valid_facet_name(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
 }
 
-/// STUB (red commit): may `name` be a filter TERM? Not yet different from [`valid_facet_name`].
+/// Parameters the listing request carries itself, which a filter term must not be named after.
+const RESERVED_NAMES: [&str; 5] = ["type", "sort", "includeMeta", "unwatched", "unwatchedLeaves"];
+
+/// May `name` be a filter TERM, or a value list be asked for? It is a safe [`valid_facet_name`] that is
+/// none of the request's own parameters (`type`, `sort`, `includeMeta`) nor the Unwatched switch, which
+/// is not a term and whose key answers the whole unwatched LISTING (248 KB on a 400-film library). The
+/// server may well advertise `unwatched` as a facet ([`Facet`]); this is about what the app sends.
 pub fn valid_term_name(name: &str) -> bool {
-    valid_facet_name(name)
+    valid_facet_name(name) && !RESERVED_NAMES.contains(&name)
 }
 
 /// One `Filter[]` element as the wire has it. Lenient: every field is optional and any scalar
@@ -115,7 +121,9 @@ pub struct FacetPage {
     /// list has no `Directory` and no total, and a window shorter than asked for ends the list on
     /// its own.
     pub total: Option<i64>,
-    /// STUB (red commit of the paging fix): the rows the server sent.
+    /// How many rows the server SENT in this window, the skipped ones included: the next window
+    /// starts after them, and a short window (fewer than asked for) ends the list, whatever of the
+    /// rows could travel as a value.
     pub fetched: usize,
 }
 
@@ -124,6 +132,7 @@ impl FacetPage {
     /// ONE value (a raw comma splits it, a control character is not a character of any tag, an
     /// over-long one is not worth a request line), is skipped; an empty title falls back to the key.
     pub fn from_container(mc: MediaContainer) -> FacetPage {
+        let fetched = mc.directory.len();
         let rows: Vec<FacetValue> = mc
             .directory
             .into_iter()
@@ -138,7 +147,6 @@ impl FacetPage {
                 FacetValue { title: if title.is_empty() { row.key.clone() } else { title }, key: row.key }
             })
             .collect();
-        let fetched = rows.len();
         FacetPage { rows, total: (mc.total_size > 0).then_some(mc.total_size), fetched }
     }
 }

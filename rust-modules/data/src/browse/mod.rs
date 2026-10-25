@@ -872,7 +872,8 @@ impl SecState {
     #[cfg(test)]
     fn seed_genre_list(&mut self, rows: Vec<GenreEntry>) {
         self.values.retain(|(facet, _)| facet != "genre");
-        self.install_values("genre", rows, None, filters::VALUE_PAGE);
+        let fetched = rows.len();
+        self.install_values("genre", rows, fetched, None, filters::VALUE_PAGE);
     }
     /// Set (or clear) the genre term directly: the fixture of a test about something else.
     #[cfg(test)]
@@ -1848,7 +1849,7 @@ impl BrowseState {
         let Some(state) = self.states.get(current) else { return };
         let boolean = state.facets_known
             && state.facets.iter().any(|offered| offered.name == facet && offered.kind == plx_plex::plex::FacetKind::Boolean);
-        if boolean || !plx_plex::plex::valid_facet_name(facet) || !state.library_type.filters() {
+        if boolean || !plx_plex::plex::valid_term_name(facet) || !state.library_type.filters() {
             return;
         }
         let Some(start) = state.values_owed(facet, want_rows) else { return };
@@ -1866,7 +1867,7 @@ impl BrowseState {
         let state = &mut self.states[current];
         let library_type = state.library_type;
         let ask = listing_jobs::ValuesAsk {
-            facet: facet.to_owned(), start, size: filters::VALUE_PAGE, generation: state.values_gen, total: None,
+            facet: facet.to_owned(), start, size: filters::VALUE_PAGE, generation: state.values_gen, total: None, fetched: 0,
         };
         state.touch_values(facet);
         self.values_req = self.values_req.wrapping_add(1);
@@ -3054,8 +3055,8 @@ impl BrowseState {
                                 // The saved genre was checked against the library's own genre
                                 // list before this page was asked for, and the page is in it:
                                 // the filter and the list the Filter menu reads land with it.
-                                if let Some((list, total)) = result.genres {
-                                    state.install_values("genre", list, total, filters::RESTORE_VOUCH_PAGE);
+                                if let Some((list, fetched, total)) = result.genres {
+                                    state.install_values("genre", list, fetched, total, filters::RESTORE_VOUCH_PAGE);
                                 }
                                 if let Some(genre) = result.genre {
                                     state.filters = Arc::new(state.filters.with("genre", vec![genre]));
@@ -3159,7 +3160,7 @@ struct ListingPage {
     /// asked for and the menu offered its key — what the landing points the menu at.
     restored: Option<(String, bool)>,
     /// The library's genre list, when the saved genre was checked against it.
-    genres: Option<(Vec<GenreEntry>, Option<i64>)>,
+    genres: Option<(Vec<GenreEntry>, usize, Option<i64>)>,
     /// The remembered genre this page was filtered by, once the list proved it still exists.
     genre: Option<GenreEntry>,
     /// The filters the page's `Meta` offers for the active type (`Some` when the fetch carried
@@ -3235,8 +3236,10 @@ fn fetch_listing_page(
             let page = client.facet_values(query.section_key, "genre", plx_plex::plex::FacetKind::List,
                 &filters::value_type_terms(restore.library_type, restore.kind), 0, filters::RESTORE_VOUCH_PAGE as i64);
             if let Some(page) = page {
+                let (fetched, total) = (page.fetched, page.total);
                 let list: Vec<GenreEntry> = page.rows.into_iter().map(|row| GenreEntry { id: row.key, title: row.title }).collect();
-                let complete = page.total.map_or(list.len() < filters::RESTORE_VOUCH_PAGE, |total| list.len() as i64 >= total);
+                // counted on the rows the server sent, as a value list pages ([`values::ValueList`])
+                let complete = fetched == 0 || total.map_or(fetched < filters::RESTORE_VOUCH_PAGE, |total| fetched as i64 >= total);
                 if let Some(found) = list.iter().find(|entry| &entry.id == wanted) {
                     filters.push(("genre".into(), found.id.clone()));
                     genre = Some(found.clone());
@@ -3245,7 +3248,7 @@ fn fetch_listing_page(
                     // not condemned it either
                     resolved.genre = false;
                 }
-                genres = Some((list, page.total));
+                genres = Some((list, fetched, total));
             } else {
                 resolved.genre = false;
             }
@@ -3351,7 +3354,7 @@ struct PageResult {
     /// Some when the page was fetched in a remembered sort — see [`ListingPage::restored`].
     restored: Option<(String, bool)>,
     /// See [`ListingPage::genres`] and [`ListingPage::genre`].
-    genres: Option<(Vec<GenreEntry>, Option<i64>)>,
+    genres: Option<(Vec<GenreEntry>, usize, Option<i64>)>,
     genre: Option<GenreEntry>,
     /// See [`ListingPage::facets`].
     facets: Option<Vec<plx_plex::plex::Facet>>,
@@ -4231,7 +4234,8 @@ pub fn seed_query_choices_for_owner_test(
     if let Some(section) = state.state_mut(current) {
         section.sorts = Arc::new(sorts);
         section.values.clear();
-        section.install_values("genre", genres, None, filters::VALUE_PAGE);
+        let fetched = genres.len();
+        section.install_values("genre", genres, fetched, None, filters::VALUE_PAGE);
     }
 }
 
@@ -4268,7 +4272,7 @@ pub fn queue_genre_for_owner_test(
         list: vec![GenreEntry { id: "new".into(), title: "New Genre".into() }],
         ok: true, letters: None,
         values: Some(listing_jobs::ValuesAsk {
-            facet: "genre".into(), start: 0, size: filters::VALUE_PAGE, generation: state.states[sec].values_gen, total: None,
+            facet: "genre".into(), start: 0, size: filters::VALUE_PAGE, generation: state.states[sec].values_gen, total: None, fetched: 1,
         }),
     }, |_| true);
 }

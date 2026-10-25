@@ -186,6 +186,8 @@ pub(super) struct ValuesAsk {
     pub(super) size: usize,
     pub(super) generation: u32,
     pub(super) total: Option<i64>,
+    /// Rows the server sent in the window, the skipped ones included (answer only).
+    pub(super) fetched: usize,
 }
 
 impl BrowseDirectoryReq {
@@ -218,7 +220,11 @@ fn finish_directory_with(port: &BrowseDirectoryPort, addr: Addr, client: &'stati
     let answer = match which {
         Directory::Values => {
             let page = catch_unwind(AssertUnwindSafe(|| read().map(FacetPage::from_container))).unwrap_or_default();
-            let values = values.map(|ask| ValuesAsk { total: page.as_ref().and_then(|page| page.total), ..ask });
+            let values = values.map(|ask| ValuesAsk {
+                total: page.as_ref().and_then(|page| page.total),
+                fetched: page.as_ref().map_or(0, |page| page.fetched),
+                ..ask
+            });
             DirectoryAnswer::Values(DirectoryResult {
                 epoch, sec, client, token_gen: key.token, library_type, ok: page.is_some(),
                 list: page.map(|page| page.rows.into_iter().map(|row| GenreEntry { id: row.key, title: row.title }).collect())

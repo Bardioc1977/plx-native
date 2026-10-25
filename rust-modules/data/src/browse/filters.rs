@@ -78,7 +78,7 @@ impl FilterSet {
     pub fn from_terms(terms: impl IntoIterator<Item = FilterTerm>) -> Self {
         let mut kept: Vec<FilterTerm> = Vec::new();
         for mut term in terms {
-            if kept.iter().any(|seen| seen.facet == term.facet) {
+            if kept.iter().any(|seen| seen.facet == term.facet) || !plx_plex::plex::valid_term_name(&term.facet) {
                 continue;
             }
             if term.flag {

@@ -2132,7 +2132,7 @@ fn sanitize_filters(filters: Vec<StoredFilter>) -> Vec<StoredFilter> {
         let listing_ok = term.listing.is_empty() || matches!(term.listing.as_str(), "seasons" | "episodes");
         if !listing_ok
             || term.facet.len() > LibraryViews::MAX_FILTER_FACET
-            || !super::facets::valid_facet_name(&term.facet)
+            || !super::facets::valid_term_name(&term.facet)
             || kept.iter().any(|seen| seen.listing == term.listing && seen.facet == term.facet)
         {
             continue;
