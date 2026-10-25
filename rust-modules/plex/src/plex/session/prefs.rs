@@ -640,11 +640,34 @@ impl Session {
 }
 
 impl Preferences {
-    /// Re-stamp every stamped, account-bound list: records whose `account` is in `from` become `to`.
-    /// STUB (tests-first commit): changes nothing. Returns whether anything changed.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn restamp(&mut self, _from: &[String], _to: &str) -> bool {
-        false
+    /// **Adopt records into a new stamp.** Every record of the three stamped, account-bound lists
+    /// (`profile_prefs`, `track_memory`, `subtitle_offsets`) whose `account` is one of `from`
+    /// becomes `to`, merged into the profile's record already stamped `to` when there is one
+    /// ([`StampedRecord::absorb`]: the stamped record wins a clash). Records of any other stamp, and
+    /// records with none, are not touched. Returns whether anything changed; a second call with the
+    /// same arguments changes nothing.
+    ///
+    /// **A tenant of the stamp joins here.** `prefs_tests`' T-stamp walks [`DESCRIPTORS`] and fails
+    /// for an account-bound row that stamps its records and is not restamped below, so a new list
+    /// that forgets this line loses its records at the next re-sign-in instead of silently passing.
+    pub(super) fn restamp(&mut self, from: &[String], to: &str) -> bool {
+        let from: Vec<String> = from.iter().filter(|stamp| !stamp.is_empty() && stamp.as_str() != to).cloned().collect();
+        if from.is_empty() || to.is_empty() {
+            return false;
+        }
+        let mut changed = restamp_records(&mut self.profile_prefs, &from, to);
+        changed |= restamp_records(&mut self.track_memory, &from, to);
+        changed |= restamp_records(&mut self.subtitle_offsets, &from, to);
+        changed
+    }
+
+    /// Whether [`restamp`](Self::restamp) with these arguments would change anything: a scan, no
+    /// clone, so the write path pays for a copy only when there is something to adopt.
+    pub(super) fn restamp_pending(&self, from: &[String]) -> bool {
+        fn any<R: ProfileKeyed>(records: &[R], from: &[String]) -> bool {
+            records.iter().any(|r| !r.account().is_empty() && from.iter().any(|stamp| stamp == r.account()))
+        }
+        any(&self.profile_prefs, from) || any(&self.track_memory, from) || any(&self.subtitle_offsets, from)
     }
 }
 
@@ -702,13 +725,48 @@ pub trait ProfileKeyed: Sized {
     fn slot_mut(session: &mut Session) -> &mut Vec<Self>;
 }
 
+/// **A record whose stamp can be adopted** into another one ([`Preferences::restamp`]): the stamped
+/// kinds only. `library_sorts` records carry no stamp and are not this.
+pub trait StampedRecord: ProfileKeyed {
+    /// Re-stamp this record.
+    fn set_account(&mut self, account: String);
+    /// Merge `older` (a record of the same profile that held another stamp) into this one, which
+    /// already holds the stamp both are moving to: what this record has wins a clash, `older`
+    /// fills what it lacks, and a bound (a cap) is applied afterwards. A merge never adds data.
+    fn absorb(&mut self, older: Self);
+}
+
+/// Re-stamp every record of `records` whose stamp is in `from` to `to`, merging into the record of the
+/// same profile already stamped `to`. Returns whether anything changed.
+fn restamp_records<R: StampedRecord>(records: &mut Vec<R>, from: &[String], to: &str) -> bool {
+    let mut changed = false;
+    let mut at = 0;
+    while at < records.len() {
+        if !from.iter().any(|stamp| stamp == records[at].account()) {
+            at += 1;
+            continue;
+        }
+        changed = true;
+        let Some(own) = records.position_of(records[at].user(), to) else {
+            records[at].set_account(to.to_string());
+            at += 1;
+            continue;
+        };
+        let older = records.remove(at);
+        let own = if own > at { own - 1 } else { own };
+        records[own].absorb(older);
+    }
+    changed
+}
+
 /// The identity operations over a list of [`ProfileKeyed`] records.
 pub trait ProfileRecords<R: ProfileKeyed> {
     /// Where `user`'s record under the stamp `account` is.
     fn position_of(&self, user: &str, account: &str) -> Option<usize>;
     /// Drop every record not stamped `account` (another account's, or an unstamped one nobody can
     /// read): the records of a previous sign-in must not outlive the first write of the next.
-    /// Returns whether any went.
+    /// **Except** that a write whose own stamp is NOT in the owner family (the owner is not known
+    /// yet) keeps the records that are: see the body. Returns whether any went.
     fn prune_foreign(&mut self, account: &str) -> bool;
     /// Drop the records a write left empty.
     fn prune_empty(&mut self);
@@ -719,12 +777,29 @@ impl<R: ProfileKeyed> ProfileRecords<R> for Vec<R> {
         self.iter().position(|r| r.user() == user && r.account() == account)
     }
     fn prune_foreign(&mut self, account: &str) -> bool {
+        // While the owner is still unknown (`account` is the token fingerprint) a record stamped
+        // for an owner may be exactly this person's: a roster that failed to load must not delete
+        // their memory. It stays, unreadable, until a write that KNOWS its owner prunes it.
+        let keep_owners = !super::is_owner_stamp(account);
         let before = self.len();
-        self.retain(|r| r.account() == account);
+        self.retain(|r| r.account() == account || (keep_owners && super::is_owner_stamp(r.account())));
         self.len() != before
     }
     fn prune_empty(&mut self) {
         self.retain(|r| !r.is_empty());
+    }
+}
+
+impl<E: MemoryEntry> StampedRecord for ProfileList<E> {
+    fn set_account(&mut self, account: String) {
+        self.account = account;
+    }
+    fn absorb(&mut self, older: Self) {
+        let mut items: Vec<E> = older.items.into_iter().filter(|e| self.find(&e.key()).is_none()).collect();
+        items.append(&mut self.items);
+        let excess = items.len().saturating_sub(E::CAP);
+        items.drain(..excess);
+        self.items = items;
     }
 }
 
@@ -901,31 +976,10 @@ impl<E: MemoryEntry> ProfileMemory<E> for Vec<ProfileList<E>> {
 /// was bound): each becomes `account`'s own. A profile that already has a record stamped `account`
 /// takes the unstamped one's entries behind its own (the stamped record's entry wins a clash, the
 /// cap drains the oldest), so the list never holds two records for one `(user, account)`. Returns
-/// whether anything changed.
+/// whether anything changed. The same merge as an owner-stamp adoption ([`Preferences::restamp`]),
+/// from the empty stamp.
 fn adopt_unstamped<E: MemoryEntry>(list: &mut Vec<ProfileList<E>>, account: &str) -> bool {
-    let mut changed = false;
-    let mut at = 0;
-    while at < list.len() {
-        if !list[at].account.is_empty() {
-            at += 1;
-            continue;
-        }
-        changed = true;
-        let Some(own) = list.position_of(&list[at].user, account) else {
-            list[at].account = account.to_string();
-            at += 1;
-            continue;
-        };
-        let Some(legacy) = list.drain(at..=at).next() else { break };
-        let own = if own > at { own - 1 } else { own };
-        let target = &mut list[own];
-        let mut items: Vec<E> = legacy.items.into_iter().filter(|e| target.find(&e.key()).is_none()).collect();
-        items.append(&mut target.items);
-        let excess = items.len().saturating_sub(E::CAP);
-        items.drain(..excess);
-        target.items = items;
-    }
-    changed
+    restamp_records(list, &[String::new()], account)
 }
 
 // ---- the household budget: one eviction rule, shared by the write door and the document guard ----

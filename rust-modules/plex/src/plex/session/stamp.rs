@@ -63,7 +63,6 @@ pub fn is_owner_stamp(stamp: &str) -> bool {
 /// The stamps whose records `session` adopts as its own: the fingerprint of its token and the other
 /// spellings of its roster's admin, minus its own stamp. Empty unless the session's stamp is the
 /// owner form: with the owner unknown there is nothing to migrate toward.
-#[cfg_attr(not(test), allow(dead_code))] // read by the adoption pass in the next commit
 pub(super) fn adoptable_stamps(session: &Session) -> Vec<String> {
     let own = account_stamp(session);
     if !is_owner_stamp(&own) {
@@ -82,10 +81,25 @@ pub(super) fn adoptable_stamps(session: &Session) -> Vec<String> {
 }
 
 impl Session {
-    /// This session with every adoptable record re-stamped to [`account_stamp`]. STUB until the
-    /// adoption commit: identity.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn adopt_stamps(self) -> Session {
+    /// This session with every adoptable record re-stamped to [`account_stamp`]: the records an
+    /// older build, or a window in which the owner was not yet known, stamped with this token's
+    /// fingerprint (or with the other spelling of this roster's admin). Pure, idempotent, and a
+    /// no-op while the owner is unknown. It runs wherever a `Session` is built from storage
+    /// (`read_locked`, `read_legacy_filtered_locked`) and in the write funnel
+    /// (`save_locked_with_authority`), so every reader sees the adopted stamps and the next write
+    /// persists them; nothing writes just to adopt.
+    pub(super) fn adopt_stamps(mut self) -> Session {
+        let from = adoptable_stamps(&self);
+        if !from.is_empty() {
+            let to = account_stamp(&self);
+            self.prefs.restamp(&from, &to);
+        }
         self
+    }
+
+    /// Whether [`adopt_stamps`](Self::adopt_stamps) would change this session: a scan, no clone.
+    pub(super) fn adoption_pending(&self) -> bool {
+        let from = adoptable_stamps(self);
+        !from.is_empty() && self.prefs.restamp_pending(&from)
     }
 }

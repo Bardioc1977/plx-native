@@ -3648,14 +3648,14 @@ enum ReadState {
 fn read_locked(canonical: persistence::CanonicalRead) -> ReadState {
     match canonical {
         persistence::CanonicalRead::Opened { session, .. } => ReadState::Ready {
-            session: std::sync::Arc::new(session),
+            session: std::sync::Arc::new(session.adopt_stamps()),
             plaintext: false,
             retry_canonical: false,
         },
         persistence::CanonicalRead::Data { payload, .. } => {
             match serde_json::from_str::<Session>(&payload) {
                 Ok(session) => ReadState::Ready {
-                    session: std::sync::Arc::new(session),
+                    session: std::sync::Arc::new(session.adopt_stamps()),
                     plaintext: true,
                     retry_canonical: false,
                 },
@@ -3787,7 +3787,7 @@ fn read_legacy_filtered_locked(fallback_only: bool) -> ReadState {
                 };
                 return serde_json::from_slice::<Session>(&plain)
                     .map(|session| ReadState::Ready {
-                        session: std::sync::Arc::new(session),
+                        session: std::sync::Arc::new(session.adopt_stamps()),
                         plaintext: false,
                         retry_canonical: marked,
                     })
@@ -3800,7 +3800,7 @@ fn read_legacy_filtered_locked(fallback_only: bool) -> ReadState {
         }
         if let Ok(session) = serde_json::from_value::<Session>(value) {
             return ReadState::Ready {
-                session: std::sync::Arc::new(session),
+                session: std::sync::Arc::new(session.adopt_stamps()),
                 plaintext: true,
                 retry_canonical: marked,
             };
@@ -4301,6 +4301,18 @@ fn save_locked_with_authority(
     s: &Session,
     authority: SaveAuthority,
 ) -> async_persistence::LiveWrite {
+    // This write may be the one that makes the owner known (a roster landing, a sign-in's discovery
+    // save): adopt the older stamps first, so that what it persists AND installs in the cache is
+    // already under the owner stamp. A restore that a republication triggers right after reads the
+    // cache, and an edit made over an adopted read would otherwise hand it records still stamped
+    // with the token. Nothing changes unless something is pending, and no copy is made then.
+    let adopted;
+    let s = if s.adoption_pending() {
+        adopted = s.clone().adopt_stamps();
+        &adopted
+    } else {
+        s
+    };
     // A sign-out can revoke the cache while disk I/O is in flight. Even a durable write must
     // not overwrite that newer local decision when it returns; its owner still gets the receipt.
     let cache_generation = CACHE_GENERATION.load(std::sync::atomic::Ordering::Relaxed);

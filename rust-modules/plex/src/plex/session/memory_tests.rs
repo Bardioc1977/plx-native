@@ -605,8 +605,9 @@ fn a_record_stamped_by_an_older_build_is_adopted_once() {
     let _serial = plx_base::testlock::serial();
     let _root = TempSession::new("stamp-adopt-once");
     let legacy = crate::plex::grant::account_key("token-a");
-    save(&stored_with_memory("token-a", roster_of(7), &legacy, "old"));
-    // Through the file: as written by the older build.
+    // The file as the OLDER build wrote it: raw bytes, not `save`, which adopts on the way out.
+    std::fs::write(_root.path(), serde_json::to_vec(&stored_with_memory("token-a", roster_of(7), &legacy, "old")).unwrap()).unwrap();
+    invalidate_for_test();
     let raw: Value = serde_json::from_str(&std::fs::read_to_string(_root.path()).unwrap()).unwrap();
     assert_eq!(raw["track_memory"][0]["account"], json!(legacy), "setup: the file carries the token fingerprint");
 
@@ -783,14 +784,17 @@ fn two_profiles_of_one_owner_keep_separate_records_across_a_resignin() {
 
 /// **The previous build, modelled.** It compares the stamp with the fingerprint of its own token,
 /// so an owner-stamped record is a foreign account's to it: nothing is read, nothing panics, its
-/// first write prunes the record, and what is left still parses. (Accepted rollback loss.)
+/// first write prunes the record (its `prune_foreign` was `retain(account == own stamp)`, written
+/// out here because this build's own prune now keeps owner stamps while the owner is unknown), and
+/// what is left still parses. (Accepted rollback loss.)
 #[test]
 fn the_old_reader_treats_an_owner_stamp_as_foreign() {
     let old_stamp = crate::plex::grant::account_key("token-a");
     let session = stored_with_memory("token-a", roster_of(7), OWNER_7, "k1");
     assert_eq!(reads(&session, "u", &old_stamp, "k1"), NONE, "the old reader finds nothing under its stamp");
     let mut old = session.clone();
-    assert!(old.prefs.track_memory.upsert_with("u", &old_stamp, &tm_key("k2"), |_| Some(track("k2"))));
+    old.prefs.track_memory.retain(|r| r.account == old_stamp);
+    old.prefs.track_memory.push(ProfileList { user: "u".into(), account: old_stamp.clone(), items: vec![track("k2")], ..Default::default() });
     assert!(old.prefs.track_memory.iter().all(|r| r.account == old_stamp), "its first write pruned the owner-stamped record");
     let reparsed: Session = serde_json::from_value(serde_json::to_value(&old).unwrap()).unwrap();
     assert_eq!(reparsed.prefs.track_memory.len(), 1, "and the bytes it leaves parse");

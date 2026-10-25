@@ -33,7 +33,7 @@
 //!   tenure or credential change, and with an empty stamp.
 //! * **No `extensions`**: a field a later build adds is not carried by this one.
 use super::{
-    Fallback, Parse, ProfileKeyed, ProfileRecords, Preferences, Row, Scope, Setting, SettingsWrite,
+    Fallback, Parse, ProfileKeyed, ProfileRecords, Preferences, Row, Scope, Setting, SettingsWrite, StampedRecord,
     AudioEnhancementsPref, DeckPressPref, DirectPlayModePref, HdrOverlayBrightnessPref, NextEpisodeModePref, QualityPref, SkipIntervalPref,
     SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref, TrailerAutoplayPref, UnderPostersPref,
 };
@@ -81,6 +81,48 @@ impl ProfilePrefs {
     pub fn is_empty(&self) -> bool {
         *self == ProfilePrefs::default()
     }
+
+    /// Take from `older` every setting this profile has no value of its own for; a value it has
+    /// stays. **Exhaustive on purpose**: `older` is destructured without `..`, so a setting added
+    /// to [`ProfilePrefs`] stops this compiling until it is merged here, instead of being silently
+    /// dropped by an adoption (the full-fixture test in `profile_prefs_tests` holds it at runtime).
+    fn fill_from(&mut self, older: ProfilePrefs) {
+        let ProfilePrefs {
+            playback_quality,
+            direct_play_mode,
+            subtitle_tone,
+            subtitle_size,
+            subtitle_position,
+            hdr_overlay_brightness,
+            next_episode_mode,
+            skip_interval,
+            deck_press,
+            under_posters,
+            audio_enhancements,
+            trailer_autoplay,
+        } = older;
+        macro_rules! fill {
+            ($($field:ident),* $(,)?) => {$(
+                if self.$field.is_none() {
+                    self.$field = $field;
+                }
+            )*};
+        }
+        fill!(
+            playback_quality,
+            direct_play_mode,
+            subtitle_tone,
+            subtitle_size,
+            subtitle_position,
+            hdr_overlay_brightness,
+            next_episode_mode,
+            skip_interval,
+            deck_press,
+            under_posters,
+            audio_enhancements,
+            trailer_autoplay,
+        );
+    }
 }
 
 /// **One profile's own values under one account stamp** — the record shape of `profile_prefs`, with
@@ -112,6 +154,15 @@ impl ProfileKeyed for ProfilePrefsRecord {
     }
     fn slot_mut(session: &mut Session) -> &mut Vec<Self> {
         &mut session.prefs.profile_prefs
+    }
+}
+
+impl StampedRecord for ProfilePrefsRecord {
+    fn set_account(&mut self, account: String) {
+        self.account = account;
+    }
+    fn absorb(&mut self, older: Self) {
+        self.prefs.fill_from(older.prefs);
     }
 }
 
