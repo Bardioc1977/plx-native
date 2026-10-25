@@ -105,9 +105,15 @@ spec's "Media Queries" section documents the full query language.
   them with params instead.
 - **Server-driven menus:** `GET /library/sections/{key}/all?includeMeta=1` → `MediaContainer.Meta.Type[]`
   with `Sort[]` (`{key, descKey, defaultDirection, title, firstCharacterKey?}` — movies: 9 entries)
-  and `Filter[]` (`{filter, filterType, key=value-list URL, title}` — movies: 27). With header
+  and `Filter[]` (`{filter, filterType, key=value-list URL, title, type}` — movies: 28 on PMS 1.43.5,
+  27 on 1.43.2; shows 15, seasons 0, episodes 17). With header
   `X-Plex-Container-Size: 0` it's a menus+totalSize-only probe. Standalone `/filters` and `/sorts`
-  endpoints exist too. **The client hardcodes no menu contents** (`browse.rs` consumes these).
+  endpoints exist too. **The client hardcodes no Sort menu contents** (`browse.rs` consumes them); the
+  Filter menu still offers Unwatched and Genre only, while the wire layer reads the whole facet list
+  (`plex/src/plex/facets.rs`). The facet model is in `docs/library-filters-spec.md`: `filterType` is
+  `boolean`, `string` or `integer`; a boolean facet has **no value list** and the key of `unwatched`
+  answers the whole unwatched LISTING (never request it); the server's `key` strings are already
+  percent-encoded (send them verbatim); value lists page and are scoped by any terms sent with them.
 - **Sorting:** `sort=key:asc|desc` (comma-chain for multi-level, `nullsLast` supported);
   `sort=random` works. Composes with filters + paging.
 - **Filter values:** `GET /library/sections/{key}/genre` (also `/year`, `/decade`, `/contentRating`,
@@ -1525,6 +1531,7 @@ only `size`.
 | `/library/search` with a kind the server does not know (`shows`, `episodes`, `actors`, `bogus`) | not applicable | `totalSize=0` | Empty, with no error: an unsupported kind looks like no hits. |
 | `/hubs?count=…` (the hub list) | yes, by hub | yes | A window of three over ten hubs returned three hubs, `totalSize=10`, `offset` echoed. |
 | `/hubs/sections/{id}?count=…` (one library's hub list) | yes, by hub | yes | Windows (0,3) and (3,3) over nine hubs; order is stable across two calls. |
+| `/library/sections/{id}/{facet}` (a filter's value list: `genre`, `actor`, `studio`, …) | yes | yes | PMS 1.43.5, measured on `actor` (807 values), `genre` and `year`: Start and Size work as headers and as query parameters, windows equal slices of the unpaged list, `Size=0` answers `totalSize` only, a Start past the end answers no rows with `totalSize` present; an unpaged answer carries neither `totalSize` nor `offset` (807 rows is 141 KB, about 17 KB per 100-row page). Order is the server's (alphabetical for genre, studio, country; newest first for year and decade; opaque for people). The key of a boolean facet is not a value list: `unwatched` answers the whole listing, `hdr`, `dovi`, `atmos`, `inProgress` and `unmatched` answer 404. |
 | `/hubs/search` with a window | no | not per hub | Not a per-hub offset: seven hubs shrank to one hub with two rows, with `size=7`, `totalSize=17`, `offset=10`. Search hubs carry no key, and `more` is false even on a hub cut at its limit. |
 | Key of `movie.topunwatched` and `movie.by.actor.or.director` (random hubs) | yes | not recorded | The listing came back in the same order on two calls; the windows (0,6) and (6,50) together equal the whole listing; every preview card is in it. The library held only 13 items, so large lists are not covered. |
 | `/playlists/all` (the key of the playlists hub in the Home hub list, `/hubs` and `/hubs/promoted`) | yes | yes | Measured on PMS 1.43: `X-Plex-Container-Start=2&X-Plex-Container-Size=2` answered `size` 2, `totalSize` 5, `offset` 2, items of type `playlist`. The app does not page it and no row shows it: a hub of type `playlist` is not listed (`pms::listable`), so it never reaches a shelf, and `is_pageable_hub_key` does not admit the key. |
