@@ -12,9 +12,12 @@ use super::*;
 fn the_strip_keys_keep_their_offsets() {
     use crate::dispatch::STRIP_BASE;
     assert_eq!(
-        [TAB_KEY_HOME, TAB_KEY_MOVIES, TAB_KEY_SHOWS, TAB_KEY_SEARCH, TAB_KEY_CHIP, TAB_KEY_WATCHLIST],
-        [STRIP_BASE, STRIP_BASE + 1, STRIP_BASE + 2, STRIP_BASE + 3, STRIP_BASE + 4, STRIP_BASE + 5],
+        [TAB_KEY_HOME, TAB_KEY_MOVIES, TAB_KEY_SHOWS, TAB_KEY_SEARCH, TAB_KEY_CHIP, TAB_KEY_WATCHLIST, TAB_KEY_VIDEOS],
+        [STRIP_BASE, STRIP_BASE + 1, STRIP_BASE + 2, STRIP_BASE + 3, STRIP_BASE + 4, STRIP_BASE + 5, STRIP_BASE + 7],
     );
+    // +6 is left open on purpose: the Live TV pull request (#993) takes it, and the build refuses
+    // two destinations on one key whichever of the two lands first.
+    assert!(!TAB_KEYS.contains(&(STRIP_BASE + 6)));
 }
 
 #[test]

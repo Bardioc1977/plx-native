@@ -1392,3 +1392,256 @@ fn a_home_roster_arriving_late_re_resolves_the_pin_table() {
         "the correction settles rather than re-firing every frame"
     );
 }
+
+/// What a household with an Other Videos library (movie type, no metadata agent) looks like to the
+/// strip: Movies, TV Shows and the third type last. Sections are `(key, title, kind)` of one server.
+fn seed_three_types(browse: &mut TestBrowse) {
+    browse.seed_sources(vec![a_source("mac-mini", "", true)]);
+    browse.append_sections(
+        0,
+        vec![
+            (1, "Movies".into(), SecKind::Movie),
+            (2, "TV Shows".into(), SecKind::Show),
+            (3, "Other Videos".into(), SecKind::Video),
+        ],
+    );
+}
+
+/// `TAB_KINDS[k.slot()] == k` is what every per-kind array (`preferred`, `kind_fetch`) indexes by,
+/// and `canon()` is hashed into recordings and menu stamps: Movie 0 and Show 1 are what every
+/// committed recording carries, so they and the wire codes are pinned.
+#[test]
+fn slot_and_canon_are_stable() {
+    for kind in TAB_KINDS {
+        assert_eq!(TAB_KINDS[kind.slot()], kind, "{kind:?}");
+        assert_eq!(SecKind::from_wire(kind.wire()), Some(kind), "{kind:?} round-trips through its code");
+    }
+    assert_eq!(TAB_KINDS.map(SecKind::canon), [0, 1, 2]);
+    assert_eq!(TAB_KINDS.map(SecKind::wire), ["movie", "show", "video"]);
+    assert_eq!(TAB_KINDS.map(SecKind::slot), [0, 1, 2]);
+    // the Plex library types this product still has no level for
+    for refused in ["artist", "photo", "mixed", "clip", ""] {
+        assert_eq!(SecKind::from_wire(refused), None, "{refused:?}");
+    }
+}
+
+/// **Other Videos is a type of its own, after TV Shows.**
+#[test]
+fn an_other_videos_library_gets_its_own_pill_after_tv_shows() {
+    let _g = plx_base::testlock::serial();
+    let _t = TempPins::new("strip-video");
+    let mut browse = TestBrowse::default();
+    seed_three_types(&mut browse);
+    assert_eq!(browse.tab_count(), 3);
+    assert_eq!(
+        (browse.state.tab_kind(0), browse.state.tab_kind(1), browse.state.tab_kind(2)),
+        (Some(SecKind::Movie), Some(SecKind::Show), Some(SecKind::Video)),
+        "Home's type pills in strip order, Other Videos last"
+    );
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), Some(2));
+    assert_eq!(browse.state.tab_section(2), Some(2), "the pill opens the Other Videos library");
+    assert_eq!(browse.state.tab_section(0), Some(0), "…and Movies still opens Movies");
+    assert_eq!(browse.tab_title(2), "Other Videos");
+}
+
+/// **A household with two types keeps the strip it had**: the mask over the kinds is two bits, its
+/// value and the generation it moves are what they always were, and a type nobody has draws nothing.
+#[test]
+fn tab_shape_of_a_two_type_household_is_unchanged() {
+    let _g = plx_base::testlock::serial();
+    let _t = TempPins::new("strip-two-types");
+    let mut browse = TestBrowse::default();
+    browse.seed_sources(vec![a_source("mac-mini", "", true)]);
+    let before = browse.state.tabs_gen();
+    browse.append_sections(
+        0,
+        vec![(1, "Movies".into(), SecKind::Movie), (2, "TV Shows".into(), SecKind::Show)],
+    );
+    assert_eq!(browse.state.tab_shape, 0b11, "Movies is bit 0 and TV Shows bit 1, as ever");
+    assert_eq!(browse.state.tabs_gen(), before.wrapping_add(1), "the row changed once, when its pills appeared");
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), None, "a type nobody has has no position");
+    assert_eq!(browse.tab_count(), 2);
+    // another library of a type already on the strip changes nothing about it
+    let stable = browse.state.tabs_gen();
+    browse.append_sections(0, vec![(3, "Also Movies".into(), SecKind::Movie)]);
+    assert_eq!((browse.state.tab_shape, browse.state.tabs_gen()), (0b11, stable));
+}
+
+/// **The Sources panel stays inside the type being browsed**, and Other Videos is a type: the
+/// Movies pill no longer offers the Other Videos library, and its own pill offers only that.
+#[test]
+fn the_movies_pill_no_longer_offers_the_other_videos_library_in_its_sources() {
+    let _g = plx_base::testlock::serial();
+    let _t = TempPins::new("picker-video");
+    let mut browse = TestBrowse::default();
+    browse.seed_sources(vec![
+        a_source("mac-mini", "", true),
+        a_source("nas-home", "friend", true),
+    ]);
+    browse.append_sections(
+        0,
+        vec![
+            (1, "Movies".into(), SecKind::Movie),
+            (2, "TV Shows".into(), SecKind::Show),
+            (3, "Other Videos".into(), SecKind::Video),
+        ],
+    );
+    browse.append_sections(
+        1,
+        vec![(1, "Film Club".into(), SecKind::Movie), (2, "Their Clips".into(), SecKind::Video)],
+    );
+    // a friend's libraries start Off; the type scope is what is graded here
+    set_pinned_for_owner_test(&mut browse.state, 3, true);
+    set_pinned_for_owner_test(&mut browse.state, 4, true);
+
+    browse.state.set_cur(0);
+    let films: Vec<String> = browse.source_rows().iter().map(|r| r.title.clone()).collect();
+    assert_eq!(films, vec!["Movies", "Film Club"], "no Other Videos library in the Movies list: {films:?}");
+    browse.state.set_cur(2);
+    let videos: Vec<String> = browse.source_rows().iter().map(|r| r.title.clone()).collect();
+    assert_eq!(videos, vec!["Other Videos", "Their Clips"], "only the third type's libraries: {videos:?}");
+    assert!(
+        browse.state.all_source_rows().iter().any(|r| r.title == "Other Videos"),
+        "Favorite libraries lists every library, whatever its type"
+    );
+}
+
+/// **Switching the Other Videos favourite off removes its pill and nothing else.**
+#[test]
+fn switching_the_other_videos_favourite_off_takes_only_its_pill() {
+    let _g = plx_base::testlock::serial();
+    let _t = TempPins::new("strip-video-off");
+    let mut browse = TestBrowse::default();
+    seed_three_types(&mut browse);
+    assert_eq!(browse.tab_count(), 3);
+    let gen = browse.state.tabs_gen();
+
+    set_pinned_for_owner_test(&mut browse.state, 2, false);
+
+    assert_eq!(browse.tab_count(), 2);
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), None);
+    assert_eq!(
+        (browse.state.tab_of_kind(SecKind::Movie), browse.state.tab_of_kind(SecKind::Show)),
+        (Some(0), Some(1)),
+        "Movies and TV Shows keep their places"
+    );
+    browse.state.refresh_tab_shape();
+    assert_eq!(browse.state.tab_shape, 0b011, "the mask lost only the third bit");
+    assert_ne!(browse.state.tabs_gen(), gen, "the row's generation moved, so the labels are rebuilt");
+}
+
+/// **A friend's Other Videos library is Off until it is switched on, also when the household owns
+/// none.** The pin rule turns on a library of a type the household does not own, which would put a
+/// friend's personal clips on every member's Home on first boot.
+#[test]
+fn a_friends_other_videos_library_defaults_off_even_when_the_household_has_none() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("friend-video-default");
+    t.watching("u-owner");
+    let mut browse = TestBrowse::default();
+    browse.seed_sources(vec![
+        a_source("mac-mini", "", true),
+        a_source("nas-home", "friend", true),
+    ]);
+    browse.append_sections(
+        0,
+        vec![(1, "Movies".into(), SecKind::Movie), (2, "TV Shows".into(), SecKind::Show)],
+    );
+    browse.append_sections(1, vec![(1, "Their Clips".into(), SecKind::Video)]);
+    assert_eq!(
+        (browse.pinned(0), browse.pinned(1), browse.pinned(2)),
+        (true, true, false),
+        "yours On, the friend's personal videos Off"
+    );
+    assert_eq!(browse.tab_count(), 2, "…so there is no pill for them until they are switched on");
+    assert!(browse.state.toggle_pin(2), "the friend's library can still be turned on");
+    plx_base::storage_worker::drain_for_test();
+    assert_eq!(browse.tab_count(), 3);
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), Some(2));
+}
+
+#[test]
+fn a_household_other_videos_library_defaults_on() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("house-video-default");
+    t.watching("u-owner");
+    let mut browse = TestBrowse::default();
+    seed_three_types(&mut browse);
+    assert_eq!((browse.pinned(0), browse.pinned(1), browse.pinned(2)), (true, true, true));
+    assert_eq!(browse.tab_count(), 3, "the household's own Other Videos library has its pill from the first boot");
+}
+
+/// A recorded On answer is the user's decision and outranks the default.
+#[test]
+fn a_recorded_on_answer_for_a_friends_video_library_still_wins() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("friend-video-recorded");
+    t.watching("u-owner");
+    let mut browse = TestBrowse::default();
+    let seed = |browse: &mut TestBrowse| {
+        browse.seed_sources(vec![
+            a_source("mac-mini", "", true),
+            a_source("nas-home", "friend", true),
+        ]);
+        browse.append_sections(0, vec![(1, "Movies".into(), SecKind::Movie)]);
+        browse.append_sections(1, vec![(1, "Their Clips".into(), SecKind::Video)]);
+    };
+    seed(&mut browse);
+    assert!(!browse.pinned(1));
+    assert!(browse.state.toggle_pin(1));
+    plx_base::storage_worker::drain_for_test();
+    seed(&mut browse); // the next boot
+    assert!(browse.pinned(1), "the recorded On answer survives");
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), Some(1));
+}
+
+/// **A remembered Other Videos library is found for its own pill, and the Movies entry beside it
+/// is untouched.** A profile that picked a library of each type remembers both under their codes.
+#[test]
+fn a_remembered_video_library_is_found_for_the_video_pill_and_a_movie_entry_is_untouched() {
+    let _g = plx_base::testlock::serial();
+    let _t = TempPins::new("remembered-video");
+    let mut browse = TestBrowse::default();
+    browse.seed_sources(vec![a_source("mac-mini", "", true)]);
+    browse.append_sections(
+        0,
+        vec![
+            (1, "Movies".into(), SecKind::Movie),
+            (2, "More Movies".into(), SecKind::Movie),
+            (3, "Other Videos".into(), SecKind::Video),
+            (4, "More Videos".into(), SecKind::Video),
+        ],
+    );
+    browse.state.remembered = vec![
+        (SecKind::Movie, "mac-mini".into(), 2),
+        (SecKind::Video, "mac-mini".into(), 4),
+    ];
+    assert_eq!(browse.state.section_of_kind(SecKind::Movie), Some(1), "the Movies entry still finds Movies");
+    assert_eq!(browse.state.section_of_kind(SecKind::Video), Some(3), "the Video entry finds the Video library");
+    browse.state.remembered = vec![(SecKind::Movie, "mac-mini".into(), 4)];
+    assert_eq!(
+        browse.state.section_of_kind(SecKind::Movie),
+        Some(0),
+        "a Movie entry naming a library of another type finds nothing and falls to the tiebreak"
+    );
+}
+
+/// The remembered libraries are read through the app's own codes: `video` is a kind, and a code
+/// this build has no level for (a newer build's, or a hand edit) is skipped, not an error.
+#[test]
+fn an_unknown_remembered_kind_is_ignored() {
+    let _g = plx_base::testlock::serial();
+    let _t = TempPins::new("remembered-unknown");
+    let mut browse = TestBrowse::default();
+    let mut last = plx_plex::plex::session::LastLibrary::default();
+    last.set("video", "mac-mini", 3);
+    last.set("movie", "mac-mini", 1);
+    last.set("music", "mac-mini", 9);
+    let mut session = plx_plex::plex::session::Session::default();
+    session.prefs.last_library.push(last);
+    browse.state.load_remembered(&session, "");
+    assert_eq!(
+        browse.state.remembered,
+        vec![(SecKind::Video, "mac-mini".to_string(), 3), (SecKind::Movie, "mac-mini".to_string(), 1)],
+    );
+}

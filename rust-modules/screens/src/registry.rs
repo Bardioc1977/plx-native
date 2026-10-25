@@ -262,6 +262,8 @@ pub enum HomeTab {
     Home,
     Movies,
     Shows,
+    /// Plex's Other Videos library type, after TV Shows (issue #599).
+    Videos,
     /// The Watchlist mark, before Search (docs/watchlist-plan.md §2.4 W45).
     Watchlist,
     Search,
@@ -270,8 +272,8 @@ pub enum HomeTab {
 impl HomeTab {
     /// Every destination, for a test that walks the strip. [`ordinal`](Self::ordinal) is an
     /// exhaustive match, so a variant added without joining this list fails a test.
-    pub const ALL: [HomeTab; 5] =
-        [HomeTab::Home, HomeTab::Movies, HomeTab::Shows, HomeTab::Watchlist, HomeTab::Search];
+    pub const ALL: [HomeTab; 6] =
+        [HomeTab::Home, HomeTab::Movies, HomeTab::Shows, HomeTab::Videos, HomeTab::Watchlist, HomeTab::Search];
 
     #[cfg(test)]
     fn ordinal(self) -> usize {
@@ -279,8 +281,9 @@ impl HomeTab {
             HomeTab::Home => 0,
             HomeTab::Movies => 1,
             HomeTab::Shows => 2,
-            HomeTab::Watchlist => 3,
-            HomeTab::Search => 4,
+            HomeTab::Videos => 3,
+            HomeTab::Watchlist => 4,
+            HomeTab::Search => 5,
         }
     }
 
@@ -293,6 +296,7 @@ impl HomeTab {
             HomeTab::Home => keys::TAB_KEY_HOME,
             HomeTab::Movies => keys::TAB_KEY_MOVIES,
             HomeTab::Shows => keys::TAB_KEY_SHOWS,
+            HomeTab::Videos => keys::TAB_KEY_VIDEOS,
             HomeTab::Watchlist => keys::TAB_KEY_WATCHLIST,
             HomeTab::Search => keys::TAB_KEY_SEARCH,
         }
@@ -311,6 +315,7 @@ impl HomeTab {
         match self {
             HomeTab::Movies => Some(SecKind::Movie),
             HomeTab::Shows => Some(SecKind::Show),
+            HomeTab::Videos => Some(SecKind::Video),
             HomeTab::Home | HomeTab::Watchlist | HomeTab::Search => None,
         }
     }
@@ -321,6 +326,7 @@ impl HomeTab {
         match kind {
             SecKind::Movie => HomeTab::Movies,
             SecKind::Show => HomeTab::Shows,
+            SecKind::Video => HomeTab::Videos,
         }
     }
 }
@@ -2986,6 +2992,7 @@ mod home_tab_tests {
             (HomeTab::Home, STRIP_BASE),
             (HomeTab::Movies, STRIP_BASE + 1),
             (HomeTab::Shows, STRIP_BASE + 2),
+            (HomeTab::Videos, STRIP_BASE + 7),
             (HomeTab::Search, STRIP_BASE + 3),
             (HomeTab::Watchlist, STRIP_BASE + 5),
         ];

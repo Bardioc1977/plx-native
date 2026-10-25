@@ -443,3 +443,85 @@ fn no_popover_panel_uses_the_blur_path_and_every_one_stands_on_the_field() {
         assert_eq!(ground_of(rel), (false, true), "{rel} is a SHEET: `Ground::Sheet` and nothing else");
     }
 }
+
+// ---- the fourth pill (Other Videos, #599) -------------------------------------------------------
+
+/// The faces of a household with all three library types: Home, the three type pills, the Watchlist
+/// bookmark and Search, in the strip's order (`app::chrome::strip_keys`).
+fn full_strip_faces() -> Vec<TabFace> {
+    use plx_platform::i18n::msg;
+    vec![
+        TabFace::Label(msg::browse_chrome_home().into()),
+        TabFace::Label(msg::browse_kind_movies().into()),
+        TabFace::Label(msg::browse_kind_tv_shows().into()),
+        TabFace::Label(msg::browse_kind_other_videos().into()),
+        TabFace::Icon(crate::icons::Icon::Bookmark),
+        TabFace::Icon(crate::icons::Icon::Search),
+    ]
+}
+
+/// **A third type pill takes the strip off the glass, by the budget's own arithmetic.** The shipped
+/// strip of two types is 648 wide (Home 126, Movies 146, TV Shows 176, two 60 px marks, four gaps of
+/// 16 and the track's 16) against a budget of 672: 24 px of headroom. ANY further pill, even a bare
+/// 60 px mark, is 724. So every household with an Other Videos library draws the flat dark capsule
+/// (`tab_glass_on`), the designed degradation `a_normal_strip_keeps_the_material_and_a_long_one_loses_it`
+/// documents, until now unreachable with two types. This pins the consequence so nobody finds it by
+/// accident; re-solving the budget is a separate, measured GPU change. The same arithmetic applies
+/// to any other fourth destination (Live TV's pill, #993).
+#[test]
+fn a_strip_with_a_third_type_pill_is_flat_by_the_budget() {
+    let two_types = [126.0, 146.0, 176.0, TAB_ICON_PILL_W, TAB_ICON_PILL_W];
+    assert_eq!(tab_track_w(&two_types), 648.0, "the shipped strip");
+    assert!(tab_track_w(&two_types) <= GLASS_TRACK_MAX, "two types keep the material");
+    let bare_fourth = [126.0, 146.0, 176.0, TAB_ICON_PILL_W, TAB_ICON_PILL_W, TAB_ICON_PILL_W];
+    assert_eq!(tab_track_w(&bare_fourth), 724.0);
+    assert!(
+        tab_track_w(&bare_fourth) > GLASS_TRACK_MAX,
+        "even a bare 60 px mark as a fourth pill is {} against a budget of {GLASS_TRACK_MAX}",
+        tab_track_w(&bare_fourth),
+    );
+    let measure = plx_base::fontcov::advances::ShippedMeasure;
+    let widths = tab_widths(&full_strip_faces(), &measure);
+    assert!(tab_track_w(&widths) > GLASS_TRACK_MAX && !tab_glass_on(tab_track_w(&widths)),
+        "the real strip of three types is {} wide and draws flat", tab_track_w(&widths));
+}
+
+/// **The six-pill strip fits in every shipped language** without scrolling, and the fully unfurled
+/// profile chip clears its left end for an ordinary name. The strip is not one of
+/// `docs/localization.md`'s measured slots, so this is its measurement: the widest label is
+/// Other Videos' (Russian "Другие видео", German "Andere Videos"), measured with the TV's own glyph
+/// advances. The chip's capsule ends at `chip_cap(1.0, name_w)`; the track is centred, so the name
+/// width at which they meet is `track_x - (chip_cap(1.0, 0).right)`. A name wider than that draws
+/// OVER the track's end while the chip holds focus (it is the focused control and draws on top);
+/// the budget for a name is `CHIP_NAME_MAX`, so the overlap is bounded, and this pins how much room
+/// an ordinary name has in the worst language (the issue author's "expanding username overlaps the
+/// wider menu" worry, quantified).
+#[test]
+fn the_full_strip_fits_every_language_and_leaves_an_ordinary_chip_name_room() {
+    use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+    let measure = plx_base::fontcov::advances::ShippedMeasure;
+    let mut room = Vec::new();
+    for language in SHIPPED {
+        let _guard = language_on_this_thread_for_test(language);
+        let widths = tab_widths(&full_strip_faces(), &measure);
+        let tag = language.tag();
+        assert!(tab_content_w(&widths) <= TAB_VIEW_MAX, "{tag}: {} past the viewport", tab_content_w(&widths));
+        for stop in 0..widths.len() {
+            assert_eq!(tab_scroll_target(&widths, stop, 0.0), 0.0, "{tag}: stop {stop} scrolls the strip");
+        }
+        let track_x = (crate::consts::SCR_W - tab_track_w(&widths)) * 0.5;
+        let chip_end_without_name = chip_cap(1.0, 0.0).x + chip_cap(1.0, 0.0).w;
+        room.push((tag, track_x - chip_end_without_name));
+    }
+    // Measured with the TV's glyph advances: 294 px in Russian (the tightest), 326 in English, so a
+    // name of up to 290 px clears the track in every language and English never overlaps at all
+    // (CHIP_NAME_MAX is 320). The widest names the budget allows overlap by at most 320 - 294 = 26 px
+    // in Russian, which the chip, being the focused control, draws over. Pinned: a wider label that
+    // eats this room fails here instead of on a television.
+    const ORDINARY_NAME_W: f32 = 290.0;
+    for (tag, clear) in &room {
+        assert!(*clear >= ORDINARY_NAME_W, "{tag}: the chip clears the track up to a {clear:.0} px name");
+    }
+    assert!(room.iter().any(|(tag, clear)| *tag == "en" && *clear >= CHIP_NAME_MAX),
+        "English never overlaps: {room:?}");
+}

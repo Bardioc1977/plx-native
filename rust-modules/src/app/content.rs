@@ -1305,6 +1305,17 @@ mod library_publication_tests {
         assert!(home_tab_available(directory.view(), HomeTab::Movies));
         assert!(!home_tab_available(directory.view(), HomeTab::Shows));
         assert!(home_tab_available(directory.view(), HomeTab::Home));
+        assert!(!home_tab_available(directory.view(), HomeTab::Videos), "no Other Videos library, no pill to press");
+        let with_videos = plx_data::stores::browse::DirectorySnapshot::fixture(7, 0, vec![
+            plx_data::stores::browse::SectionView {
+                sid: Some(sid), key: 12, kind: plx_data::stores::browse::SecKind::Video,
+                row: plx_data::stores::browse::SrcRow {
+                    section: 0, title: "Other Videos".into(), pinned: true, current: true, ..Default::default()
+                },
+            },
+        ]);
+        assert!(home_tab_available(with_videos.view(), HomeTab::Videos));
+        assert!(!home_tab_available(with_videos.view(), HomeTab::Movies));
     }
 
     #[test]

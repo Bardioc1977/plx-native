@@ -1183,10 +1183,7 @@ fn grid_library_search_heroidx_arm(app: &mut App, _fr: &mut Frame) {
             app.bridge.home_command(HomeCmd::FocusGrid { row, col });
         }
         if let Some(s) = plx_base::devtrig::read("library") {
-            let kind = match s.parse::<usize>().unwrap_or(0) {
-                1 => plx_data::stores::browse::SecKind::Show,
-                _ => plx_data::stores::browse::SecKind::Movie,
-            };
+            let kind = library_trigger_kind(s.parse::<usize>().unwrap_or(0));
             app.bridge.enter_library(kind);
             // Same pill semantics as the search trigger above: boot has already rooted Home,
             // so this is `SelectTab`, not a `Root` that would discard it.
@@ -2135,6 +2132,35 @@ pub(crate) fn maybe_replay_after_eos(app: &mut App, handed_off_to_up_next: bool)
     }
 }
 
+/// `plxnative-library=<n>`: which library type the boot opens, by the strip's type order (0 Movies,
+/// 1 TV Shows, 2 Other Videos). Anything else is Movies, as an unparsed value always was.
+fn library_trigger_kind(n: usize) -> plx_data::stores::browse::SecKind {
+    use plx_data::stores::browse::SecKind;
+    match n {
+        1 => SecKind::Show,
+        2 => SecKind::Video,
+        _ => SecKind::Movie,
+    }
+}
+
+#[cfg(test)]
+mod library_trigger_tests {
+    use super::library_trigger_kind;
+    use plx_data::browse::TAB_KINDS;
+    use plx_data::stores::browse::SecKind;
+
+    /// The trigger's number is the kind's position in the strip's type order, so 2 is Other Videos
+    /// and `tests/README.md` / `tools/tv-session.sh` name the same three.
+    #[test]
+    fn the_library_trigger_numbers_follow_the_strip_order() {
+        for (n, kind) in TAB_KINDS.into_iter().enumerate() {
+            assert_eq!(library_trigger_kind(n), kind, "plxnative-library={n}");
+        }
+        assert_eq!(library_trigger_kind(2), SecKind::Video);
+        assert_eq!(library_trigger_kind(9), SecKind::Movie, "an unknown number is Movies, as before");
+    }
+}
+
 #[cfg(test)]
 mod replay_after_eos_tests {
     use super::should_replay_after_eos;
@@ -2268,11 +2294,7 @@ pub(crate) fn nav_osc_tick(app: &mut App, now: u32) {
             AppArg::Content(_) => crate::app::bridge::nav_pop(&mut app.pages),
             AppArg::Home => {
                 if let Some(kind) = app.bridge.browse_directory().tab_kind(0) {
-                    let tab = match kind {
-                        plx_data::stores::browse::SecKind::Show => HomeTab::Shows,
-                        _ => HomeTab::Movies,
-                    };
-                    crate::app::bridge::nav_tab(&mut app.pages, &mut app.bridge, tab, None, None);
+                    crate::app::bridge::nav_tab(&mut app.pages, &mut app.bridge, HomeTab::of_kind(kind), None, None);
                 }
             }
             AppArg::Library => {
@@ -2498,11 +2520,7 @@ fn push_bench_open(app: &mut App, target: bench::PushTarget) -> bench::PushTarge
         }
         bench::PushTarget::Library => {
             if let Some(kind) = app.bridge.browse_directory().tab_kind(0) {
-                let tab = match kind {
-                    plx_data::stores::browse::SecKind::Show => HomeTab::Shows,
-                    _ => HomeTab::Movies,
-                };
-                crate::app::bridge::nav_tab(&mut app.pages, &mut app.bridge, tab, None, None);
+                crate::app::bridge::nav_tab(&mut app.pages, &mut app.bridge, HomeTab::of_kind(kind), None, None);
             }
             bench::PushTarget::Library
         }

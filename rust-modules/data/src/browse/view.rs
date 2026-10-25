@@ -359,8 +359,8 @@ struct DirectoryData {
 /// section changes, not at every prepare/draw split.
 #[derive(Clone)]
 pub struct DirectorySnapshot {
-    preferred: [Option<usize>; 2],
-    kind_fetch: [SecFetch; 2],
+    preferred: [Option<usize>; super::TAB_KINDS.len()],
+    kind_fetch: [SecFetch; super::TAB_KINDS.len()],
     stamp: Option<(u32, u32, usize, usize)>,
     data: Arc<DirectoryData>,
     /// The current library's listing as it stands (an O(1) handle on its immutable pages), for a
@@ -376,8 +376,8 @@ pub struct DirectorySnapshot {
 impl Default for DirectorySnapshot {
     fn default() -> Self {
         Self {
-            preferred: [None; 2],
-            kind_fetch: [SecFetch::Loading; 2],
+            preferred: [None; super::TAB_KINDS.len()],
+            kind_fetch: [SecFetch::Loading; super::TAB_KINDS.len()],
             stamp: None,
             data: Arc::default(),
             items: super::SecItems::default(),
@@ -417,7 +417,8 @@ impl DirectorySnapshot {
         self.discovery = state.discovery_state();
         self.sections_gen = state.sections_gen();
         self.tabs_gen = state.tabs_gen();
-        for (i, kind) in [super::SecKind::Movie, super::SecKind::Show].into_iter().enumerate() {
+        for kind in super::TAB_KINDS {
+            let i = kind.slot();
             self.preferred[i] = state.tab_of_kind(kind).and_then(|tab| state.tab_section(tab));
             self.kind_fetch[i] = state.kind_state(kind);
         }
@@ -431,8 +432,8 @@ impl DirectorySnapshot {
         fetch: SecFetch,
     ) -> Self {
         Self {
-            preferred: [None; 2],
-            kind_fetch: [fetch; 2],
+            preferred: [None; super::TAB_KINDS.len()],
+            kind_fetch: [fetch; super::TAB_KINDS.len()],
             stamp: Some((epoch, 0, 0, 1)),
             data: Arc::new(DirectoryData {
                 sources: vec![(sid, source)],
@@ -478,7 +479,7 @@ impl DirectorySnapshot {
         sources: Vec<(ServerId, super::SrcGroup)>,
         sections: Vec<SectionView>,
     ) -> Self {
-        let preferred = [super::SecKind::Movie, super::SecKind::Show]
+        let preferred = super::TAB_KINDS
             .map(|kind| sections.iter().position(|s| s.kind == kind && s.row.pinned));
         let favorites = sections.iter().filter_map(|section| {
             section.sid.map(|sid| (sid, section.key, section.row.pinned))
@@ -486,7 +487,7 @@ impl DirectorySnapshot {
         let source_count = sources.len();
         Self {
             preferred,
-            kind_fetch: [SecFetch::Ready; 2],
+            kind_fetch: [SecFetch::Ready; super::TAB_KINDS.len()],
             stamp: Some((epoch, 0, current, source_count)),
             data: Arc::new(DirectoryData {
                 sources,
@@ -547,7 +548,7 @@ impl<'a> DirectoryView<'a> {
     }
     #[allow(dead_code)]
     pub fn tab_kind(self, tab: usize) -> Option<super::SecKind> {
-        [super::SecKind::Movie, super::SecKind::Show].into_iter()
+        super::TAB_KINDS.into_iter()
             .filter(|kind| self.preferred(*kind).is_some()).nth(tab)
     }
     #[allow(dead_code)] // Consumed by the UI lane's explicit Chrome refresh signature.
@@ -557,12 +558,12 @@ impl<'a> DirectoryView<'a> {
     }
     #[allow(dead_code)]
     pub fn tab_count(self) -> usize {
-        [super::SecKind::Movie, super::SecKind::Show].into_iter()
+        super::TAB_KINDS.into_iter()
             .filter(|kind| self.preferred(*kind).is_some()).count()
     }
     #[allow(dead_code)]
     pub fn tab_of_kind(self, kind: super::SecKind) -> Option<usize> {
-        [super::SecKind::Movie, super::SecKind::Show].into_iter()
+        super::TAB_KINDS.into_iter()
             .filter(|candidate| self.preferred(*candidate).is_some())
             .position(|candidate| candidate == kind)
     }
@@ -572,10 +573,7 @@ impl<'a> DirectoryView<'a> {
             .map(|section| section.row.title.as_str())
     }
     pub fn preferred(self, kind: super::SecKind) -> Option<usize> {
-        self.0.preferred[match kind {
-            super::SecKind::Movie => 0,
-            super::SecKind::Show => 1,
-        }]
+        self.0.preferred[kind.slot()]
     }
     /// **Where the store goes to show a library of `kind`:** the reader's preferred library of
     /// that kind, addressed in this epoch. The one rule the Library page (from its first tick) and
@@ -585,10 +583,7 @@ impl<'a> DirectoryView<'a> {
         Some(crate::stores::browse::SectionAddress { epoch: self.epoch()?, sid: section.sid?, section: section.key })
     }
     pub fn kind_fetch(self, kind: super::SecKind) -> SecFetch {
-        self.0.kind_fetch[match kind {
-            super::SecKind::Movie => 0,
-            super::SecKind::Show => 1,
-        }]
+        self.0.kind_fetch[kind.slot()]
     }
     pub fn epoch(self) -> Option<u32> {
         self.0.stamp.map(|s| s.0)

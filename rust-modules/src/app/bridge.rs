@@ -3566,7 +3566,7 @@ pub(crate) fn nav_tab(
             }
             AppArg::Home
         }
-        HomeTab::Movies | HomeTab::Shows => {
+        HomeTab::Movies | HomeTab::Shows | HomeTab::Videos => {
             let Some(kind) = tab.section() else { return };
             rig.enter_library(kind);
             if d.top_arg() != Some(&AppArg::Library) { rig.aim_library(kind); }
@@ -4452,5 +4452,41 @@ mod preference_effect_tests {
         assert_eq!(plx_media::route::quality(), quality);
         assert_eq!(plx_media::route::direct_play_mode(), mode);
         assert_eq!(std::fs::read(temp.path()).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod type_pill_route_tests {
+    use super::*;
+    use plx_data::stores::browse::{DirectorySnapshot, SecKind, SectionView, SrcRow};
+
+    /// **Each type pill enters a library of its own type**, Other Videos included: the press queues
+    /// the Library's `Enter` for the kind the pill names, never Movies by default.
+    #[test]
+    fn a_press_on_a_type_pill_enters_a_library_of_that_type() {
+        let _serial = plx_base::testlock::serial();
+        for (tab, kind) in [(HomeTab::Movies, SecKind::Movie), (HomeTab::Shows, SecKind::Show), (HomeTab::Videos, SecKind::Video)] {
+            let mut d = Dispatcher::<AppHost>::new();
+            let mut rig = Bridge::for_test(|| 0);
+            nav_tab(&mut d, &mut rig, tab, None, None);
+            assert_eq!(rig.mounter.library_kind, Some(kind), "{tab:?}");
+        }
+    }
+
+    /// The Search page offers a type pill only while the profile has a favourite library of that type.
+    #[test]
+    fn the_search_page_offers_a_type_pill_only_for_a_type_the_profile_has() {
+        let _serial = plx_base::testlock::serial();
+        let mut rig = Bridge::for_test(|| 0);
+        let sid = plx_plex::plex::ServerId::from_raw(0);
+        let sections = |kinds: &[SecKind]| DirectorySnapshot::fixture(1, 0, kinds.iter().enumerate().map(|(i, &kind)| SectionView {
+            sid: Some(sid), key: i as i64 + 1, kind,
+            row: SrcRow { section: i, title: format!("Library {i}"), pinned: true, current: i == 0, ..Default::default() },
+        }).collect());
+        rig.directory = sections(&[SecKind::Movie, SecKind::Video]);
+        assert!(rig.search_tab_available(HomeTab::Movies));
+        assert!(rig.search_tab_available(HomeTab::Videos));
+        assert!(!rig.search_tab_available(HomeTab::Shows));
+        assert!(rig.search_tab_available(HomeTab::Search) && rig.search_tab_available(HomeTab::Home));
     }
 }

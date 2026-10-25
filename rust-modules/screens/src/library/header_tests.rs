@@ -1054,3 +1054,19 @@ fn every_strip_destination_is_pressable_from_the_library_page() {
     let apps = fixture.step(&mut page, &mut engine, ScreenEvent::Activate(plx_ui::widgets::TAB_KEY_CHIP));
     assert!(apps.iter().any(|fx| matches!(fx, AppFx::Library(LibraryReq::Account))), "the chip asks for the account");
 }
+
+/// **The header is rebuilt when the kind changes, Other Videos included.** The fingerprint once
+/// hashed `kind == Movie`, which would have read a Show and a Video alike and left a Show -> Video
+/// switch with the old crumb.
+#[test]
+fn the_header_fingerprint_tells_every_kind_apart() {
+    let _guard = plx_base::testlock::serial();
+    let fixture = Fixture::new(1, 36, 0);
+    let engine = FocusEngine::new();
+    let keys = [SecKind::Movie, SecKind::Show, SecKind::Video].map(|kind| {
+        let mut page = fixture.screen();
+        page.kind = kind;
+        page.header_key(&fixture.cx(&engine))
+    });
+    assert!(keys[0] != keys[1] && keys[1] != keys[2] && keys[0] != keys[2], "{keys:?}");
+}

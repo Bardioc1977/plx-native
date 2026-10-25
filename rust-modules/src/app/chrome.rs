@@ -120,6 +120,7 @@ impl ChromeSnapshot {
                 widgets::TAB_KEY_HOME => TabFace::Label(plx_platform::i18n::msg::browse_chrome_home().into()),
                 widgets::TAB_KEY_MOVIES => TabFace::Label(plx_platform::i18n::msg::browse_kind_movies().into()),
                 widgets::TAB_KEY_SHOWS => TabFace::Label(plx_platform::i18n::msg::browse_kind_tv_shows().into()),
+                widgets::TAB_KEY_VIDEOS => TabFace::Label(plx_platform::i18n::msg::browse_kind_other_videos().into()),
                 widgets::TAB_KEY_WATCHLIST => TabFace::Icon(Icon::Bookmark),
                 _ => TabFace::Icon(Icon::Search),
             }).collect();
@@ -268,6 +269,53 @@ mod tests {
         assert_eq!(members.iter().map(|member| member.elem).collect::<Vec<_>>(),
             vec![widgets::TAB_KEY_CHIP, widgets::TAB_KEY_HOME, widgets::TAB_KEY_MOVIES,
                 widgets::TAB_KEY_SHOWS, widgets::TAB_KEY_WATCHLIST, widgets::TAB_KEY_SEARCH]);
+    }
+
+    /// **Three types are four type-and-home pills: Home, Movies, TV Shows, Other Videos**, then the
+    /// bookmark and Search. A household without TV Shows keeps Other Videos after Movies.
+    #[test]
+    fn other_videos_is_the_last_type_pill_before_the_bookmark_and_search() {
+        let all = directory(&[SecKind::Movie, SecKind::Show, SecKind::Video]);
+        let mut snapshot = ChromeSnapshot {
+            profile_generation: Some(plx_plex::plex::session::current_gen()), ..Default::default()
+        };
+        snapshot.refresh(&plx_ui::fixture::FixtureMeasure, all.view());
+        assert_eq!(snapshot.keys, vec![widgets::TAB_KEY_HOME, widgets::TAB_KEY_MOVIES, widgets::TAB_KEY_SHOWS,
+            widgets::TAB_KEY_VIDEOS, widgets::TAB_KEY_WATCHLIST, widgets::TAB_KEY_SEARCH]);
+        let words: Vec<&str> = snapshot.faces.iter().filter_map(|face| match face {
+            TabFace::Label(word) => Some(word.as_str()),
+            TabFace::Icon(_) => None,
+        }).collect();
+        assert_eq!(words, ["Home", "Movies", "TV Shows", "Other Videos"]);
+
+        let no_shows = directory(&[SecKind::Movie, SecKind::Video]);
+        assert_eq!(strip_keys(no_shows.view()), vec![widgets::TAB_KEY_HOME, widgets::TAB_KEY_MOVIES,
+            widgets::TAB_KEY_VIDEOS, widgets::TAB_KEY_WATCHLIST, widgets::TAB_KEY_SEARCH]);
+        let only_videos = directory(&[SecKind::Video]);
+        assert_eq!(strip_keys(only_videos.view()), vec![widgets::TAB_KEY_HOME, widgets::TAB_KEY_VIDEOS,
+            widgets::TAB_KEY_WATCHLIST, widgets::TAB_KEY_SEARCH]);
+    }
+
+    /// A pill is an identity: Other Videos keeps its destination whichever pills sit before it, and
+    /// vanishes (no borrowed position) when it is switched off.
+    #[test]
+    fn the_other_videos_pill_round_trips_whatever_sits_before_it() {
+        let full = directory(&[SecKind::Movie, SecKind::Show, SecKind::Video]);
+        let no_shows = directory(&[SecKind::Movie, SecKind::Video]);
+        let none = directory(&[SecKind::Movie, SecKind::Show]);
+        assert_eq!(pill_of(full.view(), Pill::Section(SecKind::Video)), Some(3));
+        assert_eq!(pill_of(no_shows.view(), Pill::Section(SecKind::Video)), Some(2));
+        assert_eq!(pill_of(none.view(), Pill::Section(SecKind::Video)), None);
+        assert_eq!(pill_at(full.view(), 3), Pill::Section(SecKind::Video));
+        assert_eq!(pill_at(no_shows.view(), 2), Pill::Section(SecKind::Video));
+        assert_eq!(Pill::Section(SecKind::Video).tab(), HomeTab::Videos);
+        for kind in plx_data::browse::TAB_KINDS {
+            assert_eq!(Pill::Section(kind).tab(), HomeTab::of_kind(kind), "{kind:?}");
+            assert_eq!(Pill::of_tab(HomeTab::of_kind(kind)), Pill::Section(kind), "{kind:?}");
+        }
+        for pill in [Pill::Home, Pill::Watchlist, Pill::Search] {
+            assert_eq!(Pill::of_tab(pill.tab()), pill);
+        }
     }
 
     #[test]

@@ -6369,13 +6369,14 @@ impl Drop for InkClipScope {
 }
 
 // ---- The shared top tab row: profile chip leads at the margin, the global destinations
-// (Home | Movies | TV Shows | Search) sit CENTERED — the tvOS tab-bar idiom. Drawn by BOTH the Home screen and the
+// (Home | Movies | TV Shows | Other Videos | Watchlist | Search) sit CENTERED — the tvOS tab-bar idiom. Drawn by BOTH the Home screen and the
 // Library screen so they read as one global tab bar; the pill rects live here so both
 // screens' pointer paths share [`tab_pill_at`]. ----
-/// The global destinations: **Home, then a pill per type that HAS a favourite library, then
-/// Search** — two to four of them.
+/// The global destinations: **Home, then a pill per type that HAS a favourite library, then the
+/// Watchlist mark and Search** — three to six of them (the types are Movies, TV Shows and Plex's
+/// Other Videos, in that order; `browse::TAB_KINDS`).
 ///
-/// Movies and TV Shows are still TYPE pills rather than discovered Plex sections, so discovery,
+/// The types are still TYPE pills rather than discovered Plex sections, so discovery,
 /// failure and roster changes never REORDER navigation and a friend's tenth film library never adds
 /// a stop. **What changed on 2026-09-05 is that they can be REMOVED**: the Favorite libraries
 /// switch governs the strip, so a type left with no favourite draws no pill at all
@@ -6415,6 +6416,9 @@ strip_keys! {
     /// BEFORE Search in the strip's visual order (`app::chrome::strip_keys`) — a key is a
     /// destination's identity, never its position.
     TAB_KEY_WATCHLIST = 5;
+    /// Other Videos, `+7`. Open pull request #993 (Live TV) holds `+6`; the pair is kept distinct by
+    /// the assert below, whichever lands first.
+    TAB_KEY_VIDEOS = 7;
 }
 
 /// Two destinations with one key would be one pill answering for both; the second to land (two
@@ -6497,8 +6501,8 @@ pub fn overscan_rects(out: &mut Vec<(&'static str, Rect)>) {
     out.push(("profile chip, focused capsule", CHIP_CAP_MAX));
 }
 
-/// The overscan rect and the strip's real geometry agree at the widest the strip is shown: six
-/// focus stops (Home, both type pills, the Watchlist and Search marks, the chip) fit without scrolling.
+/// The overscan rect and the strip's real geometry agree at the widest the strip is shown: seven
+/// focus stops (Home, the three type pills, the Watchlist and Search marks, the chip) fit without scrolling.
 #[cfg(test)]
 mod overscan_strip_tests {
     use super::*;
@@ -6526,6 +6530,33 @@ mod overscan_strip_tests {
         let track = geometry.track;
         assert!(track.x >= outer.x && track.x + track.w <= outer.x + outer.w + 0.5,
             "the drawn track must sit inside the widest track the audit checks");
+        assert!(track.y >= outer.y && track.y + track.h <= outer.y + outer.h + 0.5);
+    }
+
+    /// The widest the strip is now shown: Home, ALL THREE type pills, the Watchlist and Search marks
+    /// (seven stops with the chip). At a generous 20 px a glyph it is 944 wide against a viewport of
+    /// 1528, so it still never scrolls, and its track still sits inside the audit's widest track.
+    #[test]
+    fn seven_stops_with_three_type_pills_do_not_scroll_and_clear_the_overscan_rect() {
+        let faces = [
+            TabFace::Label("Home".into()),
+            TabFace::Label("Movies".into()),
+            TabFace::Label("TV Shows".into()),
+            TabFace::Label("Other Videos".into()),
+            TabFace::Icon(crate::icons::Icon::Bookmark),
+            TabFace::Icon(crate::icons::Icon::Search),
+        ];
+        let widths = tab_metrics_from(&faces, |s| s.to_bytes().len() as f32 * 20.0).1;
+        assert!(tab_content_w(&widths) <= TAB_VIEW_MAX, "six pills must fit the strip's viewport");
+        for idx in 0..faces.len() {
+            assert_eq!(tab_scroll_target(&widths, idx, 0.0), 0.0, "stop {idx} must not scroll the strip");
+        }
+        let track = tab_geometry(&widths, 0.0).track;
+        let mut rects = Vec::new();
+        overscan_rects(&mut rects);
+        let (_, outer) = rects.iter().copied().find(|(name, _)| *name == "top tab track (widest)")
+            .expect("the strip publishes its widest track to the audit");
+        assert!(track.x >= outer.x && track.x + track.w <= outer.x + outer.w + 0.5);
         assert!(track.y >= outer.y && track.y + track.h <= outer.y + outer.h + 0.5);
     }
 }

@@ -345,7 +345,9 @@ impl LibraryType {
     /// The TYPE menu's rows for a section of `kind`, in menu order.
     pub fn offered(kind: SecKind) -> &'static [LibraryType] {
         match kind {
-            SecKind::Movie => &[Self::Primary, Self::Collections],
+            // Other Videos lists its clips and its collections (measured on PMS 1.43.5: `type=18`
+            // answers a list on such a library), exactly a movie library's two types.
+            SecKind::Movie | SecKind::Video => &[Self::Primary, Self::Collections],
             SecKind::Show => &[Self::Primary, Self::Seasons, Self::Episodes, Self::Collections],
         }
     }
@@ -363,6 +365,7 @@ impl LibraryType {
         match (self, kind) {
             (Self::Primary, SecKind::Movie) => msg::browse_person_films(n),
             (Self::Primary, SecKind::Show) => msg::browse_person_shows(n),
+            (Self::Primary, SecKind::Video) => msg::browse_library_videos(n),
             (Self::Seasons, _) => msg::browse_detail_seasons(n),
             (Self::Episodes, _) => msg::browse_detail_episodes(n),
             (Self::Collections, _) => msg::browse_search_items(n),
@@ -373,6 +376,7 @@ impl LibraryType {
         match (self, kind) {
             (Self::Primary, SecKind::Movie) => plx_platform::i18n::msg::browse_kind_movies_in(locale),
             (Self::Primary, SecKind::Show) => plx_platform::i18n::msg::browse_kind_tv_shows_in(locale),
+            (Self::Primary, SecKind::Video) => plx_platform::i18n::msg::browse_kind_other_videos_in(locale),
             (Self::Seasons, _) => plx_platform::i18n::msg::browse_kind_seasons_in(locale),
             (Self::Episodes, _) => plx_platform::i18n::msg::browse_kind_episodes_in(locale),
             (Self::Collections, _) => plx_platform::i18n::msg::browse_kind_collections_in(locale),
@@ -386,6 +390,7 @@ impl LibraryType {
         match (self, kind) {
             (Self::Primary, SecKind::Movie) => plx_platform::i18n::msg::browse_library_no_movies(library),
             (Self::Primary, SecKind::Show) => plx_platform::i18n::msg::browse_library_no_shows(library),
+            (Self::Primary, SecKind::Video) => plx_platform::i18n::msg::browse_library_no_videos(library),
             (Self::Seasons, _) => plx_platform::i18n::msg::browse_library_no_seasons(library),
             (Self::Episodes, _) => plx_platform::i18n::msg::browse_library_no_episodes(library),
             (Self::Collections, _) => plx_platform::i18n::msg::browse_library_no_collections(library),
@@ -394,10 +399,11 @@ impl LibraryType {
 
     /// The `type=` a listing of this type sends in a section of `kind`, or `None` for the
     /// section's own default listing. A movie library's films have always been asked for without
-    /// one, and still are; a TV library's shows name `type=2` explicitly, as they always did.
+    /// one, and still are, and so are an Other Videos library's clips (they are movie rows); a TV
+    /// library's shows name `type=2` explicitly, as they always did.
     pub fn plex_type(self, kind: SecKind) -> Option<i64> {
         match (self, kind) {
-            (Self::Primary, SecKind::Movie) => None,
+            (Self::Primary, SecKind::Movie | SecKind::Video) => None,
             (Self::Primary, SecKind::Show) => Some(2),
             (Self::Seasons, _) => Some(3),
             (Self::Episodes, _) => Some(4),
@@ -841,9 +847,11 @@ impl SecState {
             return filters;
         }
         if self.unwatched {
+            // Only a TV library counts unwatched LEAVES (episodes). A movie library's films and an
+            // Other Videos library's clips are leaves themselves: plain `unwatched`.
             let key = match (section_kind, self.library_type) {
                 (SecKind::Show, LibraryType::Primary | LibraryType::Seasons) => "unwatchedLeaves",
-                _ => "unwatched",
+                (SecKind::Movie | SecKind::Video | SecKind::Show, _) => "unwatched",
             };
             filters.push((key.into(), "1".into()));
         }
@@ -2064,7 +2072,11 @@ impl BrowseState {
     /// and `owns_type` then found nothing of the household's either, so EVERY library defaulted On
     /// — a genuine friend's share included.
     fn lib_refs(&self) -> Vec<plx_plex::plex::pins::LibRef<'_>> {
-        let household_type = |kind: SecKind| self.sections.iter().any(|section| {
+        // Personal media of a source that is not the household's is never on by default: a friend's
+        // Other Videos library would otherwise flip ON the moment the household owns none, and its
+        // clips (a Home row, with the hub gate) would reach every member's Home unasked. Counting
+        // the kind as always household-owned makes `pins::default_on` = `household` for it.
+        let household_type = |kind: SecKind| kind == SecKind::Video || self.sections.iter().any(|section| {
             section.kind == kind
                 && self.sources.get(section.src).map(|source| source.household).unwrap_or(true)
         });
@@ -3271,41 +3283,56 @@ fn project_sections(mc: &plx_plex::plex::MediaContainer) -> Vec<(i64, String, Se
 /// pill, and with one value a second type would silently ride the *Movies* pill and its content
 /// would be unreachable from the strip.
 ///
-/// **Movies and shows are the whole list, deliberately.** `artist` and `photo` briefly appeared
-/// here — the reasoning was that a friend sharing a type you do not own is the growth case the tab
-/// projection exists for, and dropping those at the wire made that case unreachable. It shipped, and
-/// a *Music* tab duly appeared on the dev set (owner verdict, 2026-08-14: "Music was just a tab in a
-/// mockup — remove it completely"). The reasoning was sound and the conclusion was still wrong,
-/// because the growth case is only worth reaching for a type the app can actually PLAY: below the
-/// grid an artist opens the movie detail page, which has nothing to play, so the pill led to a dead
-/// end that looked like a feature. Re-add a variant here in the commit that builds its level, not
-/// before — the projection is ready for it and needs no change.
+/// **Movies, shows and Other Videos are the whole list, deliberately.** `artist` and `photo` briefly
+/// appeared here — the reasoning was that a friend sharing a type you do not own is the growth case
+/// the tab projection exists for, and dropping those at the wire made that case unreachable. It
+/// shipped, and a *Music* tab duly appeared on the dev set (owner verdict, 2026-08-14: "Music was
+/// just a tab in a mockup — remove it completely"). The reasoning was sound and the conclusion was
+/// still wrong, because the growth case is only worth reaching for a type the app can actually PLAY:
+/// below the grid an artist opens the movie detail page, which has nothing to play, so the pill led
+/// to a dead end that looked like a feature. Re-add a variant here in the commit that builds its
+/// level, not before — the projection is ready for it and needs no change.
+///
+/// **`Video` is Plex's "Other Videos" library** (personal media, home movies, clips), issue #599.
+/// Its wire `type` is `movie`, so it is not told apart by [`from_wire`](Self::from_wire) but by
+/// [`of_section`](Self::of_section), from the section's agent and scanner. It earns its level
+/// because its rows ARE movies (`type: movie`, `subtype: clip`): the detail page and Play are the
+/// movie ones, and it browses with the same listing, sorts, rail and collections.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SecKind {
     Movie,
     Show,
+    /// Plex's "Other Videos": a `movie`-typed library filed with no metadata agent.
+    Video,
 }
 
 impl SecKind {
-    /// The wire's `Directory.type`, or `None` for a type this product draws no level for —
-    /// `artist`, `photo`, and everything else PMS can serve. See the type's own doc: this returning
-    /// `None` is what keeps an unplayable library out of the strip, the Sources panel and the grid
-    /// in one place, rather than at three call sites that can disagree.
+    /// The app's closed code for a kind, back to the kind — NOT the Plex `Directory.type`: Other
+    /// Videos has the wire type `movie` and is classified by [`of_section`](Self::of_section)
+    /// instead. This reads what the app itself wrote ([`wire`](Self::wire)): the remembered library
+    /// of a profile and a discovery recording. `None` for a code this build has no level for —
+    /// `artist`, `photo`, and everything else — which is what keeps an unplayable library out of
+    /// the strip, the Sources panel and the grid in one place, rather than at three call sites that
+    /// can disagree.
     pub fn from_wire(s: &str) -> Option<SecKind> {
         match s {
             "movie" => Some(SecKind::Movie),
             "show" => Some(SecKind::Show),
+            "video" => Some(SecKind::Video),
             _ => None,
         }
     }
-    /// The wire code this type was parsed FROM — the inverse of [`from_wire`](Self::from_wire), and
+    /// The code this type was parsed FROM — the inverse of [`from_wire`](Self::from_wire), and
     /// the key `plex::session::TypedLib` records a remembered library under. A `&'static str` from
     /// this table rather than an enum discriminant, so a reordered `SecKind` cannot silently
-    /// repoint a record an older build wrote.
+    /// repoint a record an older build wrote. An older build ignores a `"video"` entry and keeps it
+    /// when it rewrites the session (`LastLibrary::set` retains only its own kind), so the code is
+    /// additive and rollback-safe.
     pub fn wire(self) -> &'static str {
         match self {
             SecKind::Movie => "movie",
             SecKind::Show => "show",
+            SecKind::Video => "video",
         }
     }
     /// The same thing as a standalone label ("Films"), for a row whose count has not landed yet.
@@ -3313,6 +3340,27 @@ impl SecKind {
         match self {
             SecKind::Movie => plx_platform::i18n::msg::browse_kind_films(),
             SecKind::Show => plx_platform::i18n::msg::browse_kind_tv_shows_sentence(),
+            SecKind::Video => plx_platform::i18n::msg::browse_kind_videos(),
+        }
+    }
+    /// This kind's position in [`TAB_KINDS`] — the index of the per-kind arrays (`preferred`,
+    /// `kind_fetch`). One definition instead of a `Movie => 0, Show => 1` copy per array.
+    pub const fn slot(self) -> usize {
+        match self {
+            SecKind::Movie => 0,
+            SecKind::Show => 1,
+            SecKind::Video => 2,
+        }
+    }
+    /// The number a kind is hashed into recordings and menu stamps as (`LogicalState`, the replay
+    /// shapes). Pinned: Movie 0 and Show 1 are what every committed recording carries, and a kind
+    /// is added with the next number, never renumbered — it is deliberately not [`slot`](Self::slot),
+    /// whose order is the strip's and may change.
+    pub const fn canon(self) -> u32 {
+        match self {
+            SecKind::Movie => 0,
+            SecKind::Show => 1,
+            SecKind::Video => 2,
         }
     }
 }
@@ -3325,13 +3373,13 @@ impl SecKind {
 pub const PLAYS_SORT_KEY: &str = "viewCount";
 
 /// Whether the server is proven to honour [`PLAYS_SORT_KEY`] for this section kind. An
-/// exhaustive match rather than a wildcard default: [`SecKind`]'s own doc says a third variant
-/// (`Artist`/`Photo`) belongs in "the commit that builds its level", and when that lands this
-/// match must fail to compile until someone decides whether the new kind belongs here too,
-/// rather than silently inheriting `true`.
+/// exhaustive match rather than a wildcard default: when a new variant lands this match must fail
+/// to compile until someone decides whether the new kind belongs here too, rather than silently
+/// inheriting `true`. Other Videos is proven: `sort=viewCount:desc|asc` answers 200 on such a
+/// library (PMS 1.43.5).
 fn kind_offers_plays_sort(kind: SecKind) -> bool {
     match kind {
-        SecKind::Movie | SecKind::Show => true,
+        SecKind::Movie | SecKind::Show | SecKind::Video => true,
     }
 }
 
@@ -3409,7 +3457,8 @@ fn activate_source_of(_i: usize) {
 
 /// Every type this product has a pill for, in strip order. A pill is only DRAWN when the
 /// favourite set can fill it — see [`tab_kinds`] — so this is the vocabulary, not the strip.
-pub const TAB_KINDS: [SecKind; 2] = [SecKind::Movie, SecKind::Show];
+/// Other Videos comes last: a type most households do not own sits after the two everybody has.
+pub const TAB_KINDS: [SecKind; 3] = [SecKind::Movie, SecKind::Show, SecKind::Video];
 
 // ---- favourites: the ONE control, it governs the WHOLE APP, and it is PER PROFILE ------------
 //
@@ -4217,17 +4266,21 @@ mod localized_type_tests {
     fn library_type_titles_translate_without_changing_the_pms_query_type() {
         use plx_platform::i18n::{LocaleContext, Preference};
         for (preference, expected) in [
-            (Preference::En, ["Movies", "Collections", "TV Shows", "Seasons", "Episodes", "Collections"]),
-            (Preference::Es, ["Películas", "Colecciones", "Series", "Temporadas", "Episodios", "Colecciones"]),
-            (Preference::Be, ["Фільмы", "Калекцыі", "Серыялы", "Сезоны", "Серыі", "Калекцыі"]),
-            (Preference::Fr, ["Films", "Collections", "Séries", "Saisons", "Épisodes", "Collections"]),
-            (Preference::De, ["Filme", "Sammlungen", "Serien", "Staffeln", "Episoden", "Sammlungen"]),
-            (Preference::Hu, ["Filmek", "Gyűjtemények", "Sorozatok", "Évadok", "Epizódok", "Gyűjtemények"]),
+            (Preference::En, ["Movies", "Collections", "TV Shows", "Seasons", "Episodes", "Collections", "Other Videos", "Collections"]),
+            (Preference::Es, ["Películas", "Colecciones", "Series", "Temporadas", "Episodios", "Colecciones", "Otros vídeos", "Colecciones"]),
+            (Preference::Be, ["Фільмы", "Калекцыі", "Серыялы", "Сезоны", "Серыі", "Калекцыі", "Іншае відэа", "Калекцыі"]),
+            (Preference::Fr, ["Films", "Collections", "Séries", "Saisons", "Épisodes", "Collections", "Autres vidéos", "Collections"]),
+            (Preference::De, ["Filme", "Sammlungen", "Serien", "Staffeln", "Episoden", "Sammlungen", "Andere Videos", "Sammlungen"]),
+            (Preference::Hu, ["Filmek", "Gyűjtemények", "Sorozatok", "Évadok", "Epizódok", "Gyűjtemények", "Egyéb videók", "Gyűjtemények"]),
+            (Preference::It, ["Film", "Raccolte", "Serie TV", "Stagioni", "Episodi", "Raccolte", "Altri video", "Raccolte"]),
+            (Preference::Pt, ["Filmes", "Coleções", "Séries", "Temporadas", "Episódios", "Coleções", "Outros vídeos", "Coleções"]),
+            (Preference::Ru, ["Фильмы", "Коллекции", "Сериалы", "Сезоны", "Серии", "Коллекции", "Другие видео", "Коллекции"]),
         ] {
             let locale = LocaleContext::resolve(preference, None, None, None, None);
             let rows = LibraryType::offered(SecKind::Movie).iter().map(|&t| (t, SecKind::Movie))
-                .chain(LibraryType::offered(SecKind::Show).iter().map(|&t| (t, SecKind::Show)));
-            let wire = [None, Some(18), Some(2), Some(3), Some(4), Some(18)];
+                .chain(LibraryType::offered(SecKind::Show).iter().map(|&t| (t, SecKind::Show)))
+                .chain(LibraryType::offered(SecKind::Video).iter().map(|&t| (t, SecKind::Video)));
+            let wire = [None, Some(18), Some(2), Some(3), Some(4), Some(18), None, Some(18)];
             for (((kind, section), wire_type), title) in rows.zip(wire).zip(expected) {
                 assert_eq!(kind.title_in(section, &locale), title);
                 assert_eq!(kind.plex_type(section), wire_type);
