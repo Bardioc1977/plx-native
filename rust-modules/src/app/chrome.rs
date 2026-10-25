@@ -362,6 +362,169 @@ mod tests {
         assert_eq!(pill_at(view, 4), Pill::Search);
     }
 
+    /// **The Other Videos pill wears the library's own title** (#599 addendum): exactly one
+    /// favourite Other Videos library names the pill after itself, and every other case keeps the
+    /// translated type word. Widths are the shipped bold face's whole-pixel advances
+    /// (`ShippedMeasure`), the model the strip's budget is derived from, not a television.
+    mod other_videos_pill {
+        use super::*;
+        use plx_base::fontcov::advances::ShippedMeasure;
+        use plx_platform::i18n::{language_on_this_thread_for_test, Preference};
+
+        /// A household's section table: kind, the server's title for it, whether it is a favourite.
+        fn libraries(rows: &[(SecKind, &str, bool)]) -> DirectorySnapshot {
+            DirectorySnapshot::fixture(7, 0, rows.iter().enumerate().map(|(i, &(kind, title, pinned))| SectionView {
+                sid: Some(plx_plex::plex::ServerId::from_raw(0)),
+                key: i as i64 + 1,
+                kind,
+                row: SrcRow { section: i, title: title.to_owned(), pinned, ..Default::default() },
+            }).collect())
+        }
+
+        fn strip(directory: &DirectorySnapshot) -> ChromeSnapshot {
+            let mut snapshot = ChromeSnapshot {
+                profile_generation: Some(plx_plex::plex::session::current_gen()), ..Default::default()
+            };
+            snapshot.refresh(&ShippedMeasure, directory.view());
+            snapshot
+        }
+
+        /// The text on the Other Videos pill; the test fails when the strip has none.
+        fn video_label(snapshot: &ChromeSnapshot) -> String {
+            let at = snapshot.keys.iter().position(|&key| key == widgets::TAB_KEY_VIDEOS)
+                .expect("the household has an Other Videos pill");
+            match &snapshot.faces[at] {
+                TabFace::Label(text) => text.clone(),
+                TabFace::Icon(icon) => panic!("the Other Videos pill is a label, not {icon:?}"),
+            }
+        }
+
+        fn label_of(title: &str) -> String {
+            video_label(&strip(&libraries(&[(SecKind::Movie, "Movies", true),
+                (SecKind::Show, "TV Shows", true), (SecKind::Video, title, true)])))
+        }
+
+        fn text_w(text: &str) -> f32 {
+            use plx_machine::machine::Measure;
+            ShippedMeasure.width_str(text, plx_ui::theme::size::BODY, true)
+        }
+
+        #[test]
+        fn one_other_videos_library_names_the_pill() {
+            let snapshot = strip(&libraries(&[(SecKind::Movie, "Movies", true),
+                (SecKind::Show, "TV Shows", true), (SecKind::Video, "Home Movies", true)]));
+            assert_eq!(video_label(&snapshot), "Home Movies");
+            let words: Vec<&str> = snapshot.faces.iter().filter_map(|face| match face {
+                TabFace::Label(word) => Some(word.as_str()),
+                TabFace::Icon(_) => None,
+            }).collect();
+            assert_eq!(words, ["Home", "Movies", "TV Shows", "Home Movies"],
+                "only the Other Videos pill is renamed");
+        }
+
+        #[test]
+        fn two_other_videos_libraries_keep_the_type_label() {
+            let two = libraries(&[(SecKind::Movie, "Movies", true), (SecKind::Video, "Home Movies", true),
+                (SecKind::Video, "Holiday Clips", true)]);
+            assert_eq!(video_label(&strip(&two)), "Other Videos", "two libraries have no one name");
+            let one_off = libraries(&[(SecKind::Movie, "Movies", true), (SecKind::Video, "Home Movies", true),
+                (SecKind::Video, "Holiday Clips", false)]);
+            assert_eq!(video_label(&strip(&one_off)), "Home Movies",
+                "a library switched off in Favorite libraries is not one of the two");
+            let other_off = libraries(&[(SecKind::Movie, "Movies", true), (SecKind::Video, "Home Movies", false),
+                (SecKind::Video, "Holiday Clips", true)]);
+            assert_eq!(video_label(&strip(&other_off)), "Holiday Clips", "the pill names the library it opens");
+        }
+
+        #[test]
+        fn a_long_title_is_elided_to_the_room_the_strip_leaves() {
+            let title = "Family holidays at the lake house with all of the cousins, 2019 to 2024";
+            assert!(title.chars().count() > 60);
+            let face = label_of(title);
+            assert!(face.ends_with('\u{2026}'), "a title this long is cut and says so, not {face:?}");
+            assert!(title.starts_with(face.trim_end_matches('\u{2026}')), "it is a prefix of the title: {face:?}");
+            assert!(face.chars().count() > 8, "most of the room is used, not just a stub: {face:?}");
+            let w = text_w(&face);
+            assert!(w <= 240.0, "{face:?} is {w} px of text, over the 240 px cap");
+        }
+
+        #[test]
+        fn an_empty_blank_or_control_only_title_falls_back() {
+            for title in ["", "   ", "\n\t", "\u{0}", "\r\n \u{7}"] {
+                assert_eq!(label_of(title), "Other Videos", "{title:?} names nothing");
+            }
+            assert_eq!(label_of("Home\u{0}Movies"), "Home Movies", "a NUL inside a title is a space");
+            assert_eq!(label_of("  Home \t\n  Movies  "), "Home Movies", "runs of white space are one space");
+        }
+
+        #[test]
+        fn format_characters_and_controls_are_cleaned() {
+            assert_eq!(label_of("Home\u{200B}Movies"), "HomeMovies", "a zero-width space draws nothing");
+            assert_eq!(label_of("\u{202E}Clips\u{202C}"), "Clips", "bidi controls are dropped");
+            assert_eq!(label_of("\u{FEFF}Clips\u{2066}\u{2069}"), "Clips", "a byte-order mark and isolates too");
+            assert_eq!(label_of("Home\u{AD}Movies"), "HomeMovies", "a soft hyphen draws nothing");
+            assert_eq!(label_of("\u{200B}\u{202E}"), "Other Videos", "nothing visible is nothing");
+        }
+
+        #[test]
+        fn a_cjk_or_emoji_title_does_not_panic_and_fits_or_ends_in_an_ellipsis() {
+            // The host measure prices only the Latin face (a CJK glyph costs the notdef width), so
+            // this grades the contract and not the pixels: some of the title is used, and the
+            // answer is whole characters that either fit or end in the ellipsis.
+            for title in ["家族のビデオ", "家族のビデオ家族のビデオ家族のビデオ家族のビデオ家族のビデオ家族のビデオ家族のビデオ",
+                "Clips \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} \u{1F1E9}\u{1F1EA} holiday", "e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}"] {
+                let face = label_of(title);
+                let first = title.chars().next().unwrap();
+                assert!(face.starts_with(first), "{title:?} names the pill, not {face:?}");
+                assert!(face.ends_with('\u{2026}') || text_w(&face) <= 240.0,
+                    "{face:?} neither fits nor says it was cut");
+            }
+        }
+
+        #[test]
+        fn a_title_equal_to_another_pill_falls_back() {
+            for title in ["movies", "MOVIES", "TV Shows", "tv shows", "Home", "hOME"] {
+                assert_eq!(label_of(title), "Other Videos", "{title:?} would make two pills read alike");
+            }
+            assert_eq!(label_of("Movies 2"), "Movies 2", "only an equal label collides");
+            assert_eq!(label_of("Homes"), "Homes");
+        }
+
+        #[test]
+        fn the_collision_test_uses_unicode_lowercase() {
+            let _ru = language_on_this_thread_for_test(Preference::Ru);
+            let movies = plx_platform::i18n::msg::browse_kind_movies();
+            assert_ne!(movies.to_uppercase(), movies, "a cased script");
+            assert_eq!(label_of(&movies.to_uppercase()), plx_platform::i18n::msg::browse_kind_other_videos(),
+                "{movies:?} in capitals is the same word, and the same pill twice");
+            assert_eq!(label_of(&format!("{movies} 2")), format!("{movies} 2"), "a different word is used");
+        }
+
+        #[test]
+        fn the_title_is_not_translated() {
+            let two = libraries(&[(SecKind::Video, "Home Movies", true), (SecKind::Video, "Holiday Clips", true)]);
+            let one = libraries(&[(SecKind::Video, "Home Movies", true)]);
+            for (preference, generic) in [(Preference::En, "Other Videos"), (Preference::De, "Andere Videos"),
+                (Preference::Ru, "Другие видео")] {
+                let _language = language_on_this_thread_for_test(preference);
+                assert_eq!(video_label(&strip(&one)), "Home Movies", "{preference:?}: the server's word");
+                assert_eq!(video_label(&strip(&two)), generic, "{preference:?}: the type word is translated");
+            }
+        }
+
+        #[test]
+        fn movies_and_tv_shows_pills_never_wear_a_library_title() {
+            let snapshot = strip(&libraries(&[(SecKind::Movie, "Films of Mine", true),
+                (SecKind::Show, "Series of Mine", true), (SecKind::Video, "Clips", true)]));
+            let words: Vec<&str> = snapshot.faces.iter().filter_map(|face| match face {
+                TabFace::Label(word) => Some(word.as_str()),
+                TabFace::Icon(_) => None,
+            }).collect();
+            assert_eq!(words, ["Home", "Movies", "TV Shows", "Clips"],
+                "a type pill is a type, and only Other Videos may take its library's name");
+        }
+    }
+
     #[test]
     fn chrome_production_reads_only_its_retained_directory() {
         let src = include_str!("chrome.rs");

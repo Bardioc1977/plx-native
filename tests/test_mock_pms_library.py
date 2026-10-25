@@ -614,6 +614,113 @@ class OtherVideosFlag(unittest.TestCase):
             Library(other_videos_hidden=True)
 
 
+class OtherVideosTitle(unittest.TestCase):
+    """`--other-videos-title`, `--other-videos-sections` and the `section_titles` rename (#599):
+    what the Other Videos pill is labelled with is the library's own server title, so the mock has
+    to hand out a chosen title, a second library of the type, and a rename that arrives later.
+    Every one is opt-in: the default Other Videos library answers the bytes it always did."""
+
+    @staticmethod
+    def rows(lib):
+        return get(MockPms(lib), "/library/sections")["Directory"]
+
+    def test_a_chosen_title_names_the_section_and_its_clips(self):
+        lib = Library(other_videos=3, other_videos_title="Home Movies")
+        row = self.rows(lib)[2]
+        self.assertEqual((row["key"], row["title"]), (str(OTHER_VIDEOS_SECTION_ID), "Home Movies"))
+        clips = get(MockPms(lib), f"/library/sections/{OTHER_VIDEOS_SECTION_ID}/all")["Metadata"]
+        self.assertEqual({it["librarySectionTitle"] for it in clips}, {"Home Movies"})
+
+    def test_without_a_title_the_section_keeps_its_generated_name_and_bytes(self):
+        plain = Library(other_videos=3)
+        sectioned = Library(other_videos=3, other_videos_sections=1)
+        self.assertEqual(self.rows(plain), self.rows(sectioned))
+        self.assertRegex(self.rows(plain)[2]["title"], r"^s[0-9a-f]{8}$")
+        self.assertEqual(json.dumps(plain.__dict__, sort_keys=True),
+                         json.dumps(sectioned.__dict__, sort_keys=True))
+
+    def test_several_sections_number_their_titles_after_the_first(self):
+        rows = self.rows(Library(other_videos=2, other_videos_title="Clips",
+                                 other_videos_sections=3))
+        self.assertEqual([r["key"] for r in rows],
+                         ["1", "2", str(OTHER_VIDEOS_SECTION_ID),
+                          str(OTHER_VIDEOS_SECTION_ID + 1), str(OTHER_VIDEOS_SECTION_ID + 2)])
+        self.assertEqual([r["title"] for r in rows[2:]], ["Clips", "Clips 2", "Clips 3"])
+        for row in rows[2:]:
+            self.assertEqual((row["type"], row["agent"], row["scanner"], row["hidden"]),
+                             ("movie", "tv.plex.agents.none", "Plex Video Files", 0))
+        self.assertEqual(rows[:2], self.rows(Library())[:2], "the first two sections do not move")
+
+    def test_the_extra_sections_are_empty_and_the_first_keeps_its_clips(self):
+        pms = MockPms(Library(other_videos=4, other_videos_sections=2))
+        first = get(pms, f"/library/sections/{OTHER_VIDEOS_SECTION_ID}/all")
+        self.assertEqual(len(first["Metadata"]), 4)
+        second = get(pms, f"/library/sections/{OTHER_VIDEOS_SECTION_ID + 1}/all")
+        self.assertEqual(second["Metadata"], [])
+
+    def test_a_hidden_flag_applies_to_every_section_of_the_type(self):
+        rows = self.rows(Library(other_videos=2, other_videos_sections=2,
+                                 other_videos_hidden=True))
+        self.assertEqual([r["hidden"] for r in rows[2:]], [1, 1])
+
+    def test_a_rename_arrives_through_the_config_endpoint(self):
+        pms = MockPms(Library(other_videos=2, other_videos_title="Home Movies"))
+        key = str(OTHER_VIDEOS_SECTION_ID)
+        status, _, body = pms.handle("POST", "/_mock/config",
+                                     json.dumps({"section_titles": {key: "Family Clips"}}).encode())
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["section_titles"], {key: "Family Clips"})
+        self.assertEqual(get(pms, "/library/sections")["Directory"][2]["title"], "Family Clips")
+        clips = get(pms, f"/library/sections/{key}/all")["Metadata"]
+        self.assertEqual({it["librarySectionTitle"] for it in clips}, {"Family Clips"})
+        status, _, _ = pms.handle("POST", "/_mock/config",
+                                  json.dumps({"section_titles": {key: ""}}).encode())
+        self.assertEqual(status, 200, "a blank title is a thing a server can answer")
+        self.assertEqual(get(pms, "/library/sections")["Directory"][2]["title"], "")
+
+    def test_a_rename_of_the_other_two_sections_works_too(self):
+        pms = MockPms(Library())
+        status, _, _ = pms.handle("POST", "/_mock/config",
+                                  json.dumps({"section_titles": {"1": "Films"}}).encode())
+        self.assertEqual(status, 200)
+        self.assertEqual([r["title"] for r in get(pms, "/library/sections")["Directory"]][0], "Films")
+
+    def test_a_bad_rename_is_refused_and_changes_nothing(self):
+        pms = MockPms(Library(other_videos=1, other_videos_title="Home Movies"))
+        for patch in ({"section_titles": {"99": "Nowhere"}}, {"section_titles": ["4"]},
+                      {"section_titles": {"4": 7}}, {"section_titles": {"4": "x" * 65}},
+                      {"section_titles": {"4": "Fine", "99": "Nowhere"}}):
+            with self.subTest(patch=patch):
+                status, _, _ = pms.handle("POST", "/_mock/config", json.dumps(patch).encode())
+                self.assertEqual(status, 400)
+                self.assertEqual(get(pms, "/library/sections")["Directory"][2]["title"], "Home Movies")
+
+    def test_the_options_need_the_flag_and_stay_in_range(self):
+        for kwargs in ({"other_videos_title": "Clips"}, {"other_videos_sections": 2},
+                       {"other_videos": 1, "other_videos_sections": 0},
+                       {"other_videos": 1, "other_videos_sections": 10},
+                       {"other_videos": 1, "other_videos_title": ""},
+                       {"other_videos": 1, "other_videos_title": "x" * 65}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    Library(**kwargs)
+
+    def test_serve_takes_the_options(self):
+        srv, pms = serve(0, other_videos=3, other_videos_title="Clips", other_videos_sections=2)
+        try:
+            self.assertEqual([s["title"] for s in pms.lib.sections[2:]], ["Clips", "Clips 2"])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_the_command_line_takes_the_options(self):
+        script = str(pathlib.Path(__file__).with_name("mock_pms.py"))
+        for argv in (["--other-videos-title", "Clips"], ["--other-videos-sections", "2"]):
+            done = subprocess.run(["python3", script, "--port", "0", *argv],
+                                  capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(done.returncode, 0, argv)
+
+
 class DoviAndExtraMedia(unittest.TestCase):
     """The DOVI*/container derivation `--extra-media` relies on — the field NAMES a real PMS
     sends (docs/pms-api.md, verified live 2026-08-21), mapped from ffprobe's own "DOVI

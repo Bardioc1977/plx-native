@@ -80,6 +80,15 @@ answers its three `video.*` clip hubs. Every other answer is byte-identical when
 `/library/sections` composes `agent`, `scanner` and `hidden` from the section's own dict (the
 literals are the defaults for a section that declares none).
 
+`--other-videos-title NAME` (needs `--other-videos`) gives that library its own title, which is the
+text the client's Other Videos pill wears when it is the only one; `--other-videos-sections K`
+(1..9) files K libraries of the type (keys 4.., titled NAME, NAME 2, ...; the further ones hold no
+clips), the case where the pill keeps the translated type word instead. A library's title can also
+change while the mock runs: `POST /_mock/config` takes `{"section_titles": {"4": "New name"}}`
+(any section key, at most 64 characters, blank allowed), which is how a server rename is staged;
+the client applies it at its next rediscovery (a Sources "Re-check"). A default library is
+byte-identical with all of it off.
+
 `--resume-fixture` (seeded library only, default off) adds two shows to the shows section for the
 resume-point pages: 970001 has 12 seasons (every third one 30 episodes) and an `OnDeck` of S12E14,
 part-way through, which is also the newest Continue Watching entry; 970002 has 3 seasons and no
@@ -312,6 +321,10 @@ OTHER_VIDEOS_SECTION_ID = 4
 OTHER_VIDEOS_RK_BASE = 940001
 OTHER_VIDEOS_PART_ID_BASE = 941001
 OTHER_VIDEOS_MAX = 200
+# `--other-videos-sections K` (module doc): K libraries of the type, keys 4..4+K-1.
+OTHER_VIDEOS_SECTIONS_MAX = 9
+# The longest title `--other-videos-title` and a `section_titles` rename take.
+SECTION_TITLE_MAX = 64
 # `--caption-edge-cases` (module doc): the items under-poster captions fall back on. 980001.. sits
 # clear of the resume fixture (to about 977600), the enhancement movies (960001..960005) and
 # --extra-media (990001+); a show takes its seasons at 982000+10k+n and episodes at 984000+100k+e,
@@ -404,11 +417,23 @@ class Library:
                  media=None, extra_media=None, loudness_analysis=True, extras=0,
                  resume_fixture=False, media_next_episode=False, next_episode_remux=False,
                  media_forced_subtitle=False, caption_edge_cases=False, multi_version=False,
-                 other_videos=0, other_videos_hidden=False):
+                 other_videos=0, other_videos_hidden=False, other_videos_title=None,
+                 other_videos_sections=1):
         if not 0 <= other_videos <= OTHER_VIDEOS_MAX:
             raise ValueError(f"other_videos must be between 0 and {OTHER_VIDEOS_MAX}")
         if other_videos_hidden and not other_videos:
             raise ValueError("--other-videos-hidden needs --other-videos")
+        if other_videos_title is not None:
+            if not other_videos:
+                raise ValueError("--other-videos-title needs --other-videos")
+            if not 1 <= len(other_videos_title) <= SECTION_TITLE_MAX:
+                raise ValueError(f"--other-videos-title must be 1..{SECTION_TITLE_MAX} characters")
+        if other_videos_sections != 1:
+            if not other_videos:
+                raise ValueError("--other-videos-sections needs --other-videos")
+            if not 1 <= other_videos_sections <= OTHER_VIDEOS_SECTIONS_MAX:
+                raise ValueError(
+                    f"--other-videos-sections must be between 1 and {OTHER_VIDEOS_SECTIONS_MAX}")
         if media_next_episode and media is None:
             raise ValueError("--media-next-episode needs --media")
         if media_forced_subtitle and media is None:
@@ -484,7 +509,8 @@ class Library:
         if multi_version:
             self._add_second_versions()
         if other_videos:
-            self._add_other_videos(other_videos, other_videos_hidden)
+            self._add_other_videos(other_videos, other_videos_hidden, other_videos_title,
+                                   other_videos_sections)
         self._roll_up()
         self._add_enhancement_fixtures()
         if media is not None or extra_media:
@@ -514,21 +540,61 @@ class Library:
                 for index, it in enumerate(rows):
                     it["titleSort"] = "ACFMZ"[index % 5] + " " + it["titleSort"]
 
+    def rename_error(self, renames):
+        """Why `{"section_titles": renames}` cannot be applied, or `None`: a server renames a library
+        it has, to a string. A blank title is allowed (a server can answer one)."""
+        if not isinstance(renames, dict):
+            return "section_titles must be an object of section key to title"
+        keys = {s["key"] for s in self.sections}
+        for key, title in renames.items():
+            if key not in keys:
+                return f"no section {key!r}"
+            if not isinstance(title, str) or len(title) > SECTION_TITLE_MAX:
+                return f"the title of section {key} must be a string of at most {SECTION_TITLE_MAX} characters"
+        return None
+
+    def rename_sections(self, renames):
+        """Apply a `section_titles` patch that `rename_error` passed: the section row and the
+        `librarySectionTitle` of its items, which is how a real server names the library an item is in."""
+        for section in self.sections:
+            if section["key"] in renames:
+                section["title"] = renames[section["key"]]
+        for it in self.items.values():
+            title = renames.get(str(it.get("librarySectionID")))
+            if title is not None:
+                it["librarySectionTitle"] = title
+
     def other_videos_section(self):
         """The `--other-videos` section, or `None` on a library without one."""
         return next((s for s in self.sections if s["key"] == str(OTHER_VIDEOS_SECTION_ID)), None)
 
-    def _add_other_videos(self, count, hidden):
+    def _add_other_videos(self, count, hidden, title=None, sections=1):
         """`--other-videos`: the section and its clips. Drawn from their own `random.Random`, so
         no generated byte moves; `Library.sections` and `items` change only when the flag is on.
         A clip is a movie row of subtype `clip` (measured on PMS 1.43: the listing, the section hubs
         and the global `home.videos.recent` hub all name `type: movie`), with no people, genres or
-        collection tags, and a third of them watched and a third part-way through."""
+        collection tags, and a third of them watched and a third part-way through.
+
+        `title` names the section (default: a generated name). `sections` > 1 adds that many MINUS
+        ONE further libraries of the type, keys 5.., titled `<title> 2`, `<title> 3`, ...: they carry
+        no clips, because they exist for the strip's label rule (one library names the pill, two do
+        not), which reads only the `/library/sections` rows. Their names come from a second
+        `random.Random`, so the first section's bytes are the same with and without them."""
         rng = random.Random(self.seed ^ 0x0A11)
-        section = {"key": str(OTHER_VIDEOS_SECTION_ID), "type": "movie", "title": sname(rng),
+        section = {"key": str(OTHER_VIDEOS_SECTION_ID), "type": "movie",
+                   "title": sname(rng) if title is None else title,
                    "uuid": sname(rng), "agent": "tv.plex.agents.none",
                    "scanner": "Plex Video Files", "hidden": 1 if hidden else 0}
+        if title is not None:
+            sname(rng)  # keeps the clips below on the stream a generated name would have left them
         self.sections.append(section)
+        extra = random.Random(self.seed ^ 0x0A12)
+        for n in range(2, sections + 1):
+            self.sections.append({
+                "key": str(OTHER_VIDEOS_SECTION_ID + n - 1), "type": "movie",
+                "title": f"{section['title']} {n}", "uuid": sname(extra),
+                "agent": "tv.plex.agents.none", "scanner": "Plex Video Files",
+                "hidden": 1 if hidden else 0})
         for n in range(count):
             rk = OTHER_VIDEOS_RK_BASE + n
             it = self._movie(rng, rk, OTHER_VIDEOS_PART_ID_BASE + n)
@@ -2752,13 +2818,22 @@ class MockPms:
             if not isinstance(patch, dict):
                 return j({"error": "body must be a JSON object"}, 400)
             allowed = {"refuse_enhancements", "ignore_enhancements", "plex_pass"}
-            unknown = set(patch) - allowed
+            unknown = set(patch) - allowed - {"section_titles"}
             if unknown:
                 return j({"error": f"unknown config key(s): {sorted(unknown)}"}, 400)
+            renames = patch.pop("section_titles", None)
+            if renames is not None:
+                error = self.lib.rename_error(renames)
+                if error:
+                    return j({"error": error}, 400)
             with self.lock:
                 for key, value in patch.items():
                     setattr(self, key, bool(value))
+                if renames is not None:
+                    self.lib.rename_sections(renames)
                 current = {k: getattr(self, k) for k in allowed}
+                if renames is not None:
+                    current["section_titles"] = dict(renames)
             return j(current)
 
         if p == "/_mock/discover":
@@ -3599,7 +3674,8 @@ def serve(port, seed=1, host="127.0.0.1", verbose=False, movies=48, rail_fixture
           home_users=1, second_account=False, link=(), link_faults=(), shows=6, seasons=2, episodes=6,
           resume_fixture=False, media_next_episode=False, next_episode_remux=False,
           media_forced_subtitle=False, smart_collections=False,
-          caption_edge_cases=False, multi_version=False, other_videos=0, other_videos_hidden=False):
+          caption_edge_cases=False, multi_version=False, other_videos=0, other_videos_hidden=False,
+          other_videos_title=None, other_videos_sections=1):
     """Start a mock PMS in a daemon thread; returns (server, pms). Loopback only by default: the
     app on the simulator is on this machine, and a LAN-facing listener would be one more thing
     the outbound guard has to reason about. `catalog` serves the demo library instead of a seed.
@@ -3635,8 +3711,10 @@ def serve(port, seed=1, host="127.0.0.1", verbose=False, movies=48, rail_fixture
     `media_next_episode`); `media_forced_subtitle` flags the English subtitle of the verification
     episodes forced (module doc; needs `media`). `other_videos` adds the Other Videos library of that
     many clips (module doc; seeded library only), hidden from the home screen with
-    `other_videos_hidden`."""
-    if catalog is not None and (other_videos or other_videos_hidden):
+    `other_videos_hidden`, named `other_videos_title` and given `other_videos_sections` libraries of
+    the type in all."""
+    if catalog is not None and (other_videos or other_videos_hidden or other_videos_title
+                                or other_videos_sections != 1):
         raise ValueError("--other-videos is for the seeded library, not --catalog")
     if transcode_fixture is not None and not pathlib.Path(transcode_fixture).is_file():
         raise ValueError(f"--transcode-fixture file is missing: {transcode_fixture}")
@@ -3651,7 +3729,9 @@ def serve(port, seed=1, host="127.0.0.1", verbose=False, movies=48, rail_fixture
                       next_episode_remux=next_episode_remux,
                       media_forced_subtitle=media_forced_subtitle,
                       caption_edge_cases=caption_edge_cases, multi_version=multi_version,
-                      other_videos=other_videos, other_videos_hidden=other_videos_hidden)
+                      other_videos=other_videos, other_videos_hidden=other_videos_hidden,
+                      other_videos_title=other_videos_title,
+                      other_videos_sections=other_videos_sections)
     lib.smart_collections = smart_collections
     pms = MockPms(lib)
     pms.link = link_conditioner.Conditioner(seed=seed)
@@ -4558,6 +4638,12 @@ def main():
     ap.add_argument("--other-videos-hidden", action="store_true",
                     help="with --other-videos: the section's hidden flag is 1 (excluded from the "
                          "home screen), so its global Home hub is empty")
+    ap.add_argument("--other-videos-title", metavar="NAME", default=None,
+                    help="with --other-videos: the library's own title (default: a generated name), "
+                         "the text the client's Other Videos pill wears when it is the only one")
+    ap.add_argument("--other-videos-sections", type=int, default=1, metavar="K",
+                    help="with --other-videos: K libraries of the type (1..9, keys 4..), titled NAME, "
+                         "NAME 2, ...; the further ones hold no clips. Default 1")
     ap.add_argument("--resume-fixture", action="store_true",
                     help="two extra shows in the shows section: 970001 has 12 seasons and an "
                          "on-deck episode (S12E14, part-way through, the newest Continue Watching "
@@ -4632,7 +4718,9 @@ def main():
                          media_forced_subtitle=a.media_forced_subtitle,
                          smart_collections=a.smart_collections,
                          caption_edge_cases=a.caption_edge_cases, multi_version=a.multi_version,
-                         other_videos=a.other_videos, other_videos_hidden=a.other_videos_hidden)
+                         other_videos=a.other_videos, other_videos_hidden=a.other_videos_hidden,
+                         other_videos_title=a.other_videos_title,
+                         other_videos_sections=a.other_videos_sections)
     except ValueError as e:
         ap.error(str(e))
     what = f"catalog={a.catalog}" if a.catalog else f"seed={a.seed}"
