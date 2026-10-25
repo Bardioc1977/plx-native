@@ -45,6 +45,7 @@ pub fn write_purpose(w: &mut Canon, purpose: PersistencePurpose) {
         PersistencePurpose::Final => 1,
         PersistencePurpose::Profile => 2,
         PersistencePurpose::Background => 3,
+        PersistencePurpose::Seat => 4,
     });
 }
 
@@ -137,9 +138,12 @@ pub struct ProfilePublication {
     pub epoch: u64,
     pub profile: Option<UserRef>,
     pub scope: ProfileScope,
-    /// `grant::account_key` of the account token the profile is published under: the half of the
-    /// seat (`plex::session::Seat`) that says which sign-in the profile belongs to. Empty with no
-    /// account token, and in a recording made before the field existed. An empty stamp is left off
+    /// `plex::session::account_stamp` of the persisted session the profile is published under: the
+    /// half of the seat (`plex::session::Seat`) that says which account the profile belongs to. It
+    /// follows the OWNER (`o1:` and a hash of the roster admin's identity) once the roster names
+    /// one, so a new sign-in by the same person is the same seat, and is the token fingerprint
+    /// while the owner is unknown. Empty with no account token, and in a recording made before the
+    /// field existed. An empty stamp is left off
     /// the wire: a controlled replay grades the regenerated effect as complete canonical JSON
     /// against the committed recordings, which hold `{epoch, profile, scope}` alone.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1529,7 +1533,20 @@ impl SessionMachine {
             // while an unrelated fresh handoff is held must not free it.
             let released = self.state.held_handoff == Some(HeldHandoff { epoch: completion.epoch, req: completion.req });
             if released { self.release_held_handoff(emit); }
-            if superseded || released { self.replace_publication(); }
+            // A durable roster write that moved the stamp of the seat (see
+            // `commit_moves_a_published_seat`): the restore the publication triggers now reads the
+            // pair this write landed. The world is re-checked HERE, because the verdict can arrive
+            // after the owner moved on (a sign-out empties the stamp and the profile, a sign-in has
+            // begun, another handoff is held). A later admission overwrites the single
+            // `admitted_persistence` slot, so a Seat completion it overtook is dropped above: the
+            // seat then keeps the stamp it has, which still matches what Invariant I lets a reader
+            // use, and the next restore converges (fail closed).
+            let republish = completion.purpose == PersistencePurpose::Seat && !released
+                && !self.state.authorized_in_flow && self.state.held_handoff.is_none()
+                && self.state.active_profile.is_some()
+                && !plx_plex::plex::session::account_stamp(&self.state.persisted).is_empty();
+            if republish { self.publish_profile(self.state.active_profile.clone(), emit); }
+            if superseded || released || republish { self.replace_publication(); }
         } else if admitted.fresh {
             if self.state.persistence_warning_answered {
                 // This authorization already had its one unsaved-login question answered
@@ -1866,7 +1883,7 @@ impl SessionMachine {
         self.state.active_profile = profile;
         emit(SessionFx::PublishProfile(ProfilePublication {
             epoch: self.state.epoch, profile: self.state.active_profile.clone(), scope: self.state.profile_scope,
-            stamp: plx_plex::plex::grant::account_key(&self.state.persisted.account_token),
+            stamp: plx_plex::plex::session::account_stamp(&self.state.persisted),
         }));
     }
 
@@ -2214,7 +2231,15 @@ impl SessionMachine {
                 let mut next = self.state.persisted.clone();
                 next.server = server.clone();
                 next.sources = sources.clone();
-                next.home_users = users.iter().map(super::UserTile::to_ref).collect();
+                // An EMPTY answer never replaces a roster cached for this token: a retry whose
+                // `home/users` fetch failed arrives here with no users, and the cached roster is
+                // what names the owner (the stamp every per-account record is read under) and what
+                // offline switching reads, exactly as the picker's own roster refresh keeps it
+                // (`HomeRoster` below). A NEW sign-in has nothing to keep: `Authorized` already
+                // emptied the old account's roster.
+                if !users.is_empty() {
+                    next.home_users = users.iter().map(super::UserTile::to_ref).collect();
+                }
                 // `Authorized` emptied the offline profile cache because the new token names no
                 // account. The roster does: the same owner as the stored record gets that
                 // record's cache back (nothing of another account's, nor when either is unknown).
@@ -2466,7 +2491,37 @@ impl SessionMachine {
             }
         }
         plan.writes_durable = plan.credentials.is_some();
+        if plan.writes_durable && self.commit_moves_a_published_seat(&plan, &delta) {
+            plan.purpose = PersistencePurpose::Seat;
+        }
         self.begin_commit(req, envelope.arrival, envelope.terminal, plan, delta, emit)
+    }
+
+    /// **Does this commit move the account stamp of a profile that is already published?** Then its
+    /// purpose becomes [`PersistencePurpose::Seat`], and the owner republishes the profile when the
+    /// write is DURABLE ([`Self::apply_persistence_completion`]), never now: the credential merge
+    /// happens at admission while the disk write and the session cache install land later on the
+    /// storage worker, and the restore a publication triggers reads the cache.
+    ///
+    /// In practice that is the picker's `HomeRoster` commit (the only roster writer besides a
+    /// sign-in) making a previously unknown owner known, or respelling the admin's identity when a
+    /// late id arrives. The predicate is exact, so nothing else can fire:
+    /// * the purpose is `Background` (every Login, Rediscover, ProfileSwitch, Discovery and Final
+    ///   commit carries another one), on the routine authority;
+    /// * no sign-in is in flight (`authorized_in_flow`: `Authorized` has already moved `persisted`
+    ///   to the new token while the PREVIOUS account's profile is still the active one, and the
+    ///   sign-in's own final commit publishes), and no handoff is held (the gate would be bypassed);
+    /// * the commit does not itself activate a profile, and a profile IS published;
+    /// * the stamp after the merge is non-empty and differs from the stamp now. The decision is on
+    ///   the STAMP, not on the roster: a respelling that maps to the same stamp republishes nothing.
+    fn commit_moves_a_published_seat(&self, plan: &CommitPlan, delta: &CommitDelta) -> bool {
+        let Some(patch) = &plan.credentials else { return false };
+        if plan.purpose != PersistencePurpose::Background
+            || plan.authority != plx_plex::plex::session::SaveAuthority::Routine
+            || self.state.authorized_in_flow || self.state.held_handoff.is_some()
+            || delta.activate_profile || self.state.active_profile.is_none() { return false; }
+        let after = plx_plex::plex::session::account_stamp(&patch.merge_into(&self.state.persisted));
+        !after.is_empty() && after != plx_plex::plex::session::account_stamp(&self.state.persisted)
     }
 
     /// Start/restart is one owner decision. Check both counters before cancelling anything:

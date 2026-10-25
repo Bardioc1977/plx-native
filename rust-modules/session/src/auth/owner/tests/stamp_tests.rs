@@ -69,12 +69,18 @@ fn seated_owner(roster: Vec<plx_plex::plex::session::HomeUserRef>) -> SessionMac
 /// The Boot picker asks plex.tv for the roster and gets `users`: returns the roster step's effects
 /// (the commit that carries the roster).
 fn picker_roster(owner: &mut SessionMachine, users: Vec<UserTile>) -> Vec<SessionFx> {
+    picker_roster_after(owner, users, |_| {})
+}
+
+/// [`picker_roster`] with `between` run after the picker has started and before the answer arrives.
+fn picker_roster_after(owner: &mut SessionMachine, users: Vec<UserTile>, between: impl FnOnce(&mut SessionMachine)) -> Vec<SessionFx> {
     let effects = step(owner, SessionEvent::Command(Command::StartSwitch(Picker::Boot)));
     let (req, key) = effects.iter().find_map(|fx| match fx {
         SessionFx::Work { req, key, input: SessionWork::HomeRoster { .. }, .. } => Some((*req, *key)),
         _ => None,
     }).expect("the Boot picker fetches the Home roster");
     settle_picker_commit(owner, &effects);
+    between(owner);
     let envelope = roster_envelope(owner, req, key, Some(users));
     step(owner, SessionEvent::Result(envelope))
 }
@@ -149,6 +155,11 @@ fn the_seat_is_republished_only_while_the_completion_still_describes_a_seated_st
         "no profile seated: nothing to republish");
 
     let (mut owner, commit) = parked_roster_commit(Vec::new(), users());
+    owner.state.persisted.account_token.clear();
+    assert!(publications(&step(&mut owner, SessionEvent::Persistence(completion(&commit, 7, true)))).is_empty(),
+        "no account token, no stamp: a seat cannot be published without one");
+
+    let (mut owner, commit) = parked_roster_commit(Vec::new(), users());
     owner.state.authorized_in_flow = true;
     assert!(publications(&step(&mut owner, SessionEvent::Persistence(completion(&commit, 7, true)))).is_empty(),
         "a sign-in in flight publishes through its own final commit");
@@ -173,6 +184,32 @@ fn a_republication_overtaken_by_a_later_admission_is_dropped_fail_closed() {
     later.req = later.req.wrapping_add(1);
     owner.state.admitted_persistence = Some(later);
     assert!(publications(&step(&mut owner, SessionEvent::Persistence(completion(&commit, 7, true)))).is_empty());
+}
+
+/// **The plan-time predicate is exact.** Only a routine roster commit that moves the stamp of an
+/// already published profile is a `Seat` commit; the same commit while a sign-in is in flight, while
+/// a handoff is held, with nobody seated, or when the stamp does not move is a plain `Background`
+/// one, and the durable completion of any of those publishes nothing.
+#[test]
+fn only_a_roster_commit_that_moves_a_published_seat_is_planned_as_one() {
+    let _g = plx_base::testlock::serial();
+    let planned = |tweak: &dyn Fn(&mut SessionMachine), roster: Vec<plx_plex::plex::session::HomeUserRef>| {
+        let mut owner = seated_owner(roster);
+        let commit = commit_of(&picker_roster_after(&mut owner, vec![admin_tile(7, "synthetic-owner-7")], tweak));
+        admit(&mut owner, &commit, 7);
+        let published = publications(&step(&mut owner, SessionEvent::Persistence(completion(&commit, 7, true))));
+        (commit.3.purpose, published.len())
+    };
+    let unknown = || Vec::new();
+    assert_eq!(planned(&|_| {}, unknown()), (PersistencePurpose::Seat, 1), "control: the case the guard exists for");
+    assert_eq!(planned(&|_| {}, vec![admin_ref(7, "synthetic-owner-7")]), (PersistencePurpose::Background, 0),
+        "the stamp does not move: a plain refresh");
+    assert_eq!(planned(&|o| o.state.authorized_in_flow = true, unknown()), (PersistencePurpose::Background, 0),
+        "a sign-in in flight");
+    assert_eq!(planned(&|o| o.state.held_handoff = Some(HeldHandoff { epoch: 99, req: 99 }), unknown()),
+        (PersistencePurpose::Background, 0), "a held handoff");
+    assert_eq!(planned(&|o| o.state.active_profile = None, unknown()), (PersistencePurpose::Background, 0),
+        "nobody published");
 }
 
 /// **S-15. The admin's id arriving late republishes ONCE.** An old file names the owner by uuid;

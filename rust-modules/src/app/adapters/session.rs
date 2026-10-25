@@ -1488,7 +1488,7 @@ mod tests {
             expected_disk: plx_session::auth::owner::Identity::of(&disk),
             credentials: Some(plx_session::auth::owner::CredentialPatch::of(&next)),
             lifecycle: None, registry: Vec::new(), writes_durable: true,
-            purpose: plx_plex::plex::session::async_persistence::PersistencePurpose::Background,
+            purpose: plx_plex::plex::session::async_persistence::PersistencePurpose::Seat,
             authority: plx_plex::plex::session::SaveAuthority::Routine };
         let mt = unsafe { plx_base::task::MainThread::assume() };
         let mut adapter = SessionAdapter::live_resources_for_test(&mt, false);

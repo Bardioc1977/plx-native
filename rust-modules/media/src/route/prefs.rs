@@ -489,7 +489,7 @@ impl<R: ProfileKeyed + Clone> KeyedMirror<R> {
     /// or account stamp; otherwise leave it, since it already holds everything the record does
     /// plus the writes still in flight.
     pub fn reseed(&self, record: &Session) {
-        let seed = (session::tenure(), plx_plex::plex::grant::account_key(&record.account_token));
+        let seed = (session::tenure(), session::account_stamp(record));
         let mut state = self.lock();
         if state.seeded.as_ref() != Some(&seed) {
             state.lists = R::slot(record).clone();
@@ -528,6 +528,13 @@ impl KeyedMirror<ProfilePrefsRecord> {
         let Seat::Seated { user, stamp } = seat else { return None };
         let state = self.lock();
         if !Self::valid(&state) {
+            return None;
+        }
+        // One stamp per consumer: the seat reads the mirror only under the stamp the mirror was
+        // seeded under. Records of another stamp can sit in `lists` (the file keeps an owner's
+        // records, hidden, while the owner is unknown) and are not this seat's; the restore that
+        // follows a republication reseeds, and the two stamps converge.
+        if state.seeded.as_ref().map(|(_, seeded)| seeded.as_str()) != Some(stamp.as_str()) {
             return None;
         }
         own_prefs(&state.lists, user, stamp).cloned()
@@ -634,6 +641,7 @@ pub fn remember<E: MemoryTenant>(
         plx_base::eventlog::log(&format!("{}: not remembered — no profile seated", E::log_label()));
         return false;
     }
+    let stamp;
     {
         let mut state = E::mirror().lock();
         if !MemoryMirror::valid(&state) {
@@ -641,15 +649,24 @@ pub fn remember<E: MemoryTenant>(
             plx_base::eventlog::log(&format!("{}: not remembered — no valid session", E::log_label()));
             return false;
         }
-        let stamp = MemoryMirror::stamp(&state).to_string();
+        stamp = MemoryMirror::stamp(&state).to_string();
         state.lists.upsert_with(user, &stamp, &key, f.clone());
     }
     let user = user.to_string();
     session::queue_update(move |cur| {
-        // The file's own account: the guard has already dropped this edit if it is not the one
-        // the mirror was seeded under.
-        let stamp = if E::ACCOUNT_BOUND { plx_plex::plex::grant::account_key(&cur.account_token) } else { String::new() };
-        cur.with_memory::<E>(|m| m.upsert_with(&user, &stamp, &key, f))
+        // The mirror's pick was stamped with the stamp the mirror was SEEDED under, and the file is
+        // written under that stamp or not at all. `queue_update`'s guard compares the account token
+        // only, and the stamp follows the owner: a roster that landed since the seed (the owner
+        // became known, or its id arrived) moves the file's stamp under an unchanged token. Writing
+        // under the file's new stamp would split one pick across two stamps, so the edit is dropped
+        // (the mirror keeps the pick until the next restore reseeds it, the bounded loss the token
+        // guard already has).
+        let file_stamp = if E::ACCOUNT_BOUND { session::account_stamp(cur) } else { String::new() };
+        if file_stamp != stamp {
+            plx_base::eventlog::log(&format!("{}: not written — the account stamp moved since the mirror was seeded", E::log_label()));
+            return None;
+        }
+        cur.with_memory::<E>(|m| m.upsert_with(&user, &file_stamp, &key, f))
     })
 }
 

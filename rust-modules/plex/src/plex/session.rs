@@ -471,17 +471,19 @@ impl TempSession {
     }
 
     /// **Sign the fixture in and seat `uuid`**: store `account_token` in the scratch record, then
-    /// publish the profile with the stamp of that token, so [`current_seat`] is
+    /// publish the profile with the stamp of that session ([`account_stamp`]: the token's fingerprint
+    /// while the fixture has no roster), so [`current_seat`] is
     /// [`Seat::Seated`] and a per-profile write has somewhere to land. [`TempSession::watching`]
     /// publishes no stamp (an unstamped publication seats nobody), which is what every test that
     /// does not care about a seat wants. Returns the stamp.
     pub fn seated(&self, uuid: &str, account_token: &str) -> String {
+        let mut stamp = String::new();
         assert!(update(|cur| {
             let mut next = cur.clone();
             next.account_token = account_token.into();
+            stamp = account_stamp(&next);
             Some(next)
         }), "the fixture session takes the account token");
-        let stamp = super::grant::account_key(account_token);
         publish_seat_for_test(Some(UserRef { uuid: uuid.into(), ..Default::default() }),
             current_gen().wrapping_add(1), stamp.clone());
         stamp
@@ -2739,7 +2741,7 @@ impl Session {
     /// other profile's alone — [`Session::set_view_for`]'s reason. A profile whose last entry is
     /// forgotten loses its record entirely, so the list never carries empties. The in-memory
     /// half of the memory door's `upsert_with` ([`prefs::ProfileMemory`]), stamping the record with
-    /// this session's own account (`grant::account_key`; none without an account token).
+    /// this session's own account stamp ([`account_stamp`]; none without an account token).
     pub fn set_subtitle_offset_for(&mut self, user: &str, machine_id: &str, rating_key: &str, offset_ms: Option<i64>) {
         let entry = offset_ms.map(|offset_ms| SubtitleOffsetEntry {
             machine_id: machine_id.to_string(),
@@ -2748,7 +2750,7 @@ impl Session {
             extensions: Default::default(),
         });
         let key = (machine_id.to_string(), rating_key.to_string());
-        let account = super::grant::account_key(&self.account_token);
+        let account = account_stamp(self);
         self.prefs.subtitle_offsets.upsert_with(user, &account, &key, |_| entry);
     }
 }

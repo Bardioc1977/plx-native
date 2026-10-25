@@ -293,7 +293,7 @@ impl ProfileWrite {
         crate::plex::session::tenure() == self.tenure
             && (self.client_id.is_empty() || cur.client_id == self.client_id)
             && !self.stamp.is_empty()
-            && crate::plex::grant::account_key(&cur.account_token) == self.stamp
+            && crate::plex::session::account_stamp(cur) == self.stamp
     }
 }
 
