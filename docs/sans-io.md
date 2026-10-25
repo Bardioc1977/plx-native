@@ -173,8 +173,11 @@ recents writes are the eighth (the bullet headed "The Search lane"): both worker
 `client_for` reads are gone from `data/src/search.rs` and `data/src/search/recents.rs`, and its two
 `data-search` ledger files are deleted. A library's section hubs, the Browse store's list
 and row reads, are the ninth (the bullet headed "The section hubs lane"): their two worker starts
-and three registry reads are gone from `data/src/browse/section_hubs.rs`; the rest of `browse/` (the
-directory, page and source reads, discovery, the pins) is still on its ledger. The Metadata store's
+and three registry reads are gone from `data/src/browse/section_hubs.rs`. The same store's Library
+listing reads, the filter menus' value lists and the grid's pages, are on the lane too (the bullet
+headed "The listing lanes"): their two worker starts and two registry reads are gone from
+`data/src/browse/mod.rs`. The rest of `browse/` (the source reads, discovery, the pins) is still
+on its ledger. The Metadata store's
 season switch and episode-page window are the tenth (the bullet headed "The Metadata reads"): their
 two worker starts and the `client_for` reads of `fetch_episodes` and `fetch_episode_page` are gone
 from `data/src/metadata.rs`. The household's watch-state writes are the eleventh (the bullet headed
@@ -192,21 +195,32 @@ from `data/src/metadata.rs`. The household's watch-state writes are the eleventh
   `plx_data::pms::{HubRequest, HubsPort}`,
   `plx_data::search::{SearchReq, SearchPort}`,
   `plx_data::search::recents::{SaveRecentsReq, SaveRecentsPort}`,
-  `plx_data::browse::section_hubs::{BrowseHubsReq, BrowseHubsPort}` (`BrowseStore::take_jobs`) and
+  `plx_data::browse::section_hubs::{BrowseHubsReq, BrowseHubsPort}`,
+  `plx_data::browse::listing_jobs::{BrowseDirectoryReq, BrowseDirectoryPort}`,
+  `plx_data::browse::listing_jobs::{BrowsePageReq, BrowsePagePort}` (`BrowseStore::take_jobs`) and
   `plx_data::metadata::{MetaSeasonReq, MetaSeasonPort, MetaEpisodesReq, MetaEpisodesPort}`. The app's `StoreRunner`
   (`app/adapters/stores.rs`) executes a job and owns what `data/` must not: the tape's admission
   record, the thread and the `client_for` read. It is `Live` or `Held` (a test parks the job and
   runs it on the test thread), chosen when the `Bridge` is constructed; a newer Detail request
-  retires only the parked Detail jobs, never another store's. `Held` parks per kind (the test-only
-  `LiveKind`): `StoreRunner::held()` leaves the Hubs read and the Metadata season switch live, as
-  production runs them (a rig that waits for a Home or a season landing needs a real one;
-  `menu_play_season_tests` polls for the latter and never runs held jobs), and
+  retires only the parked Detail jobs, never another store's. `Held` parks per kind
+  (`LiveKind`, test only; a kind and not a store, because Browse emits several kinds: `BrowseHubs`,
+  `BrowseDirectory`, `BrowsePage`): `StoreRunner::held()`
+  leaves the Hubs read, the Metadata season switch and the Library grid's page read live, as
+  production runs them (a rig that waits for a Home, a season or a grid landing needs a real
+  worker; `menu_play_season_tests` polls for the season landing and never runs held jobs), and
   `StoreRunner::held_all()` parks them too, for a test that chooses when the read settles
-  (`Bridge::run_held_store_jobs_of_for_test`). Every other kind, the section hubs' read and the
-  episode-page jobs included, parks under both: no rig of the suite waits for a section-hubs
-  landing from a real worker, and a parked read is one the test starts when it chooses (the one
-  `hostsim` rig that needs the read to reach the server, `the_recommended_page_fetches_the_sections_hubs`,
-  runs it from the parked set with `Bridge::run_held_store_jobs_of_for_test(StoreId::Browse)`).
+  (`Bridge::run_held_store_jobs_of_for_test`).
+  `StoreRunner::park_page_reads` (`Bridge::park_page_reads_for_test`) parks only the page read of
+  a held runner, for a rig that grades which reads an entry started. Every other kind parks under
+  all three, the section hubs' read, the filter menus' directory read and the episode-page jobs
+  included: no rig of the suite waits for any of those landings from a real worker, and a parked
+  read is one the test starts when it chooses (the one `hostsim` rig that needs the section hubs'
+  read to reach the server, `the_recommended_page_fetches_the_sections_hubs`, runs it from the
+  parked set with `Bridge::run_held_store_jobs_of_for_test(StoreId::Browse)`). The page read is live
+  because four `library_route_tests` rows wait for a failed-page landing and
+  `session_dispatch_tests::production_bridges_do_not_share_browse_state_or_landings` waits for a
+  loopback request; each failed with the page parked, and every suite is green with the directory
+  read parked.
 - **A registry read is an input.** A step that decides from "which client does this server slot
   hold" is handed `plx_plex::plex::ClientKeys` (one `ClientKey { instance, token }` per server) as
   an argument. The Bridge owns one buffer and refills it in place
@@ -237,7 +251,8 @@ from `data/src/metadata.rs`. The household's watch-state writes are the eleventh
   `(StoreId::Catalog)` (no keys to refill; the pump drains because its retry and its profile-switch
   re-open both emit). `Bridge::search_run` drains `(StoreId::Search)` after every command (a recents
   edit emits its write there) and `Bridge::search_pump` refills the keys, steps and drains it.
-  Browse's section hubs are drained at five entries: `Bridge::browse_run` (which
+  Browse's reads (the section hubs, the filter menus' directory reads and the grid's pages) are
+  drained at five entries: `Bridge::browse_run` (which
   the `Store(Browse(..))` arm calls), the `StoreWork::Browse` arm and `Bridge::reconcile_pump`'s
   membership re-query each refill the keys, step and run `(StoreId::Browse)`, and `viewstate_pump`
   and `notify_pump` reach Browse through their `*_FILLS` lists (ViewState's terminal
@@ -258,7 +273,7 @@ from `data/src/metadata.rs`. The household's watch-state writes are the eleventh
   it. The same holds for the `pub` `Stores::metadata_run`. The owner drains in the same call, as
   `Bridge::metadata_run` does; no type enforces it, the counter below catches the lapse.
   `CollectionStore`'s, `PersonStore`'s and `BrowseStore`'s `Machine::step` are unreached for these
-  reads and pass empty keys (a Browse step with no keys decides no section-hubs read): a future
+  reads and pass empty keys (a Browse step with no keys decides no section-hubs, directory or page read): a future
   sender must pass the host's keys and drain. The same holds for the public
   `CatalogStore::open` and `CatalogStore::pump`: `catalog_feed` and `catalog_reread` call
   `Bridge::catalog_open` and `Bridge::catalog_pump`, which drain in the same call. And for
@@ -364,7 +379,8 @@ from `data/src/metadata.rs`. The household's watch-state writes are the eleventh
   for. The Hubs read differs from the six before it in four ways.
   - **A third admission family.** `StoreJob::admission()` names `Tape` (Detail, Collection, Person),
     `Direct` (Catalog, subtitle search, view reconcile, Search's fetches and recents writes, the section
-    hubs' read, the view-state writes, the Metadata season switch and episode-page window) or `Home`,
+    hubs' read, the Library's directory and page reads, the view-state writes, the Metadata season switch
+    and episode-page window) or `Home`,
     as one exhaustive match. A `Home`
     job is recorded in a controlled Home run's own ordered ledger (`HomeIo::admit`), not on the tape,
     with the bytes `HubRequest::admission` returns (the bytes `hubs_descriptor` returned before it,
@@ -467,6 +483,35 @@ from `data/src/metadata.rs`. The household's watch-state writes are the eleventh
   A step test reads the jobs (`BrowseStore::take_jobs`, in the data crate `take_hubs_job`) or answers
   them through the port; the runner's branches and every Bridge entry's drain have a test that fails
   when the branch or the drain is removed (`app/adapters/stores.rs`, `app/browse_hubs_drain_tests.rs`).
+- **The listing lanes.** The Library's filter menus and grid read through two more kinds on
+  `BrowseStore`'s outbox (`data/src/browse/listing_jobs.rs`):
+  `StoreJob::BrowseDirectory(Job<BrowseDirectoryReq>, BrowseDirectoryPort)` is one value list of
+  a section (`which`: the genres or the first letters) and
+  `StoreJob::BrowsePage(Job<BrowsePageReq>, BrowsePagePort)` is one page of the section's listing.
+  `kick_directory` (through `kick_genres` and `kick_letters`, from `LibraryWork::Genres` and
+  `Letters`) and `maybe_spawn_owned` (from the pump) take `keys.key(sid)` from the borrowed
+  `ClientKeys`, raise the read's claim and push the job; the runner resolves the key at the launch
+  and hands the body the `&'static Client` (the registry reads of the file are gone). Both kinds are
+  `Direct`, and a controlled Home run never emits one: `bootstrap/effects.rs` `store()` accepts only
+  `Browse(Reset)` and `Browse(Discovery(..))` and `work_value()` refuses `StoreWork::Browse`, so no
+  replay fixture moved. `app/browse_listing_admission_tests.rs` pins it in record and replay mode.
+  The landings are as they were (`land_directory_owned_with_gate` and the page landing inside
+  `pump_owned_with_gate`): the answer carries the client the key resolved and `key.token`, and the
+  landing's `commit_if_current` / `commit_reachability_if_current` is the one identity check.
+  - **Three claims, three mailboxes.** The page, the genres and the letters each hold their own
+    `Fetch` on the adapter, with their own request counter on `BrowseState` (`page_req`,
+    `genres_req`, `letters_req`), and each claim is raised at the step.
+  - **A refusal is settled by the store's next step.** A key that moved by the launch, or a thread
+    the system refused, refuses the job: the claim is lowered in the refusing call and the
+    request id remembered. `settle_refused_reads` takes the three markers at the head of the next
+    step and wakes the pump (`idle::invalidate`); nothing is recorded and nothing backs off. The
+    directory is owed again (`*_done` is still false, and the menu's tick sends the work again),
+    and the page is still the first one missing, so the next pump asks again with the then-current
+    key, exactly what the old `!spawned` arms left.
+  - **The guard is in the body, the landing outside it.** A page read that panics lands as a failed
+    page (`total < 0`: the listing keeps what it had and `retry_cd` backs the pump off), a directory
+    read that panics lands as an empty list. The seams `finish_page_with` and
+    `finish_directory_with` take the read as a closure so a test can swap in one that panics.
 - **The Metadata reads.** The season tabs and the long-season page window (`data/src/metadata.rs`)
   are the tenth store reads on the lane. `load_season` flips the tab and emits
   `StoreJob::MetaSeason(Job<MetaSeasonReq>, MetaSeasonPort)`, addressed by the season generation it

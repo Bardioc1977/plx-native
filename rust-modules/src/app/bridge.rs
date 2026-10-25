@@ -1233,9 +1233,9 @@ impl Drop for Bridge {
 impl Bridge {
     /// Synchronous application boundary for callers whose answer is consumed in the same turn.
     /// This borrows the one store owned by this Bridge. The keys are refilled first and the section
-    /// hubs' reads the step sent (`StoreJob::BrowseHubs`) are started before this returns, in the
-    /// same call: the store's hub pump is claim-gated, and a step that left its job on the outbox
-    /// would read as a read in flight with nothing running.
+    /// hubs' or directory reads the step sent (`StoreJob::BrowseHubs`, `StoreJob::BrowseDirectory`) are
+    /// started before this returns, in the same call: the store's read claims gate its pumps, and a
+    /// step that left its job on the outbox would read as a read in flight with nothing running.
     pub(crate) fn browse_run(&mut self, cmd: plx_data::stores::browse::BrowseCmd) -> bool {
         super::adapters::stores::refill_client_keys(&mut self.client_keys);
         let changed = self.stores.browse_run(cmd, &self.client_keys);
@@ -1422,6 +1422,21 @@ impl Bridge {
     #[cfg(test)]
     pub(crate) fn run_held_store_jobs_of_for_test(&mut self, id: StoreId) -> usize {
         self.store_runner.run_held_of(id)
+    }
+
+    /// TEST ONLY: the Library listing's page reads park in the test runner (it starts them on a
+    /// worker by default, like the Home Hubs read), for a rig that grades the reads an entry started.
+    #[cfg(test)]
+    pub(crate) fn park_page_reads_for_test(&mut self) {
+        self.store_runner.park_page_reads();
+    }
+
+    /// TEST ONLY: take the jobs the test runner is holding without running them, in the order they
+    /// were parked: the kinds an entry's drain started, for a rig that grades the entry and not the
+    /// read. The claims their steps raised stay up, as for a worker that has not answered.
+    #[cfg(test)]
+    pub(crate) fn take_held_store_jobs_for_test(&mut self) -> Vec<plx_data::stores::StoreJob> {
+        self.store_runner.take_held()
     }
 
     /// TEST ONLY: run the session cache refresh the fixture adapter is holding, on this thread,
@@ -4346,6 +4361,9 @@ mod viewstate_controlled_tests;
 #[cfg(test)]
 #[path = "browse_hubs_drain_tests.rs"]
 mod browse_hubs_drain_tests;
+#[cfg(test)]
+#[path = "browse_listing_admission_tests.rs"]
+mod browse_listing_admission_tests;
 #[cfg(test)]
 #[path = "home_admission_tests.rs"]
 mod home_admission_tests;

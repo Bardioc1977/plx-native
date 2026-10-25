@@ -106,8 +106,9 @@ pub struct BrowseStore {
     notice_dirty: AtomicBool,
     /// Endpoint refreshes a pump had no room to emit in its step; the next pump sends them first.
     endpoint_carry: super::EndpointRefreshSet,
-    /// The section-hubs reads this store's steps have asked for and nobody has started yet
-    /// ([`super::StoreJob::BrowseHubs`]); taken by [`BrowseStore::take_jobs`].
+    /// The reads this store's steps have asked for and nobody has started yet: a section's hubs
+    /// ([`super::StoreJob::BrowseHubs`]), a value list ([`super::StoreJob::BrowseDirectory`]) and a
+    /// listing page ([`super::StoreJob::BrowsePage`]); taken by [`BrowseStore::take_jobs`].
     jobs: Vec<super::StoreJob>,
 }
 
@@ -143,9 +144,10 @@ impl BrowseStore {
         self.notice_dirty.swap(false, Ordering::Relaxed).then(|| self.gen())
     }
 
-    /// Take the section-hubs reads this owner's steps have asked for since the last take, in the
-    /// order they were asked ([`super::StoreJob::BrowseHubs`]). The application's runner starts
-    /// each, in the call that ran the step (`Bridge::start_store_jobs_of`).
+    /// Take the reads this owner's steps have asked for since the last take, in the order they were
+    /// asked ([`super::StoreJob::BrowseHubs`], [`super::StoreJob::BrowseDirectory`],
+    /// [`super::StoreJob::BrowsePage`]). The application's runner starts each, in the call that ran
+    /// the step (`Bridge::start_store_jobs_of`).
     #[must_use]
     pub fn take_jobs(&mut self) -> Vec<super::StoreJob> {
         std::mem::take(&mut self.jobs)
@@ -157,8 +159,8 @@ impl BrowseStore {
     }
 
     /// Run one command; `keys` is the registry's answer as of this call (the Bridge fills it
-    /// immediately before, `refill_client_keys`), which the section-hubs reads it may emit are
-    /// decided from.
+    /// immediately before, `refill_client_keys`), which the section-hubs or directory reads it may emit
+    /// are decided from.
     pub fn run(&mut self, cmd: BrowseCmd, keys: &ClientKeys) -> bool {
         use crate::viewstate::ViewEdit;
         let change_sensitive = matches!(&cmd, BrowseCmd::Discovery(_) | BrowseCmd::Addressed {
@@ -183,7 +185,7 @@ impl BrowseStore {
         changed
     }
 
-    /// Run one command on a registry that holds no client (no section-hubs read leaves): the
+    /// Run one command on a registry that holds no client (no section-hubs or directory read leaves): the
     /// command of a test about something else.
     #[cfg(any(test, feature = "test-support"))]
     pub fn run_for_test(&mut self, cmd: BrowseCmd) -> bool {
@@ -204,7 +206,7 @@ impl BrowseStore {
         outcome
     }
     /// [`BrowseStore::pump_with_gate`] on the fixture gate and a registry that holds no client (no
-    /// section-hubs read leaves): the pump of a test about something else.
+    /// section-hubs or page read leaves): the pump of a test about something else.
     #[cfg(any(test, feature = "test-support"))]
     pub fn pump(&mut self) -> super::StoreOutcome {
         self.pump_with_gate(plx_machine::landgate::fixture_gate(), &ClientKeys::default())
@@ -265,6 +267,31 @@ impl BrowseStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn hubs_answer_waiting_for_test(&self) -> bool {
         crate::browse::hubs_answer_waiting_for_test(&self.adapter)
+    }
+
+    /// TEST ONLY: is the listing page's claim up: a page read is out (running, parked, or answered
+    /// and not yet taken by the pump)?
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn page_read_out_for_test(&self) -> bool {
+        crate::browse::adapter_fetching_for_test(&self.adapter)
+    }
+
+    /// TEST ONLY: has a page worker answered, the answer still waiting for the pump?
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn page_answer_waiting_for_test(&self) -> bool {
+        crate::browse::adapter_has_page_for_test(&self.adapter)
+    }
+
+    /// TEST ONLY: is a directory (genres or letters) claim up?
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn directory_read_out_for_test(&self) -> bool {
+        crate::browse::directory_claim_up_for_test(&self.adapter)
+    }
+
+    /// TEST ONLY: has a directory worker answered, the answer still waiting for the pump?
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn directory_answer_waiting_for_test(&self) -> bool {
+        crate::browse::directory_answered_for_test(&self.adapter)
     }
 
     pub fn take_discovery(&mut self) -> Option<crate::browse::record::Result> {
@@ -398,6 +425,11 @@ impl BrowseStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn seed_letter_counts_for_test(&mut self, letters: &[(&str, i64)]) {
         crate::browse::seed_letter_counts_for_owner_test(&mut self.state, letters);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn owe_letters_for_test(&mut self) {
+        crate::browse::owe_letters_for_owner_test(&mut self.state);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -647,7 +679,7 @@ impl<H: super::StoreEffectHost> Machine<H> for BrowseStore {
     fn step(&mut self, ev: &Self::Ev, _cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) -> Handled {
         match ev {
             // The registry is read by the host, never in a step (`plx_plex::plex::ClientKeys`), and
-            // a machine step is handed no keys: this arm cannot decide a section-hubs read. It is
+            // a machine step is handed no keys: this arm cannot decide a section-hubs or directory read. It is
             // not how the application drives Browse, which calls `Stores::browse_run` and
             // `BrowseStore::pump_with_gate` with the keys it filled and starts the jobs they leave
             // (`Bridge::browse_run`); no sender of `StoreEv::Pump` exists either.
