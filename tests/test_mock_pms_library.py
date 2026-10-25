@@ -16,7 +16,7 @@ import urllib.request
 from mock_pms import (
     ENHANCEMENT_AAC_51_RK, ENHANCEMENT_AC3_2CH_RK, ENHANCEMENT_DEFAULT_SRT_RK,
     ENHANCEMENT_DV_P8_RK, ENHANCEMENT_EXTERNAL_SRT_RK, EXTRA_MEDIA_RK_BASE, PLEX_DIRECT_HASH,
-    CAPTION_EDGE_RK_BASE, RESUME_ON_DECK_SHOW_RK, RESUME_PLAIN_SHOW_RK,
+    CAPTION_EDGE_RK_BASE, OTHER_VIDEOS_SECTION_ID, RESUME_ON_DECK_SHOW_RK, RESUME_PLAIN_SHOW_RK,
     CatalogLibrary, Library, MockPms, demo_cache_dir, plaintext_only_lan_resources, serve,
 )
 
@@ -503,6 +503,115 @@ class SectionHubsFlag(unittest.TestCase):
             p = subprocess.run(["python3", str(pathlib.Path(__file__).with_name("mock_pms.py")),
                                 "--port", "0", *argv], capture_output=True, text=True, timeout=30)
             self.assertNotEqual(p.returncode, 0, argv)
+
+
+class OtherVideosFlag(unittest.TestCase):
+    """`--other-videos N` (#599): a third library filed the way Plex files "Other Videos" (type
+    movie, agent none, scanner Plex Video Files), whose items are movie rows of subtype clip.
+    Opt-in: a default library has two sections and the same bytes as before."""
+
+    def test_default_sections_answer_is_unchanged(self):
+        rows = get(MockPms(Library()), "/library/sections")["Directory"]
+        self.assertEqual([r["key"] for r in rows], ["1", "2"])
+        for row in rows:
+            self.assertEqual((row["agent"], row["scanner"]), ("tv.plex.agents.movie", "Plex Movie"))
+            self.assertNotIn("hidden", row)
+        self.assertEqual(list(rows[0]), ["key", "type", "title", "uuid", "agent", "scanner",
+                                         "language", "art", "composite", "refreshing", "allowSync"])
+
+    def test_the_flag_adds_one_section_filed_as_other_videos(self):
+        base = get(MockPms(Library()), "/library/sections")["Directory"]
+        rows = get(MockPms(Library(other_videos=5)), "/library/sections")["Directory"]
+        self.assertEqual(rows[:2], base, "the first two sections do not move")
+        self.assertEqual(len(rows), 3)
+        row = rows[2]
+        self.assertEqual((row["key"], row["type"]), (str(OTHER_VIDEOS_SECTION_ID), "movie"))
+        self.assertEqual((row["agent"], row["scanner"], row["hidden"]),
+                         ("tv.plex.agents.none", "Plex Video Files", 0))
+        hidden = get(MockPms(Library(other_videos=5, other_videos_hidden=True)),
+                     "/library/sections")["Directory"]
+        self.assertEqual(hidden[2]["hidden"], 1)
+        self.assertEqual(hidden[:2], base)
+
+    def test_the_section_lists_clip_rows_and_leaves_the_movies_alone(self):
+        key = OTHER_VIDEOS_SECTION_ID
+        plain = Library(movies=48)
+        lib = Library(movies=48, other_videos=5)
+        pms = MockPms(lib)
+        listing = get(pms, f"/library/sections/{key}/all?X-Plex-Container-Start=0&X-Plex-Container-Size=60")
+        self.assertEqual(listing["totalSize"], 5)
+        for item in listing["Metadata"]:
+            self.assertEqual((item["type"], item["subtype"]), ("movie", "clip"))
+            self.assertEqual(item["librarySectionID"], key)
+            self.assertTrue(item["thumb"] and item["art"])
+            self.assertTrue(item["guid"].startswith("tv.plex.agents.none://"))
+        letters = get(pms, f"/library/sections/{key}/firstCharacter")["Directory"]
+        self.assertEqual(sum(row["size"] for row in letters), 5)
+        movies = get(pms, "/library/sections/1/all?X-Plex-Container-Start=0&X-Plex-Container-Size=60")
+        self.assertEqual(movies["totalSize"], 48)
+        self.assertEqual(movies["Metadata"],
+                         get(MockPms(plain), "/library/sections/1/all"
+                                             "?X-Plex-Container-Start=0&X-Plex-Container-Size=60")["Metadata"])
+        self.assertEqual(get(pms, f"/library/sections/{key}/collections")["Metadata"], [])
+
+    def test_the_section_hubs_are_clip_hubs_of_movie_rows(self):
+        key = OTHER_VIDEOS_SECTION_ID
+        pms = MockPms(Library(other_videos=8))
+        hubs = get(pms, f"/hubs/sections/{key}")["Hub"]
+        self.assertEqual([h["hubIdentifier"] for h in hubs],
+                         [f"video.inprogress.{key}", f"video.recent.{key}",
+                          f"video.unwatched.random.{key}"])
+        self.assertEqual({h["type"] for h in hubs}, {"clip"})
+        for hub in hubs[1:]:
+            self.assertTrue(hub["Metadata"])
+        for hub in hubs:
+            for item in hub["Metadata"]:
+                self.assertEqual((item["type"], item["subtype"], item["librarySectionID"]),
+                                 ("movie", "clip", key))
+
+    def test_home_lists_the_clip_hub_only_while_the_library_is_visible(self):
+        path = "/hubs?count=12&excludeContinueWatching=1"
+        visible = get(MockPms(Library(other_videos=6)), path)["Hub"]
+        ids = [h["hubIdentifier"] for h in visible]
+        self.assertEqual(ids, ["home.continue", "home.movies.recent", "home.television.recent",
+                               "home.videos.recent"])
+        clip = visible[3]
+        self.assertEqual(clip["type"], "clip")
+        self.assertEqual(clip["key"], "/hubs/home/recentlyAdded?type=1&personal=1")
+        self.assertEqual(clip["size"], 6)
+        self.assertTrue(all(it["librarySectionID"] == OTHER_VIDEOS_SECTION_ID for it in clip["Metadata"]))
+        movies = visible[1]["Metadata"]
+        self.assertTrue(movies and all(it["librarySectionID"] != OTHER_VIDEOS_SECTION_ID for it in movies),
+                        "the Movies hub does not carry the clips")
+        hidden = get(MockPms(Library(other_videos=6, other_videos_hidden=True)), path)["Hub"]
+        clip = hidden[3]
+        self.assertEqual((clip["hubIdentifier"], clip["size"], clip["Metadata"]), ("home.videos.recent", 0, []))
+
+    def test_a_hidden_library_stays_out_of_global_continue_watching(self):
+        lib = Library(other_videos=12, other_videos_hidden=True)
+        pms = MockPms(lib)
+        rows = get(pms, "/hubs/continueWatching/items")["Metadata"]
+        self.assertTrue(rows)
+        self.assertNotIn(OTHER_VIDEOS_SECTION_ID, {it["librarySectionID"] for it in rows})
+        inprogress = get(pms, f"/hubs/sections/{OTHER_VIDEOS_SECTION_ID}")["Hub"][0]
+        self.assertTrue(inprogress["Metadata"], "its own in-progress shelf still has a row")
+
+    def test_serve_takes_the_flag(self):
+        srv, pms = serve(0, other_videos=4, other_videos_hidden=True)
+        try:
+            self.assertEqual(len(pms.lib.sections), 3)
+            self.assertEqual(pms.lib.sections[2]["hidden"], 1)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_a_count_outside_the_id_block_is_refused(self):
+        with self.assertRaises(ValueError):
+            Library(other_videos=-1)
+        with self.assertRaises(ValueError):
+            Library(other_videos=201)
+        with self.assertRaises(ValueError):
+            Library(other_videos_hidden=True)
 
 
 class DoviAndExtraMedia(unittest.TestCase):
