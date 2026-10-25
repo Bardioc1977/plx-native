@@ -19,6 +19,7 @@
 //! does not describe) and holds the same key back for [`LETTERS_RETRY_STEPS`] steps, as the page
 //! lane's `retry_cd` does; any edit asks at once.
 
+use super::filters::FilterSet;
 use super::{Arc, BrowseState, DirectoryResult, SecState};
 
 /// What a first-letter list counted: the grid's own query as it stood when the list was asked.
@@ -30,16 +31,16 @@ use super::{Arc, BrowseState, DirectoryResult, SecState};
 pub(super) struct LettersKey {
     /// The Unwatched switch AS APPLIED (false while a type the filters do not apply to is listed).
     pub(super) unwatched: bool,
-    /// The genre tag id AS APPLIED.
-    pub(super) genre: Option<String>,
+    /// The facet terms AS APPLIED, compared by value keys.
+    pub(super) filters: FilterSet,
     /// [`SecState::letters_gen`] when asked: moves when the server's membership changed under the
     /// section, which no term shows.
     pub(super) gen: u32,
 }
 
 impl LettersKey {
-    fn is(&self, unwatched: bool, genre: Option<&str>, gen: u32) -> bool {
-        self.unwatched == unwatched && self.genre.as_deref() == genre && self.gen == gen
+    fn is(&self, unwatched: bool, filters: &FilterSet, gen: u32) -> bool {
+        self.unwatched == unwatched && self.filters == *filters && self.gen == gen
     }
 }
 
@@ -47,26 +48,27 @@ impl LettersKey {
 pub(super) const LETTERS_RETRY_STEPS: u32 = 120;
 
 impl SecState {
-    /// The terms the section's query applies now: Unwatched and the genre's tag id, both `off` while a
+    /// The terms the section's query applies now: Unwatched and the facet terms, both `off` while a
     /// type the filters do not apply to is listed ([`super::LibraryType::filters`]).
-    fn applied_terms(&self) -> (bool, Option<&str>) {
+    fn applied_terms(&self) -> (bool, &FilterSet) {
+        static NONE: FilterSet = FilterSet::empty();
         if !self.library_type.filters() {
-            return (false, None);
+            return (false, &NONE);
         }
-        (self.unwatched, self.genre.as_ref().map(|genre| genre.id.as_str()))
+        (self.unwatched, &self.filters)
     }
 
     /// The key a letters read asked NOW would carry.
     pub(super) fn letters_key(&self) -> LettersKey {
-        let (unwatched, genre) = self.applied_terms();
-        LettersKey { unwatched, genre: genre.map(str::to_owned), gen: self.letters_gen }
+        let (unwatched, filters) = self.applied_terms();
+        LettersKey { unwatched, filters: filters.clone(), gen: self.letters_gen }
     }
 
     /// Does the landed list describe the listing the grid shows now? Runs every Library step and
     /// every snapshot, so it compares in place.
     pub(super) fn letters_current(&self) -> bool {
-        let (unwatched, genre) = self.applied_terms();
-        self.letters_for.as_ref().is_some_and(|key| key.is(unwatched, genre, self.letters_gen))
+        let (unwatched, filters) = self.applied_terms();
+        self.letters_for.as_ref().is_some_and(|key| key.is(unwatched, filters, self.letters_gen))
     }
 
     /// Is a letters read owed: the list is not current, and a failed read of THIS key is not
@@ -75,8 +77,8 @@ impl SecState {
         if self.letters_current() {
             return false;
         }
-        let (unwatched, genre) = self.applied_terms();
-        !self.letters_backoff.as_ref().is_some_and(|(key, steps)| *steps > 0 && key.is(unwatched, genre, self.letters_gen))
+        let (unwatched, filters) = self.applied_terms();
+        !self.letters_backoff.as_ref().is_some_and(|(key, steps)| *steps > 0 && key.is(unwatched, filters, self.letters_gen))
     }
 
     /// Is a back-off counting down? The store must be stepped while it is, as for `retry_cd`.

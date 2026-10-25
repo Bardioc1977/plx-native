@@ -63,7 +63,17 @@ pub const VALUE_LISTS_KEPT: usize = 3;
 /// The page a restore reads the genre list in, so a library's whole genre list is vouched as before.
 pub const RESTORE_VOUCH_PAGE: usize = 500;
 
+/// Boolean facets whose membership changes as items are watched, beside the Unwatched switch
+/// itself (the names `unwatched` and `unwatchedLeaves` are the switch): marking an item watched
+/// while one is on makes the listing stale ([`super::SecState::membership_depends_on_viewing`]).
+pub const FILTERS_DEPENDING_ON_VIEWING: [&str; 1] = ["inProgress"];
+
 impl FilterSet {
+    /// The empty selection, for a place that needs a reference to one.
+    pub const fn empty() -> FilterSet {
+        FilterSet { terms: Vec::new() }
+    }
+
     /// The canonical set of `terms`.
     pub fn from_terms(terms: impl IntoIterator<Item = FilterTerm>) -> Self {
         let mut kept: Vec<FilterTerm> = Vec::new();

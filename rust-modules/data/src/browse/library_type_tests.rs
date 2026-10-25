@@ -66,7 +66,7 @@ mod tests {
         ]);
         current.sort_idx = 1;
         current.sort_desc = true;
-        current.genre = Some(Arc::new(GenreEntry { id: "7".into(), title: "Drama".into() }));
+        current.set_genre_term(Some(GenreEntry { id: "7".into(), title: "Drama".into() }));
         current.genres = Arc::new(vec![GenreEntry { id: "7".into(), title: "Drama".into() }]);
         current.genres_done = true;
         let key = current.letters_key();
@@ -74,12 +74,12 @@ mod tests {
 
         switch(&mut state, LibraryType::Collections);
         let on_loan = &state.states[1];
-        assert!(on_loan.sorts.is_empty() && on_loan.genre.is_none() && !on_loan.sort_desc,
+        assert!(on_loan.sorts.is_empty() && on_loan.genre().is_none() && !on_loan.sort_desc,
             "the Collections listing starts from its own defaults");
         switch(&mut state, LibraryType::Primary);
         let back = &state.states[1];
         assert_eq!((back.sort_idx, back.sort_desc), (1, true), "the sort comes back");
-        assert_eq!(back.genre.as_ref().map(|genre| genre.id.as_str()), Some("7"), "the genre comes back");
+        assert_eq!(back.genre().map(|genre| genre.id.as_str()), Some("7"), "the genre comes back");
         assert_eq!(back.sorts.len(), 2);
         assert!(back.genres_done && back.loaned.is_none());
         assert!(back.letters.is_empty() && !back.letters_current(),
@@ -106,7 +106,7 @@ mod tests {
             key: "addedAt".into(), title: "Date Added".into(), default_desc: true,
         }]);
         current.sort_desc = true;
-        current.genre = Some(Arc::new(GenreEntry { id: "7".into(), title: "Drama".into() }));
+        current.set_genre_term(Some(GenreEntry { id: "7".into(), title: "Drama".into() }));
         current.genres_done = true;
         let key = current.letters_key();
         current.land_letters(key, vec![("A".into(), 1), ("B".into(), 1)]);
@@ -177,7 +177,7 @@ mod tests {
         assert!(!state.set_library_type(LibraryType::Seasons), "a movie library has no seasons");
         assert_eq!(state.query_gen(), gen);
         state.set_unwatched(true);
-        state.states[0].genre = Some(Arc::new(GenreEntry { id: "7".into(), title: "Drama".into() }));
+        state.states[0].set_genre_term(Some(GenreEntry { id: "7".into(), title: "Drama".into() }));
         assert!(state.set_library_type(LibraryType::Collections));
         assert_ne!(state.query_gen(), gen);
         assert_eq!(state.states[0].query_filters(SecKind::Movie), vec![("type".into(), "18".into())]);

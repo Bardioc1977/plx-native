@@ -589,7 +589,7 @@ fn the_request_carries_the_terms_and_the_key_it_is_asked_under() {
     let (job, _port) = the_directory_job(&mut browse);
     assert_eq!(job.req.filters, terms(&[("type", "3"), ("unwatchedLeaves", "1")]));
     assert_eq!(job.req.letters, Some(browse.state.states()[0].letters_key()));
-    assert_eq!(job.req.letters.as_ref().map(|key| (key.unwatched, key.genre.as_deref())), Some((true, None)));
+    assert_eq!(job.req.letters.as_ref().map(|key| (key.unwatched, key.filters.get("genre"))), Some((true, None)));
 
     tick_directory(&mut browse, sid, LibraryWork::Genres);
     let (job, _port) = the_directory_job(&mut browse);

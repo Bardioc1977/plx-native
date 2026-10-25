@@ -33,7 +33,7 @@ struct ListingData {
     letters_current: bool,
     sort_idx: usize,
     sort_desc: bool,
-    genre: Option<Arc<GenreEntry>>,
+    filters: Arc<super::filters::FilterSet>,
     unwatched: bool,
     membership_stale: bool,
     cursor: Option<Arc<super::Cursor>>,
@@ -156,7 +156,7 @@ impl ListingSnapshot {
                 letters_current: true,
                 sort_idx: 0,
                 sort_desc: false,
-                genre: None,
+                filters: Arc::default(),
                 unwatched: false,
                 membership_stale: false,
                 cursor: None,
@@ -239,14 +239,15 @@ impl<'a> ListingView<'a> {
     /// The genre filter AS APPLIED — `None` while a type the filters do not apply to is listed
     /// ([`super::LibraryType::filters`]).
     pub fn genre(self) -> Option<&'a GenreEntry> {
-        let data = self.0.data.as_ref()?;
-        data.library_type.filters().then_some(())?;
-        data.genre.as_deref()
+        self.filters().get("genre").and_then(|term| term.values.first())
     }
-    /// STUB (red commit of the term state): the selection AS APPLIED.
+    /// The facet terms AS APPLIED — empty while a type the filters do not apply to is listed.
     pub fn filters(self) -> &'a super::filters::FilterSet {
-        static NONE: std::sync::OnceLock<super::filters::FilterSet> = std::sync::OnceLock::new();
-        NONE.get_or_init(Default::default)
+        static NONE: super::filters::FilterSet = super::filters::FilterSet::empty();
+        match self.0.data.as_ref() {
+            Some(data) if data.library_type.filters() => &data.filters,
+            _ => &NONE,
+        }
     }
     /// The Unwatched filter AS APPLIED — `false` while collections are listed, even though the
     /// section keeps the switch for when its own type is listed again.
@@ -340,7 +341,7 @@ impl super::BrowseState {
                     letters_current: state.letters_current(),
                     sort_idx: state.sort_idx,
                     sort_desc: state.sort_desc,
-                    genre: state.genre.clone(),
+                    filters: state.filters.clone(),
                     unwatched: state.unwatched,
                     membership_stale: state.membership_stale,
                     cursor: state.cursor.clone(),

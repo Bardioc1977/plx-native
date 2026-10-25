@@ -117,7 +117,7 @@ fn collections_send_and_show_no_terms_and_the_loan_returns_the_set_whole() {
     assert_eq!(*state.states[1].filters, selection(), "the loan returns the selection whole");
     assert_eq!(state.states[1].facets.len(), 3, "and the facets");
     assert!(state.states[1].facets_known);
-    assert_eq!(state.states[1].query_filters(SecKind::Show).len(), 6);
+    assert_eq!(state.states[1].query_filters(SecKind::Show).len(), 5, "type, Unwatched and three terms");
 }
 
 #[test]

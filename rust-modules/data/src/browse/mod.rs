@@ -501,12 +501,9 @@ impl SortEntry {
     }
 }
 
-/// One genre value (tag id + display title), from the section's `/genre` value list.
-#[derive(Clone)]
-pub struct GenreEntry {
-    pub id: String,
-    pub title: String,
-}
+/// One genre value (tag id + display title), from the section's `genre` value list: a filter
+/// value like any other ([`filters::FilterValue`], which the genre entry generalizes).
+pub type GenreEntry = filters::FilterValue;
 
 /// What the last page fetch for a section produced — Loading / Ready / **Failed**, per SECTION
 /// because that is the grain this store's state already has.
@@ -585,14 +582,13 @@ struct SecState {
     sort_idx: usize,
     sort_desc: bool,
     unwatched: bool,
-    genre: Option<Arc<GenreEntry>>,
-    /// STUB (red commit of the term state): the selection, not yet consulted.
-    #[allow(dead_code)]
+    /// The facet terms the viewer chose for THIS listing type (the genre is the `genre` term). The
+    /// Unwatched switch above is not one: it is the section's own and carries across listing types.
     filters: Arc<filters::FilterSet>,
-    /// STUB: the facets the server offers for this listing, not yet consulted.
-    #[allow(dead_code)]
+    /// The filters the server offers for this listing type, from its `Meta` (kept across re-queries,
+    /// reset on a type change like `sorts`); `facets_known` once a `Meta` landed, so an empty list
+    /// can be told from one not yet read.
     facets: Arc<Vec<plx_plex::plex::Facet>>,
-    #[allow(dead_code)]
     facets_known: bool,
     // menus (kept across re-queries)
     sorts: Arc<Vec<SortEntry>>,
@@ -649,7 +645,9 @@ struct LoanedView {
     library_type: LibraryType,
     sort_idx: usize,
     sort_desc: bool,
-    genre: Option<Arc<GenreEntry>>,
+    filters: Arc<filters::FilterSet>,
+    facets: Arc<Vec<plx_plex::plex::Facet>>,
+    facets_known: bool,
     sorts: Arc<Vec<SortEntry>>,
     genres: Arc<Vec<GenreEntry>>,
     genres_done: bool,
@@ -821,7 +819,6 @@ impl Default for SecState {
             sort_idx: 0,
             sort_desc: false,
             unwatched: false,
-            genre: None,
             filters: Arc::default(),
             facets: Arc::default(),
             facets_known: false,
@@ -850,8 +847,22 @@ impl SecState {
     /// Unwatched switch drops it, ordering by last viewed moves it? (Plex's sort key for "Last
     /// Viewed" is `lastViewedAt`.)
     fn membership_depends_on_viewing(&self) -> bool {
-        (self.unwatched && self.library_type.filters())
+        (self.library_type.filters()
+            && (self.unwatched
+                || filters::FILTERS_DEPENDING_ON_VIEWING.iter().any(|facet| self.filters.get(facet).is_some())))
             || self.sorts.get(self.sort_idx).is_some_and(|sort| sort.key == "lastViewedAt")
+    }
+    /// The genre filter, the first value of the `genre` term.
+    fn genre(&self) -> Option<&GenreEntry> {
+        self.filters.get("genre").and_then(|term| term.values.first())
+    }
+    /// Set (or clear) the genre term directly: the fixture of a test about something else.
+    #[cfg(test)]
+    fn set_genre_term(&mut self, genre: Option<GenreEntry>) {
+        self.filters = Arc::new(match genre {
+            Some(genre) => self.filters.with("genre", vec![genre]),
+            None => self.filters.without("genre"),
+        });
     }
     /// Forget the listing, as a query edit does: the next visit fetches it afresh.
     fn reset_listing(&mut self) {
@@ -872,15 +883,9 @@ impl SecState {
             return filters;
         }
         if self.unwatched {
-            let key = match (section_kind, self.library_type) {
-                (SecKind::Show, LibraryType::Primary | LibraryType::Seasons) => "unwatchedLeaves",
-                _ => "unwatched",
-            };
-            filters.push((key.into(), "1".into()));
+            filters.push((filters::unwatched_facet(section_kind, self.library_type).into(), "1".into()));
         }
-        if let Some(genre) = &self.genre {
-            filters.push(("genre".into(), genre.id.clone()));
-        }
+        filters.extend(self.filters.wire());
         filters
     }
 }
@@ -1320,6 +1325,33 @@ impl BrowseState {
         }
         true
     }
+    /// Replace the current section's facet terms with `set`: the absolute form of every filter edit,
+    /// so a last-wins pending slot loses nothing. Refused while a listing the filters do not apply
+    /// to is shown (Collections) and for a selection the request line cannot carry
+    /// ([`filters::MAX_QUERY_BYTES`]); terms for a facet the known menu lacks are dropped (before
+    /// the menu has landed nothing is known and the set is taken as it is). A selection equal to the
+    /// live one (by value keys) lands and asks nothing; any other asks the listing afresh.
+    fn set_filters(&mut self, set: filters::FilterSet) -> bool {
+        let current = self.cur();
+        let Some(state) = self.states.get_mut(current) else { return false };
+        if !state.library_type.filters() {
+            return false;
+        }
+        let set = if state.facets_known {
+            set.retain_facets(|facet| state.facets.iter().any(|offered| offered.name == facet)).0
+        } else {
+            set
+        };
+        if set.wire_bytes() > filters::MAX_QUERY_BYTES {
+            return false;
+        }
+        let changed = *state.filters != set;
+        state.filters = Arc::new(set);
+        if changed {
+            self.requery();
+        }
+        true
+    }
     fn set_unwatched(&mut self, on: bool) -> bool {
         let current = self.cur();
         let Some(state) = self.states.get_mut(current) else {
@@ -1351,7 +1383,8 @@ impl BrowseState {
         if library_type == LibraryType::Collections {
             state.loaned = Some(LoanedView {
                 library_type: from, sort_idx: state.sort_idx, sort_desc: state.sort_desc,
-                genre: state.genre.clone(), sorts: state.sorts.clone(), genres: state.genres.clone(),
+                filters: state.filters.clone(), facets: state.facets.clone(),
+                facets_known: state.facets_known, sorts: state.sorts.clone(), genres: state.genres.clone(),
                 genres_done: state.genres_done, sort_resolved: state.sort_resolved,
                 genre_resolved: state.genre_resolved,
             });
@@ -1359,7 +1392,9 @@ impl BrowseState {
             if let Some(view) = state.loaned.take().filter(|view| view.library_type == library_type) {
                 state.sort_idx = view.sort_idx;
                 state.sort_desc = view.sort_desc;
-                state.genre = view.genre;
+                state.filters = view.filters;
+                state.facets = view.facets;
+                state.facets_known = view.facets_known;
                 state.sorts = view.sorts;
                 state.genres = view.genres;
                 state.genres_done = view.genres_done;
@@ -1374,7 +1409,9 @@ impl BrowseState {
         state.sorts = Arc::default();
         state.sort_idx = 0;
         state.sort_desc = false;
-        state.genre = None;
+        state.filters = Arc::default();
+        state.facets = Arc::default();
+        state.facets_known = false;
         state.genres = Arc::default();
         state.genres_done = false;
         // A new listing starts a new restore, and the viewer just chose it.
@@ -1383,20 +1420,18 @@ impl BrowseState {
         self.requery();
         true
     }
-    /// STUB (red commit of the term state): replaces the selection with `set`. Never lands yet.
-    #[allow(dead_code)]
-    fn set_filters(&mut self, _set: filters::FilterSet) -> bool {
-        false
-    }
     fn set_genre(&mut self, index: Option<usize>) {
         let current = self.cur();
         let Some(state) = self.states.get_mut(current) else {
             return;
         };
-        state.genre = index
-            .and_then(|i| state.genres.get(i).cloned())
-            .map(Arc::new);
-        self.requery();
+        let genre = index.and_then(|i| state.genres.get(i).cloned());
+        let set = match genre {
+            Some(genre) => state.filters.with("genre", vec![genre]),
+            None => state.filters.without("genre"),
+        };
+        // the same absolute edit as any other: an unchanged selection asks nothing
+        self.set_filters(set);
     }
     fn set_genre_by_id(&mut self, id: Option<&str>) -> bool {
         if id.is_some() && self.cur_state().is_some_and(|state| {
@@ -1574,7 +1609,7 @@ impl BrowseState {
             genre_resolved: menu_known && state.genre_resolved,
             sort,
             unwatched: state.unwatched,
-            genre: state.genre.as_ref().map(|genre| genre.id.clone()),
+            genre: state.genre().map(|genre| genre.id.clone()),
         };
         // The viewer's own edit of a field settles it, whatever the restore had left.
         if let Some(state) = self.states.get_mut(i) {
@@ -1650,7 +1685,7 @@ impl BrowseState {
         } else {
             None
         }.map(|(sort, desc)| (sort.to_string(), desc));
-        let genre = (primary && state.genre.is_none() && !view.genre.is_empty())
+        let genre = (primary && state.genre().is_none() && !view.genre.is_empty())
             .then(|| view.genre.clone());
         if sort.is_none() && genre.is_none() {
             return None;
@@ -2918,7 +2953,7 @@ impl BrowseState {
                                     state.genres_done = true;
                                 }
                                 if let Some(genre) = result.genre {
-                                    state.genre = Some(Arc::new(genre));
+                                    state.filters = Arc::new(state.filters.with("genre", vec![genre]));
                                 }
                                 if let Some(sorts) = result.sorts {
                                     if state.sorts.is_empty() {

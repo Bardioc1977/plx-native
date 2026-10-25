@@ -451,7 +451,7 @@ fn a_genre_whose_check_failed_survives_an_unrelated_edit() {
     let pms = loopback_pms("sort-machine", vec!["this is not json", MENU_PAGE, MENU_PAGE]);
     let mut browse = movies_on(&pms, "sort-machine");
     pump_until_landed(&mut browse);
-    assert!(browse.state.cur_state().unwrap().genre.is_none(), "opened unfiltered");
+    assert!(browse.state.cur_state().unwrap().genre().is_none(), "opened unfiltered");
 
     switch_unwatched_on(&mut browse, &pms);
     let held = stored_view("u-viewer", "sort-machine").expect("the record is still there");
