@@ -1,30 +1,89 @@
 //! **The account stamp** a per-account RECORD carries (`profile_prefs`, `track_memory`,
-//! `subtitle_offsets`): which sign-in's data the record is.
+//! `subtitle_offsets`): which account's data the record is.
 //!
-//! STUB (tests-first commit): every function here is inert and equals the previous behaviour, so
-//! the regression tests that follow fail by assertion on the base behaviour. The next commit
-//! replaces the bodies.
-use super::Session;
+//! A stamp of the plex.tv account TOKEN (what `grant::account_key` computes, and what these records
+//! carried until #830) lives exactly as long as one sign-in, so a person who signed in again read
+//! their own memory as a stranger's and the next write deleted it. The stamp follows the OWNER
+//! instead, the plex.tv account that administers the Plex Home the TV is signed in to
+//! ([`owner_identity`](super::owner_identity), the identity the login-over-another-account check
+//! already uses). Three forms, all strings in the existing `account` key:
+//!
+//! | form | when | example |
+//! |---|---|---|
+//! | `""` | no account token (signed out, a dev token): nothing is stamped, nothing is seated | |
+//! | 16 hex | a token and no nameable owner (the roster is not fetched yet, or names no admin): the token fingerprint, exactly what every older build wrote | `6e75236040ff06d4` |
+//! | `o1:` + 16 hex | the roster names the admin: the first eight bytes of SHA-256 over `plx-owner:` and the identity | `o1:19afc47bcea99412` |
+//!
+//! `o1` is a version tag. The hash is one-way and domain-tagged, like `account_key`; the plex.tv id
+//! is a small number every co-sharer of a server sees as its `ownerId`, so this hides nothing the
+//! file's other content does not already show, and it is not salted (`client_id` sits in the same
+//! public half, so a salt would add nothing). The format is pinned by golden values in the tests:
+//! nothing can re-derive an old stamp, so a drift would orphan every record a device has written.
+//!
+//! **Adoption.** A record stamped by an older build, or in a window in which the owner was not yet
+//! known, carries the token fingerprint. [`adoptable_stamps`] names the stamps a session may adopt
+//! into its own: the fingerprint of ITS token and the other spelling of ITS roster's admin, and
+//! nothing else, only while its own stamp is the owner form. A different owner can therefore never
+//! adopt another's records: the only stamp equal to this token's fingerprint was written by a
+//! session holding this token, which belongs to one account.
+//!
+//! Everything here is pure: no IO, no clock, no global.
+use super::{owner_identities, owner_identity, Session};
+use crate::plex::grant;
 
-/// The one stamp a per-account record carries.
+/// The domain tag of the owner form (the consent key's is `plx-consent:`).
+const OWNER_DOMAIN: &[u8] = b"plx-owner:";
+
+fn owner_form(identity: &str) -> String {
+    format!("o1:{}", grant::fingerprint(OWNER_DOMAIN, identity))
+}
+
+/// The one stamp a per-account record carries: empty without an account token, the owner form when
+/// the roster names its admin, else the token fingerprint (the owner is unknown, which is exactly
+/// the behaviour before the owner form existed, never worse).
 pub fn account_stamp(session: &Session) -> String {
-    super::super::grant::account_key(&session.account_token)
+    if session.account_token.is_empty() {
+        return String::new();
+    }
+    match owner_identity(&session.home_users) {
+        Some(identity) => owner_form(&identity),
+        None => grant::account_key(&session.account_token),
+    }
 }
 
-/// Whether `stamp` is in the owner family (`o<digits>:...`).
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn is_owner_stamp(_stamp: &str) -> bool {
-    false
+/// Whether `stamp` is in the owner family: `o`, one or more digits (the version), then `:`. A later
+/// `o2:` form is foreign to this build but still the owner family, which is what keeps a write made
+/// while the owner is unknown from deleting it.
+pub fn is_owner_stamp(stamp: &str) -> bool {
+    let Some(rest) = stamp.strip_prefix('o') else { return false };
+    let Some((version, _)) = rest.split_once(':') else { return false };
+    !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The stamps `session`'s records may be adopted from.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn adoptable_stamps(_session: &Session) -> Vec<String> {
-    Vec::new()
+/// The stamps whose records `session` adopts as its own: the fingerprint of its token and the other
+/// spellings of its roster's admin, minus its own stamp. Empty unless the session's stamp is the
+/// owner form: with the owner unknown there is nothing to migrate toward.
+#[cfg_attr(not(test), allow(dead_code))] // read by the adoption pass in the next commit
+pub(super) fn adoptable_stamps(session: &Session) -> Vec<String> {
+    let own = account_stamp(session);
+    if !is_owner_stamp(&own) {
+        return Vec::new();
+    }
+    let mut from = vec![grant::account_key(&session.account_token)];
+    from.extend(owner_identities(&session.home_users).iter().map(|identity| owner_form(identity)));
+    from.retain(|stamp| *stamp != own);
+    let mut unique: Vec<String> = Vec::with_capacity(from.len());
+    for stamp in from {
+        if !unique.contains(&stamp) {
+            unique.push(stamp);
+        }
+    }
+    unique
 }
 
 impl Session {
-    /// This session with every adoptable record re-stamped to [`account_stamp`]. STUB: identity.
+    /// This session with every adoptable record re-stamped to [`account_stamp`]. STUB until the
+    /// adoption commit: identity.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn adopt_stamps(self) -> Session {
         self

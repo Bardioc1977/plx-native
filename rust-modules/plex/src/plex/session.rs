@@ -4228,15 +4228,20 @@ pub fn replace_after_reauthentication_guarded_with_outcome(
 /// carries no id. `None` when the roster is empty ("unknown", not "nobody"), has no admin, or the
 /// admin names neither. A token is NOT an identity: every sign-in mints a new one.
 pub fn owner_identity(roster: &[HomeUserRef]) -> Option<String> {
-    let admin = roster.iter().find(|u| u.admin)?;
-    if admin.id != 0 { Some(format!("id:{}", admin.id)) }
-    else if !admin.uuid.is_empty() { Some(format!("uuid:{}", admin.uuid)) }
-    else { None }
+    owner_identities(roster).into_iter().next()
 }
 
-/// Every spelling of the roster admin's identity, primary first (STUB: the primary alone).
+/// Every spelling of the roster admin's identity, primary first: `id:N` when the admin carries a
+/// plex.tv id, then `uuid:U` when it carries a uuid. The id is the account's identity proper; the
+/// uuid is the only name a roster written before ids existed has, and the same admin can appear
+/// under the second spelling and later under both. [`owner_identity`] is the first of them.
+/// Empty exactly when [`owner_identity`] is `None`.
 pub fn owner_identities(roster: &[HomeUserRef]) -> Vec<String> {
-    owner_identity(roster).into_iter().collect()
+    let Some(admin) = roster.iter().find(|u| u.admin) else { return Vec::new() };
+    let mut names = Vec::new();
+    if admin.id != 0 { names.push(format!("id:{}", admin.id)); }
+    if !admin.uuid.is_empty() { names.push(format!("uuid:{}", admin.uuid)); }
+    names
 }
 
 /// Do two rosters name the SAME account? Fails safe: an identity either side cannot name is "no".
