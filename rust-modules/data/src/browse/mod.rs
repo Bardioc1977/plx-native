@@ -609,8 +609,9 @@ struct SecState {
     letters_gen: u32,
     /// A failed letters read of this key, and the steps left before it is asked again.
     letters_backoff: Option<(LettersKey, u32)>,
-    /// The grid's own view (sort, genre, menus, letters), set aside while the section is on the
-    /// Collections listing and put back when it returns to the type it was on ([`LoanedView`]).
+    /// The grid's own view (sort, genre, menus), set aside while the section is on the Collections
+    /// listing and put back when it returns to the type it was on ([`LoanedView`]). The letters are
+    /// not loaned: every type change forgets them and the listing it lands on asks again.
     loaned: Option<LoanedView>,
     /// **The library's OWN shelves** — `Library Recommended`, as its server's owner arranged it.
     /// A field here rather than a store of its own because this struct is already the per-section
