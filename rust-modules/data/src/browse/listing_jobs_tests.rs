@@ -210,3 +210,351 @@ fn a_refused_genre_read_leaves_the_letters_read_in_flight() {
     assert!(!Directory::Genres.busy(&browse.adapter), "the refused read gave its claim back");
     assert!(Directory::Letters.busy(&browse.adapter), "the other read is still out");
 }
+
+// ---- the first-letter list is the grid's own (#869) --------------------------------------------
+//
+// The A-Z rail jumps by prefix sums of the letter counts, so the counts must describe the very
+// listing the grid shows: the same terms, and never a list asked under other ones.
+
+use crate::browse::{GenreEntry, LibraryType, SecItems, SecKind, SortEntry};
+use crate::pms::PmsMovie;
+use crate::viewstate::{ViewAt, ViewEdit};
+use plx_plex::plex::{LibrarySection, MediaContainer};
+
+const WATCHED_FACTS: ViewEdit = ViewEdit::Facts { watched: true, unwatched: false, resume_ms: 0 };
+
+/// A `firstCharacter` answer of `counts`.
+fn letter_container(counts: &[(&str, i64)]) -> MediaContainer {
+    let mut container = MediaContainer::default();
+    container.directory = counts.iter().map(|(label, size)| LibrarySection {
+        key: label.to_lowercase(), title: (*label).into(), size: *size, ..Default::default()
+    }).collect();
+    container
+}
+
+/// Answer the one directory job on the outbox with `counts` through the production completion, then
+/// run a step so the answer lands. The page and hub reads that step leaves are not these tests'.
+#[track_caller]
+fn answer_letters(browse: &mut TestBrowse, client: &'static plx_plex::plex::Client, counts: &[(&str, i64)]) {
+    let (job, port) = the_directory_job(browse);
+    let container = letter_container(counts);
+    finish_directory_with(&port, job.addr, client, job.req, move || Some(container));
+    let _ = browse.pump();
+    browse.jobs.clear();
+}
+
+/// The letters of the current listing as the Library page reads them.
+fn shown_letters(browse: &TestBrowse) -> Vec<(String, i64)> {
+    browse.state.listing_snapshot().view().letters().to_vec()
+}
+
+fn rail_shown(browse: &TestBrowse) -> bool {
+    browse.state.listing_snapshot().view().rail_available()
+}
+
+/// The menu's tick for the letters, answered with `counts`: the list the section asks for first.
+#[track_caller]
+fn land_letters(browse: &mut TestBrowse, sid: plx_plex::plex::ServerId,
+    client: &'static plx_plex::plex::Client, counts: &[(&str, i64)]) {
+    tick_directory(browse, sid, LibraryWork::Letters);
+    answer_letters(browse, client, counts);
+}
+
+const LETTERS_BODY: &str = r#"{"MediaContainer":{"Directory":[{"key":"A","title":"A","size":3},{"key":"B","title":"B","size":4}]}}"#;
+
+/// A server on a loopback port that answers `requests` requests with letters and sends each request
+/// line back. The terms of a request are what follows its `?`, minus the `X-Plex-` identity.
+fn letters_server(requests: usize) -> (i32, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port() as i32;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for _ in 0..requests {
+            let Ok((mut socket, _)) = listener.accept() else { return };
+            let mut line = String::new();
+            BufReader::new(&socket).read_line(&mut line).unwrap();
+            let _ = tx.send(line);
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{LETTERS_BODY}",
+                LETTERS_BODY.len()).unwrap();
+        }
+    });
+    (port, rx)
+}
+
+/// `(path, terms)` of a recorded request line, the terms without the `X-Plex-` identity.
+fn path_and_terms(line: &str) -> (String, String) {
+    let target = line.split_whitespace().nth(1).unwrap_or_default();
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let terms: Vec<&str> = query.split('&').filter(|t| !t.is_empty() && !t.starts_with("X-Plex-")).collect();
+    (path.to_owned(), terms.join("&"))
+}
+
+fn a_genre_menu(browse: &mut TestBrowse) {
+    browse.state.state_mut(0).unwrap().genres = Arc::new(vec![GenreEntry { id: "7".into(), title: "Drama".into() }]);
+}
+
+/// The letters request carries the SAME terms the grid page sends (`SecState::query_filters`),
+/// whatever combination the viewer chose and on whichever listing type, and is asked again when
+/// they change after a list has landed.
+#[test]
+fn the_letters_request_carries_the_terms_the_grid_sends() {
+    let scenarios: [(SecKind, LibraryType, bool, Option<&str>, &str); 7] = [
+        (SecKind::Movie, LibraryType::Primary, true, None, "unwatched=1"),
+        (SecKind::Movie, LibraryType::Primary, false, Some("7"), "genre=7"),
+        (SecKind::Movie, LibraryType::Primary, true, Some("7"), "unwatched=1&genre=7"),
+        (SecKind::Show, LibraryType::Primary, true, None, "type=2&unwatchedLeaves=1"),
+        (SecKind::Show, LibraryType::Primary, true, Some("7"), "type=2&unwatchedLeaves=1&genre=7"),
+        (SecKind::Show, LibraryType::Seasons, true, None, "type=3&unwatchedLeaves=1"),
+        (SecKind::Show, LibraryType::Episodes, true, None, "type=4&unwatched=1"),
+    ];
+    for (kind, library_type, unwatched, genre, terms) in scenarios {
+        let _g = plx_base::testlock::serial();
+        let (port, requests) = letters_server(2);
+        let (_cleanup, mut browse, sid, client) = loopback_source_at(port, kind);
+        // The list every section asks for first, with the type's own terms only.
+        land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+        if library_type != LibraryType::Primary {
+            assert!(browse.state.set_library_type(library_type));
+        }
+        a_genre_menu(&mut browse);
+        if unwatched {
+            assert!(browse.state.set_unwatched(true));
+        }
+        if let Some(id) = genre {
+            assert!(browse.state.set_genre_by_id(Some(id)));
+        }
+
+        tick_directory(&mut browse, sid, LibraryWork::Letters);
+        assert_eq!(browse.jobs.len(), 1, "{kind:?} {library_type:?}: the edit owes the letters again");
+        assert_eq!(browse.run_listing_jobs(), 1);
+
+        let timeout = std::time::Duration::from_secs(5);
+        let _first = requests.recv_timeout(timeout).expect("the first letters request");
+        let (path, asked) = path_and_terms(&requests.recv_timeout(timeout).expect("the second letters request"));
+        assert_eq!(path, "/library/sections/1/firstCharacter");
+        assert_eq!(asked, terms, "{kind:?} {library_type:?}");
+    }
+}
+
+/// An answer asked under other terms than the grid now has is never shown: the viewer turned
+/// Unwatched on while the first list was out. The counts of the unfiltered listing would put every
+/// jump on the wrong title.
+#[test]
+fn an_answer_asked_under_older_terms_is_never_shown() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    let (job, port) = the_directory_job(&mut browse);
+    assert!(browse.state.set_unwatched(true), "the viewer narrows the listing while the read is out");
+
+    let container = letter_container(&[("A", 3), ("B", 4)]);
+    finish_directory_with(&port, job.addr, client, job.req, move || Some(container));
+    let _ = browse.pump();
+    browse.jobs.clear();
+    assert!(shown_letters(&browse).is_empty(), "counts of the unfiltered listing over a filtered grid: {:?}",
+        shown_letters(&browse));
+    assert!(!rail_shown(&browse));
+
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    answer_letters(&mut browse, client, &[("A", 1), ("B", 2)]);
+    assert_eq!(shown_letters(&browse), [("A".to_owned(), 1), ("B".to_owned(), 2)]);
+    assert!(rail_shown(&browse), "the rail shows under Unwatched once the list is the grid's own");
+}
+
+/// The saved genre is applied by the first page's landing, after the letters were asked: the
+/// unfiltered list must not stand for the filtered grid.
+#[test]
+fn a_restored_genre_owes_the_letters_again() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+    assert!(rail_shown(&browse), "premise: the unfiltered list is the grid's own");
+
+    browse.adapter.page.post(PageResult {
+        client, token_gen: client.token_gen(), gen: browse.state.query_gen(), sec: 0, start: 0,
+        items: Vec::new(), total: 0, sorts: None, restored: None, genres: None,
+        genre: Some(GenreEntry { id: "7".into(), title: "Drama".into() }), resolved: Default::default(),
+    }, |_| true);
+    browse.adapter.page.claim(0);
+    let _ = browse.pump();
+    browse.jobs.clear();
+    assert_eq!(browse.state.listing_snapshot().view().genre().map(|genre| genre.id.as_str()), Some("7"),
+        "premise: the page landing applied the saved genre");
+
+    assert!(shown_letters(&browse).is_empty(), "the unfiltered counts must not describe the genre's grid");
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert_eq!(browse.jobs.len(), 1, "the letters are owed again");
+}
+
+/// A read-back that changed what the Unwatched listing holds, and a scan that changed what a
+/// section holds, move every row after the change by one: the counts are asked again.
+#[test]
+fn a_membership_change_owes_the_letters_again() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    assert!(browse.state.set_unwatched(true));
+    land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+    {
+        let state = browse.state.state_mut(0).unwrap();
+        state.fetch = SecFetch::Ready;
+        state.total = 1;
+        state.items = SecItems::from_vec(vec![Some(PmsMovie { sid, rk: "7".into(), unwatched: true, ..Default::default() })]);
+    }
+    assert_eq!(shown_letters(&browse).len(), 2, "premise: the list is the grid's own");
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert!(browse.jobs.is_empty(), "premise: nothing is owed");
+
+    assert!(browse.state.apply_view_local(&ViewAt::leaf(sid, "7"), WATCHED_FACTS));
+    assert!(browse.state.requery_stale(), "the listing is asked again");
+    assert!(shown_letters(&browse).is_empty(), "the old counts include the title that left");
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    answer_letters(&mut browse, client, &[("A", 2), ("B", 4)]);
+    assert_eq!(browse.state.listing_snapshot().view().letter_start(1), 2);
+}
+
+/// The same for a read that was already out when the watch happened: it was asked before the
+/// change, so its answer is not the list of the grid that follows.
+#[test]
+fn an_answer_asked_before_a_membership_change_is_not_the_current_list() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    assert!(browse.state.set_unwatched(true));
+    {
+        let state = browse.state.state_mut(0).unwrap();
+        state.fetch = SecFetch::Ready;
+        state.total = 1;
+        state.items = SecItems::from_vec(vec![Some(PmsMovie { sid, rk: "7".into(), unwatched: true, ..Default::default() })]);
+    }
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    let (job, port) = the_directory_job(&mut browse);
+    assert!(browse.state.apply_view_local(&ViewAt::leaf(sid, "7"), WATCHED_FACTS));
+    assert!(browse.state.requery_stale());
+
+    let container = letter_container(&[("A", 3), ("B", 4)]);
+    finish_directory_with(&port, job.addr, client, job.req, move || Some(container));
+    let _ = browse.pump();
+    browse.jobs.clear();
+    assert!(shown_letters(&browse).is_empty(), "asked before the change: {:?}", shown_letters(&browse));
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert_eq!(browse.jobs.len(), 1, "and asked again");
+}
+
+/// A library scan that changed a section the viewer is not looking at: its counts are asked again
+/// when it comes back.
+#[test]
+fn a_scan_owes_the_letters_of_a_section_that_is_not_showing() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    browse.append_sections(0, vec![(2, "Other".into(), SecKind::Movie)]);
+    land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+    browse.state.set_cur(1);
+    assert!(browse.state.listings_changed(sid, false));
+    browse.state.set_cur(0);
+    assert!(shown_letters(&browse).is_empty(), "what the section lists moved while it was away");
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert_eq!(browse.jobs.len(), 1);
+}
+
+/// Over-invalidation guard (green before and after): a sort edit changes neither the terms nor the
+/// membership, so the list stays and nothing is asked.
+#[test]
+fn a_sort_change_does_not_owe_the_letters() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+    browse.state.state_mut(0).unwrap().sorts = Arc::new(vec![
+        SortEntry { key: "titleSort".into(), desc_key: String::new(), title: "Title".into(), default_desc: false },
+        SortEntry { key: "addedAt".into(), desc_key: String::new(), title: "Date Added".into(), default_desc: true },
+    ]);
+    for (key, desc) in [("addedAt", true), ("titleSort", true), ("titleSort", false)] {
+        assert!(browse.state.set_sort_by_key(key, desc));
+        tick_directory(&mut browse, sid, LibraryWork::Letters);
+        assert!(browse.jobs.is_empty(), "{key} desc={desc}: nothing is owed: {:?}", browse.jobs);
+        assert_eq!(shown_letters(&browse).len(), 2, "{key} desc={desc}: the list stays");
+    }
+    assert!(rail_shown(&browse));
+}
+
+/// The rail follows the sort and the list, not the filters: shown under Unwatched and a genre, hidden
+/// for another sort, for a descending title sort and for a single letter.
+#[test]
+fn the_rail_is_hidden_by_the_sort_and_the_list_and_not_by_the_filters() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    a_genre_menu(&mut browse);
+    browse.state.state_mut(0).unwrap().sorts = Arc::new(vec![
+        SortEntry { key: "titleSort".into(), desc_key: String::new(), title: "Title".into(), default_desc: false },
+        SortEntry { key: "addedAt".into(), desc_key: String::new(), title: "Date Added".into(), default_desc: true },
+    ]);
+    assert!(browse.state.set_unwatched(true));
+    assert!(browse.state.set_genre_by_id(Some("7")));
+    land_letters(&mut browse, sid, client, &[("A", 2), ("B", 1)]);
+    assert!(rail_shown(&browse), "Unwatched and a genre on, ordered by title");
+    assert!(browse.state.set_sort_by_key("addedAt", true));
+    assert!(!rail_shown(&browse), "another sort");
+    assert!(browse.state.set_sort_by_key("titleSort", true));
+    assert!(!rail_shown(&browse), "descending by title");
+    assert!(browse.state.set_sort_by_key("titleSort", false));
+    assert!(rail_shown(&browse));
+
+    assert!(browse.state.set_unwatched(false));
+    assert!(browse.state.set_genre_by_id(None));
+    land_letters(&mut browse, sid, client, &[("A", 3)]);
+    assert!(!rail_shown(&browse), "a single letter has nothing to jump to");
+}
+
+/// Navigation round trip through the Collections page, the one place the section's membership can
+/// change without the section hearing of it: Unwatched is on, a title is watched while Collections
+/// is listed (the player's read-back finds no loaded row of this listing to flag), and on the way
+/// back the Unwatched counts from before the watch must not sit over the refetched grid.
+#[test]
+fn a_watch_while_collections_is_listed_does_not_leave_old_counts_over_the_new_grid() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    assert!(browse.state.set_unwatched(true));
+    land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+    assert_eq!(shown_letters(&browse).len(), 2, "premise: the Unwatched counts are current");
+
+    assert!(browse.state.set_library_type(LibraryType::Collections));
+    // What the player's read-back does after a collection member was played: nothing of this
+    // listing is loaded, so no row is covered and the section is not flagged.
+    browse.state.apply_view_local(&ViewAt::leaf(sid, "7"), WATCHED_FACTS);
+    assert!(browse.state.set_library_type(LibraryType::Primary));
+
+    assert!(shown_letters(&browse).is_empty(),
+        "the counts from before the watch over the refetched grid: {:?}", shown_letters(&browse));
+    assert!(!rail_shown(&browse));
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    answer_letters(&mut browse, client, &[("A", 2), ("B", 4)]);
+    assert_eq!(browse.state.listing_snapshot().view().letter_start(1), 2, "the post-watch counts");
+}
+
+/// Even with no watch at all, a listing handed back by the Collections page counts again: the
+/// loan holds the view's sort, genre and menus, never the counts.
+#[test]
+fn returning_from_collections_asks_for_the_letters_again() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+    assert!(browse.state.set_library_type(LibraryType::Collections));
+    assert!(browse.state.set_library_type(LibraryType::Primary));
+    assert!(shown_letters(&browse).is_empty());
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert_eq!(browse.jobs.len(), 1, "one small request, like any fresh listing");
+}
+
+/// GUARD (green before and after): a read that SUCCEEDS with no rows (a filter matching nothing)
+/// is a landed list. The rail stays hidden and nothing is asked again.
+#[test]
+fn an_empty_answer_hides_the_rail_without_a_retry_loop() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    assert!(browse.state.set_unwatched(true));
+    land_letters(&mut browse, sid, client, &[]);
+    assert!(shown_letters(&browse).is_empty());
+    assert!(!rail_shown(&browse));
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert!(browse.jobs.is_empty(), "an empty answer is an answer: {:?}", browse.jobs);
+    assert!(!Directory::Letters.busy(&browse.adapter), "and no claim is left up");
+}

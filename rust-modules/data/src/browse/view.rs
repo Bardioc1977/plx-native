@@ -764,12 +764,20 @@ mod tests {
         assert_eq!(initial.view().letter_start(99), 7);
         owner.set_genre_by_id(Some("7"));
         owner.set_unwatched(true);
+        // The counts of the listing the grid now shows (the letters job asks with its terms).
+        super::super::seed_letter_counts_for_owner_test(&mut owner, &[("A", 2), ("B", 1)]);
+        let narrowed = owner.listing_snapshot();
+        assert!(narrowed.view().unwatched());
+        assert_eq!(narrowed.view().genre().unwrap().id, "7");
+        assert!(narrowed.view().rail_available(), "Unwatched and a genre no longer hide the rail");
+        assert_eq!(narrowed.view().letter_start(1), 2);
+        assert_eq!(narrowed.view().rail_available(), owner.rail_available());
         owner.set_sort_by_key("titleSort", true);
         let filtered = owner.listing_snapshot();
         assert!(filtered.view().unwatched());
         assert!(filtered.view().sort_desc());
         assert_eq!(filtered.view().genre().unwrap().id, "7");
-        assert!(!filtered.view().rail_available());
+        assert!(!filtered.view().rail_available(), "a descending title sort hides it");
         assert!(initial.view().genre().is_none());
         assert!(!initial.view().unwatched());
         assert!(initial.view().rail_available());

@@ -512,8 +512,14 @@ fn seed_pair(browse: &mut TestBrowse, house: BrowseSource) {
 /// read as a job, and one that is run (`run_listing_jobs`) is refused at once instead of dialling
 /// 10.0.0.1.
 pub(super) fn loopback_page_source() -> (RegisteredCleanup, TestBrowse, ServerId, &'static plx_plex::plex::Client) {
+    loopback_source_at(9, SecKind::Movie)
+}
+/// [`loopback_page_source`] with one section of `kind` (key 1) on the server at `127.0.0.1:port`:
+/// port 9 refuses at once, a test's own listener answers.
+pub(super) fn loopback_source_at(port: i32, kind: SecKind)
+    -> (RegisteredCleanup, TestBrowse, ServerId, &'static plx_plex::plex::Client) {
     plx_plex::plex::reset_servers_for_test();
-    let sid = plx_plex::plex::register_for_test("browse-ledger", "127.0.0.1", 9, "old", "cid");
+    let sid = plx_plex::plex::register_for_test("browse-ledger", "127.0.0.1", port, "old", "cid");
     assert!(plx_plex::plex::set_current(sid));
     let mut source = a_source("original", "", true);
     source.sid = sid;
@@ -521,6 +527,7 @@ pub(super) fn loopback_page_source() -> (RegisteredCleanup, TestBrowse, ServerId
     source.counts_done = true;
     let mut browse = TestBrowse::default();
     browse.seed_sources(vec![source]);
-    browse.append_sections(0, vec![(1, "Movies".into(), SecKind::Movie)]);
+    let title = if kind == SecKind::Movie { "Movies" } else { "TV Shows" };
+    browse.append_sections(0, vec![(1, title.into(), kind)]);
     (RegisteredCleanup, browse, sid, plx_plex::plex::client_for(sid).unwrap())
 }
