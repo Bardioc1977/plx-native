@@ -183,7 +183,7 @@ fn a_refused_directory_job_is_settled_by_the_next_step_and_the_one_after_asks_ag
         assert!(!which.busy(&browse.adapter), "no claim is left up without a job in flight");
         assert!(!directory_refusal_pending(&browse, which, job.addr.req.0), "the refusal is consumed");
         let state = &browse.state.states()[0];
-        assert!(!state.genres_done && !state.letters_done, "the list is still owed, as after a read that never started");
+        assert!(!state.genres_done && state.letters_owed(), "the list is still owed, as after a read that never started");
 
         client.set_token("new");
         assert_ne!(ClientKey::of(client), first, "premise: the key moved");
@@ -262,24 +262,42 @@ fn land_letters(browse: &mut TestBrowse, sid: plx_plex::plex::ServerId,
 
 const LETTERS_BODY: &str = r#"{"MediaContainer":{"Directory":[{"key":"A","title":"A","size":3},{"key":"B","title":"B","size":4}]}}"#;
 
-/// A server on a loopback port that answers `requests` requests with letters and sends each request
-/// line back. The terms of a request are what follows its `?`, minus the `X-Plex-` identity.
-fn letters_server(requests: usize) -> (i32, std::sync::mpsc::Receiver<String>) {
+/// A server on a loopback port that answers every request with letters and sends each request line
+/// back. A step also dials the server for other things (the section list), so a test reads the
+/// `firstCharacter` lines out of the stream ([`letters_requests`]). The thread ends with the process.
+fn letters_server() -> (i32, std::sync::mpsc::Receiver<String>) {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port() as i32;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        for _ in 0..requests {
-            let Ok((mut socket, _)) = listener.accept() else { return };
+        while let Ok((mut socket, _)) = listener.accept() {
             let mut line = String::new();
-            BufReader::new(&socket).read_line(&mut line).unwrap();
+            if BufReader::new(&socket).read_line(&mut line).is_err() {
+                continue;
+            }
             let _ = tx.send(line);
-            write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{LETTERS_BODY}",
-                LETTERS_BODY.len()).unwrap();
+            let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{LETTERS_BODY}",
+                LETTERS_BODY.len());
         }
     });
     (port, rx)
+}
+
+/// The next `count` `firstCharacter` request lines the server saw, other requests skipped.
+#[track_caller]
+fn letters_requests(requests: &std::sync::mpsc::Receiver<String>, count: usize) -> Vec<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut lines = Vec::new();
+    while lines.len() < count {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match requests.recv_timeout(left) {
+            Ok(line) if line.contains("/firstCharacter") => lines.push(line),
+            Ok(_) => {}
+            Err(_) => panic!("{count} letters requests expected, saw {lines:?}"),
+        }
+    }
+    lines
 }
 
 /// `(path, terms)` of a recorded request line, the terms without the `X-Plex-` identity.
@@ -310,9 +328,9 @@ fn the_letters_request_carries_the_terms_the_grid_sends() {
     ];
     for (kind, library_type, unwatched, genre, terms) in scenarios {
         let _g = plx_base::testlock::serial();
-        let (port, requests) = letters_server(2);
+        let (port, requests) = letters_server();
         let (_cleanup, mut browse, sid, client) = loopback_source_at(port, kind);
-        // The list every section asks for first, with the type's own terms only.
+        // The list every section asks for first (answered in place; only the edit's read dials).
         land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
         if library_type != LibraryType::Primary {
             assert!(browse.state.set_library_type(library_type));
@@ -329,9 +347,8 @@ fn the_letters_request_carries_the_terms_the_grid_sends() {
         assert_eq!(browse.jobs.len(), 1, "{kind:?} {library_type:?}: the edit owes the letters again");
         assert_eq!(browse.run_listing_jobs(), 1);
 
-        let timeout = std::time::Duration::from_secs(5);
-        let _first = requests.recv_timeout(timeout).expect("the first letters request");
-        let (path, asked) = path_and_terms(&requests.recv_timeout(timeout).expect("the second letters request"));
+        let lines = letters_requests(&requests, 1);
+        let (path, asked) = path_and_terms(&lines[0]);
         assert_eq!(path, "/library/sections/1/firstCharacter");
         assert_eq!(asked, terms, "{kind:?} {library_type:?}");
     }
@@ -557,4 +574,88 @@ fn an_empty_answer_hides_the_rail_without_a_retry_loop() {
     tick_directory(&mut browse, sid, LibraryWork::Letters);
     assert!(browse.jobs.is_empty(), "an empty answer is an answer: {:?}", browse.jobs);
     assert!(!Directory::Letters.busy(&browse.adapter), "and no claim is left up");
+}
+
+/// The request carries what the answer will be filed under: the letters read, the grid's terms and
+/// the key it was asked under; the genre read, the listing's type alone and no key.
+#[test]
+fn the_request_carries_the_terms_and_the_key_it_is_asked_under() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, _client) = loopback_source_at(9, SecKind::Show);
+    assert!(browse.state.set_library_type(LibraryType::Seasons));
+    assert!(browse.state.set_unwatched(true));
+
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    let (job, _port) = the_directory_job(&mut browse);
+    assert_eq!(job.req.filters, terms(&[("type", "3"), ("unwatchedLeaves", "1")]));
+    assert_eq!(job.req.letters, Some(browse.state.states()[0].letters_key()));
+    assert_eq!(job.req.letters.as_ref().map(|key| (key.unwatched, key.genre.as_deref())), Some((true, None)));
+
+    tick_directory(&mut browse, sid, LibraryWork::Genres);
+    let (job, _port) = the_directory_job(&mut browse);
+    assert_eq!(job.req.filters, terms(&[("type", "3")]), "the genre list is scoped by the type alone");
+    assert_eq!(job.req.letters, None);
+}
+
+fn terms(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+}
+
+/// A read that FAILS (an error, or a body that panicked) leaves the list as it was, hidden because it
+/// no longer describes the grid, holds the same key back for the back-off and asks again after it. A
+/// different key is never held back, and an answer ends the wait.
+#[test]
+fn a_failed_letters_read_keeps_the_rail_owed_and_is_retried_after_the_backoff() {
+    use crate::browse::letters::LETTERS_RETRY_STEPS;
+    for panics in [false, true] {
+        let _g = plx_base::testlock::serial();
+        let (_cleanup, mut browse, sid, client) = loopback_page_source();
+        land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+        assert!(browse.state.set_unwatched(true));
+
+        tick_directory(&mut browse, sid, LibraryWork::Letters);
+        let (job, port) = the_directory_job(&mut browse);
+        if panics {
+            finish_directory_with(&port, job.addr, client, job.req, || panic!("the body panicked"));
+        } else {
+            finish_directory_with(&port, job.addr, client, job.req, || None);
+        }
+        let _ = browse.pump();
+        browse.jobs.clear();
+
+        let state = &browse.state.states()[0];
+        assert_eq!(*state.letters, vec![("A".to_owned(), 3), ("B".to_owned(), 4)], "panics={panics}: untouched");
+        assert!(!state.letters_current() && state.letters_waiting(), "panics={panics}");
+        assert!(shown_letters(&browse).is_empty(), "never shown over a grid it does not describe");
+        assert!(browse.state.pump_needs_work(&browse.adapter), "the countdown must not stall on an idle loop");
+
+        // Held back for the length of the back-off, one step at a time.
+        for step in 1..LETTERS_RETRY_STEPS {
+            tick_directory(&mut browse, sid, LibraryWork::Letters);
+            assert!(browse.jobs.is_empty(), "panics={panics} step {step}: {:?}", browse.jobs);
+            let _ = browse.pump();
+            browse.jobs.clear();
+        }
+        let _ = browse.pump();
+        browse.jobs.clear();
+        tick_directory(&mut browse, sid, LibraryWork::Letters);
+        assert_eq!(browse.jobs.len(), 1, "panics={panics}: asked again once the back-off is spent");
+        answer_letters(&mut browse, client, &[("A", 1)]);
+        assert!(browse.state.states()[0].letters_current());
+        assert!(!browse.state.states()[0].letters_waiting());
+
+        // A fresh failure, then an edit: the key changed, so nothing waits.
+        assert!(browse.state.set_unwatched(false));
+        a_genre_menu(&mut browse);
+        assert!(browse.state.set_genre_by_id(Some("7")));
+        tick_directory(&mut browse, sid, LibraryWork::Letters);
+        let (job, port) = the_directory_job(&mut browse);
+        finish_directory_with(&port, job.addr, client, job.req, || None);
+        let _ = browse.pump();
+        browse.jobs.clear();
+        assert!(browse.state.states()[0].letters_waiting());
+        assert!(browse.state.set_unwatched(true));
+        tick_directory(&mut browse, sid, LibraryWork::Letters);
+        assert_eq!(browse.jobs.len(), 1, "panics={panics}: a different key is asked at once");
+    }
 }

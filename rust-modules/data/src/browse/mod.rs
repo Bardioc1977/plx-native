@@ -62,6 +62,7 @@
 //! that replaces it, and it holds for every source that lands later rather than only for the
 //! second call.
 use plx_plex::plex::{ClientKeys, SectionQuery, ServerId};
+use letters::LettersKey;
 use saved_view::ViewField;
 use crate::pms::{parse_item, PmsMovie};
 use crate::stores::page_cache::{kept_when_over_budget, Keep, PAGE};
@@ -539,6 +540,7 @@ pub enum SecFetch {
     Failed,
 }
 
+mod letters;
 pub mod listing_jobs;
 pub mod record;
 mod saved_view;
@@ -597,10 +599,16 @@ struct SecState {
     /// The same for the saved genre: false only while its existence check could not be read, so
     /// the library opened unfiltered but the record still holds the genre.
     genre_resolved: bool,
-    /// per-letter (label, count) in titleSort order, from `/firstCharacter` — the letter rail.
-    /// Counts describe the UNFILTERED title listing, so the rail only shows in that state.
+    /// per-letter (label, count) in titleSort order, from `/firstCharacter` — the letter rail. They
+    /// count the listing [`Self::letters_for`] names and are shown only while that is the listing the
+    /// grid shows ([`SecState::letters_current`], `letters.rs`).
     letters: Arc<Vec<(String, i64)>>,
-    letters_done: bool,
+    /// What `letters` counted; `None` = no list has landed (or it was forgotten).
+    letters_for: Option<LettersKey>,
+    /// Moves when the server's membership changed under the section ([`SecState::membership_changed`]).
+    letters_gen: u32,
+    /// A failed letters read of this key, and the steps left before it is asked again.
+    letters_backoff: Option<(LettersKey, u32)>,
     /// The grid's own view (sort, genre, menus, letters), set aside while the section is on the
     /// Collections listing and put back when it returns to the type it was on ([`LoanedView`]).
     loaned: Option<LoanedView>,
@@ -622,9 +630,10 @@ struct SecState {
 }
 
 /// What the Collections page borrows the section's single query from: the grid's sort, genre and
-/// the menus and letter counts that describe them. `set_library_type` resets all of it for the
-/// new type, so the page that listed Films, sorted by Date Added and filtered to Drama, would
-/// come back title-sorted and unfiltered; the loan hands it back whole instead.
+/// the menus that describe them. `set_library_type` resets all of it for the new type, so the page
+/// that listed Films, sorted by Date Added and filtered to Drama, would come back title-sorted and
+/// unfiltered; the loan hands it back whole instead. The letter counts are NOT part of it: what the
+/// section lists can change while Collections is shown, so they are asked again on the way back.
 #[derive(Clone)]
 struct LoanedView {
     library_type: LibraryType,
@@ -636,8 +645,6 @@ struct LoanedView {
     genres_done: bool,
     sort_resolved: bool,
     genre_resolved: bool,
-    letters: Arc<Vec<(String, i64)>>,
-    letters_done: bool,
 }
 
 /// A section's items, CHUNKED BY PAGE (restructure phase 4, the O(result) rule of spec §5.2 —
@@ -811,7 +818,9 @@ impl Default for SecState {
             sort_resolved: true,
             genre_resolved: true,
             letters: Arc::default(),
-            letters_done: false,
+            letters_for: None,
+            letters_gen: 0,
+            letters_backoff: None,
             loaned: None,
             hubs: Default::default(),
             fetch: SecFetch::Loading,
@@ -837,6 +846,11 @@ impl SecState {
         self.total = -1;
         self.items.clear();
         self.cursor = None;
+        // A stale flag spent here is what the letters hear of a membership change that was
+        // flagged rather than reset at once (`apply_view_local`, `listings_changed`).
+        if self.membership_stale {
+            self.letters_gen = self.letters_gen.wrapping_add(1);
+        }
         self.membership_stale = false;
     }
     fn query_filters(&self, section_kind: SecKind) -> Vec<(String, String)> {
@@ -1070,6 +1084,7 @@ impl BrowseState {
     pub fn pump_needs_work(&self, adapter: &BrowseAdapter) -> bool {
         if self.discovery_needs_pump(adapter)
             || self.retry_cd > 0
+            || self.cur_state().is_some_and(SecState::letters_waiting)
             || adapter.page.has_mail()
             || adapter.genres.has_mail()
             || adapter.letters.has_mail()
@@ -1315,6 +1330,9 @@ impl BrowseState {
         }
         let from = state.library_type;
         state.library_type = library_type;
+        // Counts describe one metadata type, and what the section lists can change while the
+        // Collections page is up: every type change drops them, and the listing it lands on asks.
+        state.forget_letters();
         // The Collections page borrows the listing: the view it borrowed it from comes back as it
         // was, on the way out, and is set aside on the way in.
         if library_type == LibraryType::Collections {
@@ -1322,8 +1340,7 @@ impl BrowseState {
                 library_type: from, sort_idx: state.sort_idx, sort_desc: state.sort_desc,
                 genre: state.genre.clone(), sorts: state.sorts.clone(), genres: state.genres.clone(),
                 genres_done: state.genres_done, sort_resolved: state.sort_resolved,
-                genre_resolved: state.genre_resolved, letters: state.letters.clone(),
-                letters_done: state.letters_done,
+                genre_resolved: state.genre_resolved,
             });
         } else if from == LibraryType::Collections {
             if let Some(view) = state.loaned.take().filter(|view| view.library_type == library_type) {
@@ -1335,8 +1352,6 @@ impl BrowseState {
                 state.genres_done = view.genres_done;
                 state.sort_resolved = view.sort_resolved;
                 state.genre_resolved = view.genre_resolved;
-                state.letters = view.letters;
-                state.letters_done = view.letters_done;
                 self.requery();
                 return true;
             }
@@ -1352,8 +1367,6 @@ impl BrowseState {
         // A new listing starts a new restore, and the viewer just chose it.
         state.sort_resolved = true;
         state.genre_resolved = true;
-        state.letters = Arc::default();
-        state.letters_done = false;
         self.requery();
         true
     }
@@ -1412,7 +1425,7 @@ impl BrowseState {
                     hit |= !state.membership_stale;
                     state.membership_stale = true;
                 } else {
-                    state.reset_listing();
+                    state.membership_changed();
                     hit = true;
                 }
             }
@@ -1455,7 +1468,7 @@ impl BrowseState {
             }
             let Some(state) = self.states.get_mut(i) else { continue };
             if i != current {
-                state.reset_listing();
+                state.membership_changed();
                 hit = true;
             } else if state.total >= 0 || state.fetch == SecFetch::Loading {
                 hit |= !state.membership_stale;
@@ -1694,11 +1707,13 @@ impl BrowseState {
         jobs: &mut Vec<crate::stores::StoreJob>, which: listing_jobs::Directory) {
         self.settle_refused_reads(adapter);
         let current = self.cur();
-        let done = self.cur_state().map(|state| match which {
-            listing_jobs::Directory::Genres => state.genres_done,
-            listing_jobs::Directory::Letters => state.letters_done,
+        // Genres are asked once per listing type; the letters are asked whenever the list on hand
+        // does not describe the grid ([`SecState::letters_owed`]).
+        let owed = self.cur_state().map(|state| match which {
+            listing_jobs::Directory::Genres => !state.genres_done,
+            listing_jobs::Directory::Letters => state.letters_owed(),
         });
-        if self.states.get(current).is_none() || done.unwrap_or(true) {
+        if self.states.get(current).is_none() || !owed.unwrap_or(false) {
             return;
         }
         let Some(sid) = self.section_sid(current) else {
@@ -1711,8 +1726,15 @@ impl BrowseState {
             return;
         }
         let section = self.sections[current].key;
-        let library_type = self.states[current].library_type;
-        let metadata_type = library_type.plex_type(self.sections[current].kind);
+        let kind = self.sections[current].kind;
+        let state = &self.states[current];
+        let library_type = state.library_type;
+        // The letters are asked with the terms the grid's pages are, from the same source, and keyed
+        // by them; the genre list is scoped by the listing's type alone.
+        let (filters, letters) = match which {
+            listing_jobs::Directory::Genres => (library_type.type_terms(kind), None),
+            listing_jobs::Directory::Letters => (state.query_filters(kind), Some(state.letters_key())),
+        };
         let id = match which {
             listing_jobs::Directory::Genres => &mut self.genres_req,
             listing_jobs::Directory::Letters => &mut self.letters_req,
@@ -1724,7 +1746,7 @@ impl BrowseState {
             plx_machine::job::Job {
                 addr: listing_jobs::listing_addr(id),
                 req: listing_jobs::BrowseDirectoryReq::new(
-                    sid, key, self.table_epoch(), current, section, library_type, metadata_type, which),
+                    sid, key, self.table_epoch(), current, section, library_type, filters, letters, which),
             },
             listing_jobs::BrowseDirectoryPort::of(adapter, which),
         ));
@@ -1732,7 +1754,7 @@ impl BrowseState {
     /// Settle the reads the runner refused since the last step: the claim went back in the call that
     /// refused (`Port::refused`), so what is left is the refusal's record, which is consumed here
     /// and never recorded anywhere. A directory read that never started leaves its list owed
-    /// (`genres_done` / `letters_done` are only set by a landing), a page read that never started
+    /// (`genres_done` is only set by a landing, and the letters stay not current until one), a page read that never started
     /// leaves the first missing page missing, so the state is already the one such a read leaves and
     /// the next ask is the same step's own. The loop is woken because nothing else would: the
     /// claim that held the pump quiet is down.
@@ -2026,7 +2048,7 @@ impl BrowseState {
             Some(sort) => sort.key == "titleSort" && !state.sort_desc,
             None => true,
         };
-        title_asc && !state.unwatched && state.genre.is_none() && state.letters.len() > 1
+        title_asc && state.letters_current() && state.letters.len() > 1
     }
     fn discovery_state(&self) -> SecFetch {
         if !self.sections.is_empty() || self.sources.iter().all(|source| source.sections_done) {
@@ -2694,7 +2716,7 @@ impl BrowseState {
         &mut self,
         gate: &plx_machine::landgate::Gate,
         fetch: &crate::stores::Fetch<DirectoryResult<T>>,
-        apply: impl FnOnce(&mut SecState, Vec<T>),
+        apply: impl FnOnce(&mut SecState, Vec<T>, bool, Option<LettersKey>),
     ) -> bool {
         // DUMP MODE: owed while this directory's own claim is held (genre and letters each have
         // one), per mailbox. The take lowers the claim with it.
@@ -2705,14 +2727,14 @@ impl BrowseState {
         if result.epoch != self.table_epoch() {
             return false;
         }
-        let DirectoryResult { sec, client, token_gen, library_type, list, .. } = result;
+        let DirectoryResult { sec, client, token_gen, library_type, list, ok, letters, .. } = result;
         plx_plex::plex::commit_if_current(client.id(), client, token_gen, || {
             if self.section_sid(sec) == Some(client.id()) {
                 if let Some(state) = self.state_mut(sec) {
                     if state.library_type != library_type {
                         return false;
                     }
-                    apply(state, list);
+                    apply(state, list, ok, letters);
                     return true;
                 }
             }
@@ -2727,7 +2749,7 @@ impl BrowseState {
     #[cfg(test)]
     #[track_caller]
     fn land_directory_owned<T>(&mut self, fetch: &crate::stores::Fetch<DirectoryResult<T>>,
-        apply: impl FnOnce(&mut SecState, Vec<T>)) -> bool {
+        apply: impl FnOnce(&mut SecState, Vec<T>, bool, Option<LettersKey>)) -> bool {
         self.land_directory_owned_with_gate(plx_machine::landgate::fixture_gate(), fetch, apply)
     }
     /// Ask for the first page the wanted window is missing, if no page read is out. Nothing is
@@ -2817,6 +2839,10 @@ impl BrowseState {
     ) -> crate::stores::StoreOutcome {
         let mut changed = false;
         self.retry_cd = self.retry_cd.saturating_sub(1);
+        let current = self.cur();
+        if let Some(state) = self.states.get_mut(current) {
+            state.tick_letters_backoff();
+        }
         let discovery = self.land_discovery_owned_with_gate(adapter, gate);
         changed |= discovery.changed;
         let endpoints = discovery.endpoints;
@@ -2825,20 +2851,13 @@ impl BrowseState {
         changed |= self.hubs_tick_all(adapter, keys, jobs);
         changed |= self.land_directory_owned_with_gate(
             gate,
-            &adapter.genres, |state, list| {
+            &adapter.genres, |state, list, _, _| {
             state.genres_done = true;
             if state.genres.is_empty() {
                 state.genres = Arc::new(list);
             }
         });
-        changed |= self.land_directory_owned_with_gate(
-            gate,
-            &adapter.letters, |state, list| {
-                state.letters_done = true;
-                if state.letters.is_empty() {
-                    state.letters = Arc::new(list);
-                }
-            });
+        changed |= self.land_letters_owned(gate, &adapter.letters);
         // DUMP MODE: owed while the listing page's claim is held. The take lowers it with it.
         // The wanted window, read before the landing borrows the section table: the grid's
         // visible rows, the focused slot's page and the page a restore lands on.
@@ -3169,6 +3188,12 @@ struct DirectoryResult<T> {
     token_gen: u32,
     library_type: LibraryType,
     list: Vec<T>,
+    /// Did the read answer? False for a read that failed or panicked: `list` is then empty because
+    /// there was nothing to project, not because the server listed nothing.
+    ok: bool,
+    /// The key a letters read was asked under ([`LettersKey`]); `None` for the genre list, which the
+    /// grid's terms do not scope.
+    letters: Option<LettersKey>,
 }
 
 /// What a source-discovery worker brings back, per SOURCE — named by its index, which appending
@@ -3968,7 +3993,8 @@ pub fn seed_registered_table_for_owner_test(
             });
     }
     for section in &mut state.states {
-        section.letters_done = true;
+        let key = section.letters_key();
+        section.land_letters(key, Vec::new());
     }
 }
 
@@ -3992,13 +4018,14 @@ pub fn seed_letter_counts_for_owner_test(
     plx_base::testlock::assert_held("an owned browse section table (seed_letter_counts_for_test)");
     let current = state.cur();
     if let Some(section) = state.state_mut(current) {
-        section.letters = Arc::new(
+        let key = section.letters_key();
+        section.land_letters(
+            key,
             letters
                 .iter()
                 .map(|(label, count)| ((*label).into(), *count))
                 .collect(),
         );
-        section.letters_done = true;
     }
 }
 
@@ -4008,8 +4035,7 @@ pub fn owe_letters_for_owner_test(state: &mut BrowseState) {
     plx_base::testlock::assert_held("an owned browse section table (owe_letters_for_test)");
     let current = state.cur();
     if let Some(section) = state.state_mut(current) {
-        section.letters = Arc::default();
-        section.letters_done = false;
+        section.forget_letters();
     }
 }
 
@@ -4059,6 +4085,7 @@ pub fn queue_genre_for_owner_test(
         epoch: state.table_epoch(), sec, client, token_gen: client.token_gen(),
         library_type: state.states[sec].library_type,
         list: vec![GenreEntry { id: "new".into(), title: "New Genre".into() }],
+        ok: true, letters: None,
     }, |_| true);
 }
 

@@ -265,7 +265,7 @@ pub(super) fn registered_directory_source(
     }]);
     state.letters = Arc::new(vec![("N".into(), 7)]);
     state.genres_done = false;
-    state.letters_done = false;
+    state.letters_for = None;
     (cleanup, browse, sid, client)
 }
 pub(super) fn queue_success_from(
@@ -318,6 +318,8 @@ pub(super) fn queue_directories_from(
             id: "stale".into(),
             title: "Stale Genre".into(),
         }],
+        ok: true,
+        letters: None,
     }, |_| true);
     browse.adapter.letters.post(DirectoryResult {
         library_type: browse.state.states[0].library_type,
@@ -326,17 +328,16 @@ pub(super) fn queue_directories_from(
         client,
         token_gen,
         list: vec![("S".into(), 99)],
+        ok: true,
+        letters: Some(browse.state.states[0].letters_key()),
     }, |_| true);
     browse.adapter.genres.claim(0);
     browse.adapter.letters.claim(0);
-    browse.state.land_directory_owned(&browse.adapter.genres, |st, list| {
+    browse.state.land_directory_owned(&browse.adapter.genres, |st, list, _, _| {
         st.genres_done = true;
         st.genres = Arc::new(list);
     });
-    browse.state.land_directory_owned(&browse.adapter.letters, |st, list| {
-        st.letters_done = true;
-        st.letters = Arc::new(list);
-    });
+    browse.state.land_letters_for_test(&browse.adapter.letters);
 }
 pub(super) fn assert_new_directories_survive(browse: &TestBrowse) {
     let state = browse.state.states().first().unwrap();
@@ -345,7 +346,7 @@ pub(super) fn assert_new_directories_survive(browse: &TestBrowse) {
     assert_eq!(state.genres[0].title, "New Genre");
     assert_eq!(*state.letters, vec![("N".into(), 7)]);
     assert!(!state.genres_done);
-    assert!(!state.letters_done);
+    assert!(state.letters_for.is_none(), "the registered fixture's list is owed again, as it was");
 }
 // ---- the three-state fetch machine ---------------------------------------------------------
 //
