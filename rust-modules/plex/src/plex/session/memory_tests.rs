@@ -905,3 +905,50 @@ fn a_session_stamps_the_offsets_it_records_with_its_owner_stamp() {
     assert_eq!(session.prefs.subtitle_offsets[0].account, OWNER_7);
     assert_eq!(session.prefs.subtitle_offsets.get("u", OWNER_7, &offset_key("rk-1")).map(|e| e.offset_ms), Some(500));
 }
+
+// ---- #830 (separate commit): the login-over-another-account check honours both spellings --------
+
+fn admin(id: i64, uuid: &str) -> Vec<HomeUserRef> {
+    vec![HomeUserRef { id, uuid: uuid.into(), title: "Synthetic".into(), admin: true, ..Default::default() }]
+}
+
+/// `same_owner` is the check the login door asks ("is this the account that was signed in?"). A
+/// roster written before ids existed names its admin by uuid only; a refresh later brings the id of
+/// the SAME admin. Compared by the primary spelling alone, that read as another account and cleared
+/// the pins, searches and library memory.
+#[test]
+fn the_same_admin_is_the_same_owner_in_either_spelling() {
+    assert!(same_owner(&admin(0, "synthetic-owner-7"), &admin(7, "synthetic-owner-7")), "id-less, then the id arrives");
+    assert!(same_owner(&admin(7, "synthetic-owner-7"), &admin(0, "synthetic-owner-7")), "and the other way round");
+    assert!(same_owner(&admin(7, "synthetic-owner-7"), &admin(7, "synthetic-owner-7")), "control: identical");
+    assert!(same_owner(&admin(7, ""), &admin(7, "synthetic-owner-7")), "the id alone is the account");
+    assert!(!same_owner(&admin(7, "synthetic-owner-7"), &admin(8, "synthetic-owner-8")), "another admin");
+    assert!(!same_owner(&admin(0, "synthetic-owner-7"), &admin(8, "synthetic-owner-8")), "another admin, one spelling");
+    assert!(!same_owner(&admin(0, ""), &admin(0, "")), "an admin that names nothing is unknown, never equal");
+    assert!(!same_owner(&Vec::new(), &admin(7, "synthetic-owner-7")), "an empty roster is unknown");
+    assert!(!same_owner(&admin(7, "synthetic-owner-7"), &Vec::new()));
+}
+
+/// The same check through the login door: pins, searches and library memory survive a sign-in whose
+/// roster respells the SAME admin, and still go for another admin.
+#[test]
+fn a_login_that_respells_the_same_admin_keeps_pins_searches_and_library_memory() {
+    let _serial = plx_base::testlock::serial();
+    let _root = TempSession::new("relogin-respelled-admin");
+    let mut first = Session {
+        client_id: "cid-1".into(), account_token: "token-a".into(), home_users: admin(0, "synthetic-owner-7"),
+        home_pins: vec![HomePins { user: String::new(), asked: true, ..Default::default() }],
+        recent_searches: vec![RecentSearches { user: String::new(), terms: vec!["synthetic term".into()], ..Default::default() }],
+        ..Default::default()
+    };
+    first.set_view_for("u", LibraryView { machine_id: "m".into(), key: 1, sort: "addedAt".into(), desc: true, ..Default::default() });
+    let kept = |s: &Session| (s.home_pins.len(), s.recent_searches.len(), s.prefs.library_views.len());
+    save(&first);
+    assert_eq!(kept(&load()), (1, 1, 1), "control: all three are stored");
+    login_with_roster("token-b", admin(7, "synthetic-owner-7"));
+    assert_eq!(kept(&load()), (1, 1, 1), "the same admin, now with its id: kept");
+    login_with_roster("token-c", admin(0, "synthetic-owner-7"));
+    assert_eq!(kept(&load()), (1, 1, 1), "and respelled back: kept");
+    login_with_roster("token-d", admin(8, "synthetic-owner-8"));
+    assert_eq!(kept(&load()), (0, 0, 0), "another admin clears them");
+}

@@ -4259,8 +4259,12 @@ pub fn owner_identities(roster: &[HomeUserRef]) -> Vec<String> {
 }
 
 /// Do two rosters name the SAME account? Fails safe: an identity either side cannot name is "no".
+/// Compared by EVERY spelling of the admin ([`owner_identities`]): the same admin named by uuid in a
+/// roster written before ids existed and by id (and uuid) in a later one is the same account, which
+/// is also how the owner stamp treats it (the aliases are adopted into one stamp).
 pub fn same_owner(a: &[HomeUserRef], b: &[HomeUserRef]) -> bool {
-    matches!((owner_identity(a), owner_identity(b)), (Some(x), Some(y)) if x == y)
+    let (a, b) = (owner_identities(a), owner_identities(b));
+    a.iter().any(|name| b.contains(name))
 }
 
 /// What the routine-authority write actually did — the canonical verdict beside the
