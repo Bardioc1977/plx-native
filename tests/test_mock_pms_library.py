@@ -254,6 +254,69 @@ class LibraryRail(unittest.TestCase):
             server.server_close()
 
 
+class LetterRailFilters(unittest.TestCase):
+    """`firstCharacter` takes the same terms as `/all` (docs/pms-api.md, "Letter index"): its counts
+    describe the filtered listing, so the app's jump offsets (prefix sums) land on the right title."""
+
+    def counts(self, pms, section, terms):
+        query = f"?{terms}" if terms else ""
+        return get(pms, f"/library/sections/{section}/firstCharacter{query}")["Directory"]
+
+    def total(self, pms, section, terms):
+        joined = (terms + "&" if terms else "")
+        return get(pms, f"/library/sections/{section}/all?{joined}"
+                        "X-Plex-Container-Start=0&X-Plex-Container-Size=0")["totalSize"]
+
+    def assert_offsets_land_on_their_letter(self, pms, section, terms):
+        """Sum == totalSize, and the item at each prefix-summed offset starts that letter."""
+        letters = self.counts(pms, section, terms)
+        self.assertEqual(sum(r["size"] for r in letters), self.total(pms, section, terms), terms)
+        joined = (terms + "&" if terms else "")
+        offset = 0
+        for letter in letters:
+            first = get(pms, f"/library/sections/{section}/all?{joined}sort=titleSort"
+                             f"&X-Plex-Container-Start={offset}&X-Plex-Container-Size=1")["Metadata"][0]
+            self.assertTrue(first["titleSort"].startswith(letter["title"] + " "), (terms, letter, offset))
+            offset += letter["size"]
+        return letters
+
+    def test_counts_follow_unwatched_genre_and_both_for_movies(self):
+        pms = MockPms(Library(movies=60, rail_fixture=True))
+        genre = next(iter(pms.lib.genres.values()))["id"]
+        plain = self.assert_offsets_land_on_their_letter(pms, 1, "")
+        for terms in ("unwatched=1", f"genre={genre}", f"unwatched=1&genre={genre}"):
+            with self.subTest(terms=terms):
+                filtered = self.assert_offsets_land_on_their_letter(pms, 1, terms)
+                self.assertLess(sum(r["size"] for r in filtered), sum(r["size"] for r in plain))
+        by_letter = {r["title"]: r["size"] for r in self.counts(pms, 1, "unwatched=1")}
+        self.assertTrue(any(by_letter.get(r["title"], 0) < r["size"] for r in plain),
+                        "the fixture has watched titles, so some letter shrinks")
+
+    def test_shows_are_scoped_by_type_and_unwatched_leaves(self):
+        lib = Library(movies=0, rail_fixture=True)
+        show = next(it for it in lib.items.values() if it["type"] == "show")
+        for episode in lib.leaves(show["ratingKey"] if isinstance(show["ratingKey"], int) else int(show["ratingKey"])):
+            episode["viewCount"] = 1
+        lib._roll_up()
+        pms = MockPms(lib)
+        everything = self.counts(pms, 2, "type=2")
+        for terms in ("type=2&unwatchedLeaves=1", "type=2&unwatched=1"):
+            with self.subTest(terms=terms):
+                filtered = self.assert_offsets_land_on_their_letter(pms, 2, terms)
+                self.assertLess(sum(r["size"] for r in filtered), sum(r["size"] for r in everything),
+                                "the fixture has a fully watched show")
+
+    def test_a_filter_that_matches_nothing_answers_an_empty_directory(self):
+        pms = MockPms(Library(movies=60, rail_fixture=True))
+        self.assertEqual(self.counts(pms, 1, "genre=999999"), [])
+        self.assertEqual(self.total(pms, 1, "genre=999999"), 0)
+
+    def test_collections_keep_their_own_counts(self):
+        pms = MockPms(Library())
+        with_unwatched = self.counts(pms, 1, "type=18&unwatched=1")
+        self.assertEqual(with_unwatched, self.counts(pms, 1, "type=18"))
+
+
 class ResumeFixture(unittest.TestCase):
     """`--resume-fixture`: a show that has been watched up to S12E14, and one that has not."""
 
