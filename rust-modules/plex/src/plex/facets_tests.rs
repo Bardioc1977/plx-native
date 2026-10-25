@@ -261,3 +261,28 @@ fn a_reserved_name_is_no_term() {
     }
     assert!(valid_facet_name("unwatched"), "…while it is still a facet the server may advertise");
 }
+
+#[test]
+fn every_parameter_the_app_puts_on_a_listing_request_is_reserved() {
+    use super::facets::valid_term_name;
+    // the listing's own (`type`, `sort`, the window, the includes), the PMS query language's (`group`,
+    // `limit`, `push`, `pop`, `or`, `sourceType`, `sectionId`, `filter`, `title`), the other reads
+    // that share the query builder, and the headers' family
+    for name in [
+        "type", "sort", "sectionId", "sourceType", "group", "limit", "push", "pop", "or", "filter", "title",
+        "query", "guid", "count", "tagId", "firstCharacter", "uri", "unwatched", "unwatchedLeaves",
+        "includeMeta", "includeCollections", "includeGuids", "includeExternalMedia", "includeAdvanced",
+        "includeOnDeck", "includeChapters", "includeMarkers", "includePreferences", "includeRole",
+        "includeMedia", "includeExtras", "includeAfter", "includeBefore", "includeDetails",
+        "excludeFields", "excludeElements", "onlyTransient", "checkFiles",
+    ] {
+        assert!(!valid_term_name(name), "{name}");
+    }
+    // …and the family is a family: a future include*/exclude* parameter is reserved unseen
+    for name in ["includeSomethingNew", "excludeAnything"] {
+        assert!(!valid_term_name(name), "{name}");
+    }
+    for ok in ["genre", "year", "decade", "contentRating", "show.genre", "inclusion", "order", "included", "audioLayout"] {
+        assert!(valid_term_name(ok), "{ok}");
+    }
+}

@@ -353,3 +353,29 @@ fn a_switch_and_a_request_parameter_are_refused_by_name_before_the_menu_has_land
     ask(&mut browse, sid, "studio", 50);
     assert!(job_left(&mut browse).is_some());
 }
+
+#[test]
+fn once_the_menu_is_known_only_an_advertised_facet_is_asked_for() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, _client) = loopback_source_at(9, SecKind::Movie);
+    // before the menu: the genre (pre-vouched) and any name that can be a term; never a reserved one
+    for (name, asked) in [("genre", true), ("studio", true), ("limit", false), ("includeMeta", false), ("a/b", false)] {
+        ask(&mut browse, sid, name, 50);
+        assert_eq!(job_left(&mut browse).is_some(), asked, "{name} before the menu");
+        browse.adapter.values.clear();
+    }
+    {
+        let state = browse.state.state_mut(0).unwrap();
+        state.facets = Arc::new(vec![
+            plx_plex::plex::Facet { name: "studio".into(), kind: plx_plex::plex::FacetKind::List, title: "Studio".into() },
+            plx_plex::plex::Facet { name: "hdr".into(), kind: plx_plex::plex::FacetKind::Boolean, title: "HDR".into() },
+        ]);
+        state.facets_known = true;
+        state.values.clear();
+    }
+    for (name, asked) in [("studio", true), ("refresh", false), ("genre", false), ("hdr", false)] {
+        ask(&mut browse, sid, name, 50);
+        assert_eq!(job_left(&mut browse).is_some(), asked, "{name} once the menu is known: only what it advertises");
+        browse.adapter.values.clear();
+    }
+}
