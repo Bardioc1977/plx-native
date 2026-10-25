@@ -4290,6 +4290,10 @@ mod localized_type_tests {
 }
 
 #[cfg(test)]
+#[path = "browse_section_kind_tests.rs"]
+mod section_kind_tests;
+
+#[cfg(test)]
 #[path = "browse_view_ledger_tests.rs"]
 mod view_ledger_tests;
 
