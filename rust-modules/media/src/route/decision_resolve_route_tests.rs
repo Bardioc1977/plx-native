@@ -2750,3 +2750,72 @@ fn forced_direct_play_refuses_dca_without_a_dts_row() {
     assert_eq!(codec, "DTS");
     assert!(!plan.url.contains("/library/parts/"), "no part URL may reach the Load: {}", plan.url);
 }
+
+/// The detail page's facts row is a read-out of what the device would do NOW, so it reads the same
+/// start value a play would (`devcaps::start_caps`: the boot snapshot less the install's stored
+/// refusals), not the boot snapshot. A set that announces DTS 5.1 and has watched its pipeline refuse
+/// it must not promise "Direct Play" under Force Direct Play.
+#[test]
+fn the_facts_row_reads_the_start_value() {
+    let mut ps = crate::route::PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let _session = plx_plex::plex::session::TempSession::new("facts-row-start-value");
+    let _set = plx_platform::devcaps::firmware_on_this_thread_for_test(
+        "fw",
+        "B",
+        plx_platform::devcaps::Caps {
+            audio: "aac,ac3,eac3,dts".into(),
+            audio_channels: [("dts".into(), 6)].into(),
+            ..plx_platform::devcaps::Caps::assumed()
+        },
+    );
+    restore_direct_play_mode(DirectPlayMode::Forced);
+    let detail = plx_data::metadata::Detail {
+        vcodec: "h264".into(),
+        part: "/library/parts/1/2/file.mkv".into(),
+        width: 1920,
+        height: 1080,
+        audio: vec![plx_data::metadata::Stream { codec: "dca".into(), channels: 6, ..Default::default() }],
+        ..Default::default()
+    };
+    assert_eq!(playback_preview(&detail), Some(Preview::DirectPlay), "sanity: the set decodes DTS 5.1 and no row says otherwise");
+
+    let dts6 = plx_platform::devcaps::Facet::Audio { codec: "dca".into(), channels: 6 };
+    assert!(plx_plex::plex::session::record_named_refusal(&dts6), "the write is queued");
+    plx_base::storage_worker::drain_for_test();
+    assert_eq!(plx_plex::plex::session::peek().native_audio_refused().len(), 1, "the row is stored");
+    assert_ne!(
+        playback_preview(&detail),
+        Some(Preview::DirectPlay),
+        "the facts row promised Direct Play for a combination this install watched the pipeline refuse"
+    );
+    restore_direct_play_mode(DirectPlayMode::Auto);
+}
+
+/// The track menu's "converted by your server" mark reads the ATTEMPT, so a combination the install
+/// learned the pipeline refuses reads as converted on the very play that converts it, while the
+/// boot snapshot (`devcaps::caps`) still announces it. Forced Direct Play converts nothing.
+#[test]
+fn the_converted_mark_reads_the_attempt_not_the_boot() {
+    let mut ps = crate::route::PlaybackSession::IDLE;
+    let _g = fresh_registry(&mut ps);
+    let _set = plx_platform::devcaps::firmware_on_this_thread_for_test(
+        "fw",
+        "B",
+        plx_platform::devcaps::Caps {
+            audio: "aac,ac3,eac3,dts".into(),
+            audio_channels: [("dts".into(), 6)].into(),
+            ..plx_platform::devcaps::Caps::assumed()
+        },
+    );
+    let boot = plx_platform::devcaps::caps();
+    ps.begin_attempt(boot.clone());
+    assert!(!audio_converted_by_server(&ps, "dts", 6, 48_000), "sanity: the boot value decodes DTS 5.1");
+    let dts6 = plx_platform::devcaps::Facet::Audio { codec: "dts".into(), channels: 6 };
+    ps.begin_attempt(std::sync::Arc::new(boot.without(&dts6)));
+    assert!(audio_converted_by_server(&ps, "dts", 6, 48_000), "the attempt lost DTS 5.1: the server converts it");
+    assert!(!audio_converted_by_server(&ps, "ac3", 6, 48_000), "an untouched codec still plays");
+    assert!(plx_platform::devcaps::caps().audio_supports("dts", 6), "the boot value is untouched");
+    ps.direct_play_mode = DirectPlayMode::Forced;
+    assert!(!audio_converted_by_server(&ps, "dts", 6, 48_000), "Forced Direct Play refuses instead of converting");
+}
