@@ -245,6 +245,17 @@ impl FlightRig {
         ps.cur_audio = Some(CarriedAudio { codec: codec.into(), channels, ..CarriedAudio::named(960_002, 1) });
     }
 
+    /// Declare the video the playing route feeds the pipeline, as the plan of a direct play of a
+    /// `width`x`height` `codec` stream would have: `stream_vcodec`, `src_vcodec` and the source
+    /// raster in `cur_src`, which the failed-open ladder's facts read ([`stream_video`]). The rig's
+    /// own route declares HEVC at an unmeasured (0x0) raster, which names no video facet.
+    pub(crate) fn declare_video(ps: &mut PlaybackSession, codec: &str, width: i64, height: i64) {
+        ps.stream_vcodec = codec.into();
+        ps.src_vcodec = codec.into();
+        ps.cur_src.1 = width;
+        ps.cur_src.2 = height;
+    }
+
     /// Offer the Original the playing route can be restored to. A REMUX candidate (`direct ==
     /// false`) makes the recovery's PMS half a real `/decision`, which is what a frame must not
     /// wait on.
@@ -257,6 +268,20 @@ impl FlightRig {
     pub(crate) fn offer_original_carrying(ps: &mut PlaybackSession, direct: bool, codec: &str, channels: i64) {
         let audio = CarriedAudio { codec: codec.into(), channels, ..CarriedAudio::named(960_002, 1) };
         ps.auto_original = Some(AutoOriginalCandidate { direct, audio: Some(audio), ..test_original_candidate(None) });
+    }
+
+    /// [`FlightRig::offer_original`] whose candidate carries the source video `vcodec` (the offer's
+    /// own default is HEVC): the video the Original would feed, which the climb re-checks against
+    /// the attempt after a recovery took a refused video raster out of it.
+    pub(crate) fn offer_original_of_video(ps: &mut PlaybackSession, direct: bool, vcodec: &str) {
+        ps.auto_original = Some(AutoOriginalCandidate { direct, vcodec: vcodec.into(), ..test_original_candidate(None) });
+    }
+
+    /// Why the Original candidate is not stored, when a recovery or a pick recorded a reason (the
+    /// menu's decline line): a candidate dropped because its video needs converting reads
+    /// [`OriginalDeclined::VideoNeedsConverting`].
+    pub(crate) fn original_declined(ps: &PlaybackSession) -> Option<OriginalDeclined> {
+        ps.original_declined
     }
 
     /// Whether the stored Original candidate would feed the Part itself on a recovery (`None` when
