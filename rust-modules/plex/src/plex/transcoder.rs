@@ -336,7 +336,7 @@ fn profile_for(caps: &plx_platform::devcaps::Caps) -> String {
 
 /// The profile for THIS device — [`profile_for`] over the boot-probed caps snapshot.
 fn profile_extra(delivery: TranscodeDelivery) -> String {
-    profile_for_delivery(plx_platform::devcaps::caps(), delivery)
+    profile_for_delivery(&plx_platform::devcaps::caps(), delivery)
 }
 
 /// The forced-direct-play profile: the engine's own formats, no device limits, no transcode
@@ -375,7 +375,7 @@ fn profile_codec_name(codec: &str) -> &str {
 }
 
 fn forced_direct_profile() -> String {
-    forced_direct_profile_for(plx_platform::devcaps::caps())
+    forced_direct_profile_for(&plx_platform::devcaps::caps())
 }
 
 impl Client {
@@ -1159,6 +1159,7 @@ mod tests {
                 av1_row: (0, 0, 0),
                 audio: "aac,ac3,eac3".into(),
             audio_channels: Default::default(),
+            native_ceiling: Default::default(),
             },
             s.contract.delivery,
         );
@@ -1391,6 +1392,7 @@ mod tests {
             av1_row: (0, 0, 0),
             audio: "aac,ac3,eac3".into(),
             audio_channels: Default::default(),
+            native_ceiling: Default::default(),
         };
         let p = super::profile_for(&caps);
         assert!(!p.contains("hevc"), "hevc must not appear anywhere in {p}");
@@ -1422,6 +1424,7 @@ mod tests {
                 av1_row: (0, 0, 0),
                 audio: "aac".into(),
                 audio_channels: Default::default(),
+                native_ceiling: Default::default(),
             },
         ] {
             let p = super::profile_for(&caps);
@@ -1450,6 +1453,7 @@ mod tests {
             av1_row: (0, 0, 0),
             audio: "aac".into(),
             audio_channels: Default::default(),
+            native_ceiling: Default::default(),
         };
         let p = super::profile_for(&caps);
         let dp = p.split("add-transcode-target").next().unwrap();
