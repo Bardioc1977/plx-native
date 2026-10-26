@@ -718,6 +718,16 @@ fn drive_open_recovery(ps: &mut crate::route::PlaybackSession, first: super::rec
                     run = OpenRecoveryRun::Failed;
                     continue;
                 }
+                RecoveryEffect::ReportRecovered(recovered) => {
+                    // One event per rescued request, under the error-report consent (the report
+                    // path checks it); nothing answers.
+                    super::log(&format!(
+                        "open recovery: the refusal was recovered on the {:?} rung ({})",
+                        recovered.rung, recovered.refusal
+                    ));
+                    super::report::refusal_recovered(&recovered);
+                    continue;
+                }
             };
             match dispatched {
                 crate::route::RecoveryDispatch::Flying { .. } => run = OpenRecoveryRun::Flying,
@@ -1605,8 +1615,9 @@ pub fn pump(ps: &mut crate::route::PlaybackSession, pa: &mut super::adapter::Pla
         // session), and the send only queues, so this frame never waits.
         crate::route::on_decoded_frame(ps);
         // The open produced a picture: the failed-open ladder is over (idempotent, so each frame may
-        // say it). It is also where a facet-clean rescue is credited (`Proving`), through the
-        // driver; in `Playing` the event is unhandled and asks for nothing.
+        // say it). It is also where a facet-clean rescue is credited (`Proving`) and where a rescued
+        // refusal is reported (`ReportRecovered`, once per request), through the driver; in
+        // `Playing` the event is unhandled and asks for nothing.
         let _ = drive_open_recovery(ps, super::recovery::RecoveryEvent::FirstPicture, "");
     }
     if !eng.preview_abandon {
