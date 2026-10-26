@@ -176,7 +176,7 @@
   },
   "core.preview_domain_recovered_rung": {
     "value": "recovery step that played",
-    "description": "Field name in the consent preview's list of possible refusal_recovered values: which step of the app's recovery ladder put the picture up (the refused stream converted by the server, the adaptive-streaming fallback, or the restored earlier route)."
+    "description": "Field name in the consent preview's list of possible refusal_recovered values: which step of the app's recovery ladder put the picture up (the refused stream converted by the server, the video encoded by the server, the adaptive-streaming fallback, or the restored earlier route)."
   },
   "core.preview_domain_recovered_stream": {
     "value": "refused stream",

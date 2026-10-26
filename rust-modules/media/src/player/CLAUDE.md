@@ -248,14 +248,15 @@ something.
     (`route::dispatch_unopened_auto_hls`) and the facet conversion: the rebuild that has the server
     convert the facet of a pipeline refusal: the audio outside `aac`/`ac3`/`eac3` (not only native
     audio), else the source's video at a raster above 1080p, which an ENCODE with no video copy
-    converts (`route::dispatch_refusal_conversion`, below). They hold nothing (the Engine that failed is not
+    converts, or the manual both-facets encode (`route::dispatch_refusal_conversion`, below). They hold nothing (the Engine that failed is not
     playing) and the viewer keeps the connecting spinner (`pump::hold_connecting_state`). The
     landing is drained AHEAD of the failure branches (`route::take_ready_recovery_flight`, then
     `pump::land_recovery_flight`), because the branches' failure flags stay up for the whole flight
     and `fail_current_engine` would end it. `land_recovery_flight` fails nothing itself: it reloads
     onto the route, or hands `FlightRefused` to the machine. A refused facet conversion goes to the
-    HLS rung for a cold Auto Original and to the read-out otherwise; a refused rollback or
-    both-facets flight is always the read-out.
+    HLS rung for a cold Auto Original and, for a manual pick, to the both-facets encode when it is
+    earned (below), else to the read-out; a refused rollback or both-facets flight is always the
+    read-out.
     `route::recovery_flight_outstanding` is how the pump waits.
   - **Two rollbacks have no Engine for a pump to drive** (`route::dispatch_engineless_rollback_rebase`,
     marked `flight_engineless` beside the recovery marker): the foreground restore's
@@ -352,7 +353,7 @@ something.
   Home, a seek reload) drops the pending proof. `session::record_refusal_proof` stores the proof
   as ONE counted proof for `(build, codec, raw channels)`. A row applies once it holds
   `LEARNED_REFUSAL_PROOFS` (2) proofs, so one rescued play teaches nothing and a second one changes the
-  next start's `start`. A video facet flight, a both-facets (HLS) rescue, a rollback, a Load timeout, a source failure and a
+  next start's `start`. A video facet flight, a both-facets rescue (the HLS contingency or the manual encode), a rollback, a Load timeout, a source failure and a
   conversion whose video was transcoded too prove nothing and write nothing; an unknown channel count
   (`0`) is never stored as a proof. A named refusal REPLACES a counted row (`proofs` becomes `None`,
   applied at once) and a proof never downgrades a named row (`Session::with_native_audio_refusal`
@@ -387,22 +388,32 @@ something.
   stored Original candidate (`regrade_original`): its audio, so the ABR climb does not offer the
   refused audio's direct play again, and its video, which a candidate the attempt no longer direct
   plays leaves dropped). No track pick runs in S1a: the replacement converts the track the viewer was on, and the
-  AC3 sibling is only chosen once a learned row is in `start` (S2); (4) the **both-facets rung**, a cold
-  Auto Original's HLS contingency (`StartAutoHls`), whose attempt lacks every facet the request took
-  out and every stream this refusal named (the refused video raster, the suspect audio); a manual pick has
-  no such rung, so its refusal after the facet flight, landed or refused, goes to (5) the read-out.
+  AC3 sibling is only chosen once a learned row is in `start` (S2); (4) the **both-facets rung**. A cold
+  Auto Original's is its HLS contingency (`StartAutoHls`), whose attempt lacks every facet the request took
+  out and every stream this refusal named (the refused video raster, the suspect audio). A manual pick's
+  (`RecoveryEffect::ConvertBoth`, `VideoLane::Both`) is one ENCODE with no video copy
+  (`directStream=0&directStreamAudio=1`) of today's route, from an attempt that lacks the audio suspect and
+  the refused raster of a numbered refusal. A pipeline refusal (`Refused` or `Stalled`; not a timeout or a
+  source failure) of a no-picture Engine earns it once the facet rung has no flight to give, when the
+  source's video is still fed and not yet excluded, or an audio suspect still narrows the attempt. A
+  refusal with nothing to lower (a 1080p frame-rate refusal) still earns the one encode, which keeps the
+  route's own ceiling; a lowered video raster clamps it to the 1080p rung's. The encode's own refusal
+  reads out (it feeds an encoded video, `OpenFacts::video == None`, and no audio suspect), and so does a
+  refused HLS rescue. The converted route's video counts as fed whole only for an Original remux, so a
+  manual re-encode flavour with no stored Original candidate gets no both-facets rung (conservative);
+  (5) the read-out.
   The facet and both-facets rungs together are bounded by `MAX_RECOVERY_FLIGHTS` (2) per request, the facet rung runs once, and the
   rollback is not counted. A facet `start` already lacks (`start.without(facet) == start`: a stored
   refusal that `devcaps::start_caps` took out of `start`) narrows nothing and gets no flight, so a
   conversion that is still refused cannot loop; a refused conversion dispatch goes on to the next rung
-  too (HLS for a cold Auto Original, else the read-out), and a refused rollback is terminal. The viewer
+  too (HLS for a cold Auto Original, else the manual encode when earned, else the read-out), and a refused rollback is terminal. The viewer
   keeps the connecting spinner: no read-out, no second play request. **The project hears about a
   rescue** (issue #1075): the machine keeps the request's first refusal that `LoadRefusal::reports`
   (a pipeline number, the stall or a Load timeout, never a source failure) with the stream it named,
   and the rung of the flight the open rests on; the first picture of such an open leaves it as ONE
   `RecoveryEffect::ReportRecovered` per request, which the pump hands to `report::refusal_recovered`
   and which becomes the handled `refusal_recovered` event (closed fields only: codec class, channel
-  bucket, the number or `timeout`/`stall`, and the rung `facet`/`hls`/`rollback`) under the
+  bucket, the number or `timeout`/`stall`, and the rung `facet`/`hls`/`rollback`/`encode`, the last being the manual both-facets encode) under the
   error-report consent and no other. A play that was never refused, a ladder that read out, a
   source failure and a flight Home abandoned send nothing. **A Load the machine did not
   ask for re-opens the ladder:** `RecoveryEvent::LoadStarted`, raised by
@@ -430,7 +441,8 @@ something.
   AU accepted for `NATIVE_AUDIO_STALL_MS` (4 s; a slow server has empty queues) is learned and
   recovered the same way, and never after the first picture. The stall is a refusal of the same class
   as `type=18` (`LoadRefusal::Stalled`), so a stall of a combination the attempt already lacks takes
-  the next rung, the read-out for a manual Original; it used to return from the watchdog with
+  the next rung (for a manual Original the both-facets encode while the source's video is still fed
+  and not yet excluded, else the read-out); it used to return from the watchdog with
   nothing done and leave the viewer on "Buffering..." for good (TV run G, 2026-10-26). Garbled playback (no stall, no event)
   still needs a static row. The event log has `native audio: watching`, `STALL, no picture`, the
   `remembered` line, `devcaps: play start less learned refusals` (once per play whose start value

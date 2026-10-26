@@ -1171,16 +1171,20 @@ pub enum RecoveryRung {
     Hls,
     /// The HLS route an Original trial replaced was restored.
     Rollback,
+    /// A manual pick's both-facets encode played: the video encoded by the server with no copy, the
+    /// audio converted as the narrowed attempt plans it.
+    Encode,
 }
 
 impl RecoveryRung {
-    pub const ALL: [Self; 3] = [Self::Facet, Self::Hls, Self::Rollback];
+    pub const ALL: [Self; 4] = [Self::Facet, Self::Hls, Self::Rollback, Self::Encode];
 
     pub const fn code(self) -> &'static str {
         match self {
             Self::Facet => "facet",
             Self::Hls => "hls",
             Self::Rollback => "rollback",
+            Self::Encode => "encode",
         }
     }
 }

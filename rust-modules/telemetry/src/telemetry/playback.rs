@@ -1723,6 +1723,8 @@ mod tests {
         assert_eq!(v["fingerprint"], serde_json::json!(["refusal_recovered", "hls", "hevc"]));
         assert!(v.get("user").is_none(), "no id, no user key at all");
         assert!(v.get("dist").is_none());
+        let v = body(RefusedStream::Video(VideoCodecClass::H264), ChannelBucket::Unknown, RefusalError::Number(100), RecoveryRung::Encode);
+        assert_eq!(v["fingerprint"], serde_json::json!(["refusal_recovered", "encode", "h264"]));
         let v = body(RefusedStream::None, ChannelBucket::Unknown, RefusalError::Stall, RecoveryRung::Rollback);
         assert_eq!(v["tags"]["playback.pipeline_error"], "stall");
         assert_eq!(v["tags"]["playback.refused_stream"], "none");
@@ -1788,7 +1790,7 @@ mod tests {
         let sample: Value = serde_json::from_slice(&preview_refusal_recovered()).expect("preview JSON");
         assert_eq!(sample["tags"]["playback.class"], "refusal_recovered");
         let legend = preview_recovered_domains();
-        for code in ["facet", "hls", "rollback", "timeout", "stall", "1-2", "3-6", "7+", "dts", "h264", "video", "audio", "none"] {
+        for code in ["facet", "hls", "rollback", "encode", "timeout", "stall", "1-2", "3-6", "7+", "dts", "h264", "video", "audio", "none"] {
             assert!(legend.contains(code), "the legend omits {code}: {legend}");
         }
         assert!(legend.contains(&format!("{} to {}", i32::MIN, i32::MAX)), "{legend}");

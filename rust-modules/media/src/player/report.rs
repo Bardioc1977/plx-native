@@ -376,6 +376,7 @@ fn refusal_recovered_context(recovered: &super::recovery::Recovered) -> Option<R
     let rung = match recovered.rung {
         Rung::Facet => RecoveryRung::Facet,
         Rung::Both => RecoveryRung::Hls,
+        Rung::Encode => RecoveryRung::Encode,
         Rung::Rollback => RecoveryRung::Rollback,
     };
     Some(RefusalRecoveredContext { stream, channels, error, rung })
@@ -2156,6 +2157,16 @@ mod tests {
                 channels: ChannelBucket::Unknown,
                 error: RefusalError::Number(601),
                 rung: RecoveryRung::Hls,
+            })
+        );
+        // The manual both-facets encode is its own class: it is not the HLS contingency.
+        assert_eq!(
+            map(Rung::Encode, r601, h264()),
+            Some(RefusalRecoveredContext {
+                stream: RefusedStream::Video(VideoCodecClass::H264),
+                channels: ChannelBucket::Unknown,
+                error: RefusalError::Number(601),
+                rung: RecoveryRung::Encode,
             })
         );
         assert_eq!(
