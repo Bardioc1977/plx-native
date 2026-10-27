@@ -817,6 +817,15 @@ pub struct SessionInit {
     /// only: a relaunch asks plex.tv again.
     #[serde(default)]
     pub switch_refused_for: Option<Identity>,
+    /// **A `Seat` write was admitted and the seat has not been republished since.** The seat
+    /// (`plex::session::Seat`) carries the stamp it was published under, and a roster landing that
+    /// moves the stamp of a published profile makes the stored pair and the seat disagree until the
+    /// profile is published again. Set when a `Seat` commit is admitted; cleared by ANY publication
+    /// ([`SessionMachine::publish_profile`]); and read by the next DURABLE completion of any write,
+    /// which republishes while it is set (see `apply_persistence_completion`). Not hashed while
+    /// false, so no recorded state changes digest.
+    #[serde(default)]
+    pub seat_republish_owed: bool,
 }
 
 impl SessionInit {
@@ -875,7 +884,7 @@ impl SessionInit {
             active_profile: None, profile_scope: ProfileScope(0),
             delete_leftovers: 0, incident: None, incidents_seen: Vec::new(), next_incident: 0,
             link_trouble: false, discovery_retry: None, plaintext: None, signin_account: None,
-            switch_refused_for: None }
+            switch_refused_for: None, seat_republish_owed: false }
     }
 
     pub fn captured_boot(saved: PersistedSession, primary: Option<plx_plex::plex::session::ServerRef>,
@@ -1105,6 +1114,7 @@ impl LogicalState for SessionInit {
             w.str(&id.client_id).str(&id.account_token).str(&id.profile_uuid);
         });
         // Appended only when present, so every state without an offer keeps its digest.
+        if self.seat_republish_owed { w.u8(0xA5); }
         if let Some(verdict) = &self.plaintext {
             write_plaintext_verdict(w, verdict);
         }

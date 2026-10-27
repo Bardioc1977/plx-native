@@ -171,19 +171,82 @@ fn the_seat_is_republished_only_while_the_completion_still_describes_a_seated_st
     assert!(owner.state.held_handoff.is_some(), "and is still held");
 }
 
+/// A member joins the Home: the picker's next answer is a routine credential commit that does NOT
+/// move the stamp (the admin is the same), so it is a plain `Background` write, the kind that
+/// overtakes a `Seat` write still on its way to the disk.
+/// The member's id is the revision, so every call brings a roster the cache does not hold yet.
+fn later_roster_write(owner: &mut SessionMachine, revision: u64) -> (u32, u64, u64, CommitPlan) {
+    let member = UserTile { id: revision as i64, uuid: format!("synthetic-member-{revision}"), title: "Member".into(), ..Default::default() };
+    let commit = commit_of(&picker_roster(owner, vec![admin_tile(7, "synthetic-owner-7"), member]));
+    assert_eq!(commit.3.purpose, PersistencePurpose::Background, "rig: the stamp did not move again");
+    admit(owner, &commit, revision);
+    commit
+}
+
 /// The owner keeps ONE slot for the write it waits on (`admitted_persistence`), overwritten by
-/// every admission. A republication whose completion was overtaken by a later admission is dropped
-/// with it: the seat keeps the stamp it has, which is the safe direction (the records of the old
-/// stamp are still on the seat's side of Invariant I), and the next restore converges.
+/// every admission, so the completion of a `Seat` write that a later admission overtook is inert.
+/// The seat then still carries the stamp it was published under while the storage worker, which
+/// runs the writes in order, lands the `Seat` write and then the later one: the stored pair names
+/// the owner and the seat does not (every pick is refused, `persist_profile_pref`). The LATER
+/// write's durable completion is the event that republishes the seat, once.
 #[test]
-fn a_republication_overtaken_by_a_later_admission_is_dropped_fail_closed() {
+fn a_republication_overtaken_by_a_later_admission_is_made_by_the_later_durable_completion() {
     let _g = plx_base::testlock::serial();
-    let (mut owner, commit) = parked_roster_commit(Vec::new(), vec![admin_tile(7, "synthetic-owner-7")]);
-    let mut later = owner.state.admitted_persistence.expect("rig");
-    later.revision = 8;
-    later.req = later.req.wrapping_add(1);
-    owner.state.admitted_persistence = Some(later);
-    assert!(publications(&step(&mut owner, SessionEvent::Persistence(completion(&commit, 7, true)))).is_empty());
+    let (mut owner, seat) = parked_roster_commit(Vec::new(), vec![admin_tile(7, "synthetic-owner-7")]);
+    let later = later_roster_write(&mut owner, 8);
+
+    assert!(publications(&step(&mut owner, SessionEvent::Persistence(completion(&seat, 7, true)))).is_empty(),
+        "the overtaken Seat write's own verdict is inert");
+    let published = publications(&step(&mut owner, SessionEvent::Persistence(completion(&later, 8, true))));
+    assert_eq!(published.len(), 1, "the later write landing durably republishes the seat once");
+    assert_eq!(published[0].stamp, OWNER_7);
+    assert_eq!(published[0].profile.as_ref().map(|u| u.uuid.as_str()), Some("u-1"));
+
+    let again = publications(&step(&mut owner, SessionEvent::Persistence(completion(&later, 8, true))));
+    assert!(again.is_empty(), "and only once: a duplicate verdict publishes nothing");
+    let third = later_roster_write(&mut owner, 9);
+    assert!(publications(&step(&mut owner, SessionEvent::Persistence(completion(&third, 9, true)))).is_empty(),
+        "a seat that has been republished is not owed another by the next ordinary write");
+}
+
+/// A `Seat` write whose verdict is a failure may or may not have put the new pair on the disk (a
+/// non-durable canonical commit can still leave the marked fallback file, which the next read
+/// serves), so the seat is neither republished on it nor forgotten: the next DURABLE completion of
+/// any write republishes it, and only that one.
+#[test]
+fn a_failed_seat_write_is_made_good_by_the_next_durable_completion() {
+    let _g = plx_base::testlock::serial();
+    let (mut owner, seat) = parked_roster_commit(Vec::new(), vec![admin_tile(7, "synthetic-owner-7")]);
+    assert!(publications(&step(&mut owner, SessionEvent::Persistence(completion(&seat, 7, false)))).is_empty(),
+        "a failed write republishes nothing");
+    assert!(owner.state.admitted_persistence.is_none(), "and its verdict is consumed");
+
+    let later = later_roster_write(&mut owner, 8);
+    assert!(publications(&step(&mut owner, SessionEvent::Persistence(completion(&later, 8, false)))).is_empty(),
+        "a second failure republishes nothing either");
+    let next = later_roster_write(&mut owner, 9);
+    let published = publications(&step(&mut owner, SessionEvent::Persistence(completion(&next, 9, true))));
+    assert_eq!(published.len(), 1, "the next durable completion republishes the seat once");
+    assert_eq!(published[0].stamp, OWNER_7);
+}
+
+/// The debt is the seat's, not the write's: any publication pays it (a sign-out, a profile switch),
+/// so a later durable write after one republishes nothing, and a write that never owed a seat
+/// (the stamp did not move) never creates one.
+#[test]
+fn any_publication_clears_the_owed_republication() {
+    let _g = plx_base::testlock::serial();
+    let (mut owner, seat) = parked_roster_commit(Vec::new(), vec![admin_tile(7, "synthetic-owner-7")]);
+    assert!(owner.state.seat_republish_owed, "the admitted Seat write owes the seat a republication");
+    step(&mut owner, SessionEvent::Persistence(completion(&seat, 7, false)));
+    assert!(owner.state.seat_republish_owed, "a failed verdict does not pay it");
+    step(&mut owner, SessionEvent::Command(Command::SignOut));
+    assert!(!owner.state.seat_republish_owed, "the sign-out's publication paid it");
+
+    let mut owner = seated_owner(vec![admin_ref(7, "synthetic-owner-7")]);
+    let plain = later_roster_write(&mut owner, 3);
+    assert!(!owner.state.seat_republish_owed, "a write that does not move the stamp owes nothing");
+    assert!(publications(&step(&mut owner, SessionEvent::Persistence(completion(&plain, 3, true)))).is_empty());
 }
 
 /// **The plan-time predicate is exact.** Only a routine roster commit that moves the stamp of an
