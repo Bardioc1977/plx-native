@@ -1964,6 +1964,33 @@ fn the_never_empty_floor_raises_a_library_that_is_not_opt_in() {
     );
 }
 
+/// **The row only promises a tab while there is none to add.** A second Other Videos library shares
+/// the first one's pill, so its row must not say that switching it on adds a tab; it shows its
+/// count line again, and so does the Settings row's sentence about the off-by-default kind.
+#[test]
+fn an_off_other_videos_row_promises_a_tab_only_while_the_kind_has_no_favourite() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("video-adds-tab");
+    t.watching("u-owner");
+    let mut browse = TestBrowse::default();
+    seed_three_types(&mut browse);
+    browse.append_sections(0, vec![(4, "More Clips".into(), SecKind::Video)]);
+    let adds = |browse: &TestBrowse| browse.state.all_source_rows().iter()
+        .map(|r| (r.title.clone(), r.adds_tab)).collect::<Vec<_>>();
+    assert_eq!(
+        adds(&browse),
+        [("Movies".to_owned(), false), ("TV Shows".to_owned(), false),
+         ("Other Videos".to_owned(), true), ("More Clips".to_owned(), true)],
+        "no Other Videos library is a favourite: either one would add the tab"
+    );
+    switch_on(&mut browse, 2);
+    assert_eq!(
+        adds(&browse).iter().filter(|(title, _)| title == "More Clips").map(|(_, adds_tab)| *adds_tab).collect::<Vec<_>>(),
+        [false],
+        "the tab exists: switching the second library on adds none"
+    );
+}
+
 /// **The Off library is still listed for the editor, and nowhere else.** Favorite libraries lists
 /// every library (that is where it is switched on); the Sources panel of a pill lists only the
 /// favourites of its own type, so an off Other Videos library is in neither Movies' list nor its own.
