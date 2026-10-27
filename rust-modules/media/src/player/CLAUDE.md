@@ -519,11 +519,46 @@ something.
   seek is reset to 1x by the buffer-feed source's next SEGMENT, a mid-play call freezes the pipeline,
   and libpf mutes audio off 1x), so a speed session declares PCM audio, `ff::SpeedDecoder` decodes and
   `speed_audio` time-stretches the sound, and every timestamp to the pipeline is divided by the speed
-  (`player::to_sink_ns`, inverted on the presented-frame callback by `from_sink_ns`).
+  (`player::to_sink_ns`, inverted on the presented-frame callback by `from_sink_ns`; an audio AU's
+  sink pts also carries the PCM lead of the next bullet, added after the division).
   A speed change is a seek to the viewer's own position marked `rate_reload`, and while the speed is not
   1x every direct-play seek reloads in every mode (`pump::seek_must_reload`). `play_rate_permille` is the
   viewer's choice and persists across reloads; `applied_rate_permille` is the current pipeline's and is
   reset by `reset_session`. The feed throttle's run-on reads the applied one (`FeedPace::reference_at`).
+- **A Load that declares `"audio":"PCM"` has its audio fed 400 ms later than the picture it belongs with**
+  (#1086; FLAC and every other app-decoded codec, and a speed session at any speed other than 1x; a
+  compressed Load, DTS included, gets none).
+  *Cause (read from the firmware, not measured):* a Load whose every audio track is `audio/x-raw` is
+  allocated its audio as a `PCMMC` mixer channel instead of an `ADEC` decoder (libplayerAPIs
+  `allocateResource`, libpf's resource manager renames the resource), and liblxa's `lxao_play`, in its
+  automatic lip-sync mode, enables the DSP lip-sync stage for the hardware decoder and disables it for a
+  mixer channel. That stage's template offset is 505 ms and every value an app gives it is biased by
+  +105, so the decoder path is delayed 400 ms and a PCM Load is not. libpf's `option.lipsyncOffset` cannot
+  stand in for the lead: it moves the audio and the video sink alike below 400 and only feeds the DSP
+  stage that is off on a mixer channel from 400 up.
+  *Filmed* on the build that carries this change (TV speakers, a FLAC clip with a flash and a beep every
+  2.5 s; offset = beep minus flash, negative = audio early): no correction -0.377 s; `pcmavoffset=330`
+  -0.089; `=390` +0.047 (24 fps camera); `=400` -0.026 to -0.028 (30 fps). The set's own decoder on a DTS
+  clip: -0.02. So 400 ms puts app-decoded audio where the set puts its own, on that output.
+  *The ONE correction* is `engine::audio_sink_pts`, at the audio lane's single Feed: the Load's
+  `Engine::pcm_sink_lead_ns` (`PCM_SINK_LEAD_NS`) is added to the SINK pts AFTER `to_sink_ns`, because it
+  is real time and must not be divided by the speed. `engine::load_audio` yields the declared audio name
+  and that lead as one value (0 for a compressed Load; a speed override makes any codec declare PCM, so
+  it takes the lead), logged once per Load as `pcm: audio sink pts +<N>ms (default 400ms)`. Content time
+  (`fp`, `max_fed_audio_pts`, `audio_start_fp`, stale-drop, throttle, prime) is untouched, so no producer
+  of PCM stamps its own offset. Dev instrument (debug builds, read per Load): `pcmavoffset=<ms>` sets the
+  lead, which is how another output gets measured.
+  *Seek (firmware, not filmed):* LG's audio sink hands each buffer's pts to the driver unchanged and
+  re-derives its render base at every SEGMENT from the segment and the pipeline clock, never from a
+  buffer's pts; no late-drop or gap rule exists. So the relative 400 ms survives an in-place seek and a
+  reload.
+  *Not determined:* any sound output but the TV speakers. For the hardware decoder the set adds a render
+  delay per output (Bluetooth 150 ms, Dolby bitstream 160, Atmos 170, WISA 100, ES 30) that a mixer
+  channel never gets (it skips the query and always reads 0); whether that moves the audio later or
+  earlier against the picture is not known, so on those outputs app-decoded audio may sit up to that far
+  from the set's own decoder. The app cannot read the active output through the media libraries (only
+  Chromium's media stack reads `soundOutput`, through the settings service). Also unfilmed: a seek, the
+  speed path (it takes the same lead from the same code), another sample rate, another chip or firmware.
 - **Seeks are in-place**, in one of three per-session modes (`player::SeekMode`, chosen by
   `engine::select_seek_mode` in `start_bufferfeed`, the `/tmp/plxnative-seekmode` dev trigger
   `native|segment|reload` wins): the demuxer is `av_seek_frame`d to the target, then on the first
