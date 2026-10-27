@@ -331,7 +331,7 @@ impl super::BrowseState {
                     items: state.items.clone(),
                     sorts: state.sorts.clone(),
                     genres: state.genres.clone(),
-                    letters: state.letters.clone(),
+                    letters: state.shown_letters().unwrap_or(&state.letters).clone(),
                     letters_current: state.letters_current(),
                     sort_idx: state.sort_idx,
                     sort_desc: state.sort_desc,

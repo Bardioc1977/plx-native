@@ -529,7 +529,10 @@ from `data/src/metadata.rs`. The household's watch-state writes are the eleventh
   - **The letters carry the grid's terms.** The Letters job is asked with `SecState::query_filters`,
     the terms of the page read, and a `LettersKey` (applied Unwatched, applied genre, a membership
     generation; `data/src/browse/letters.rs`) that the answer returns. A list is current, and
-    shown, only while its key is the section's present one, checked where it is read.
+    shown, only while its key is the section's present one, checked where it is read. The landed
+    list and the one it replaced are both held (`SecState::letters_kept`: an unfiltered list
+    survives a genre or Unwatched switched on and off; an Unwatched list is never the kept one),
+    and a third key evicts the oldest.
 - **The Metadata reads.** The season tabs and the long-season page window (`data/src/metadata.rs`)
   are the tenth store reads on the lane. `load_season` flips the tab and emits
   `StoreJob::MetaSeason(Job<MetaSeasonReq>, MetaSeasonPort)`, addressed by the season generation it

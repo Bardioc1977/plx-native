@@ -7,7 +7,7 @@
 //! source of both), and a landed list is KEYED by what it counted ([`LettersKey`]).
 //!
 //! A list is shown only while its key is the one the section's present query would ask with
-//! ([`SecState::letters_current`]), and that is checked where the letters are READ, not at the
+//! ([`SecState::shown_letters`]), and that is checked where the letters are READ, not at the
 //! edit sites: the first page's landing applies a saved genre after the letters were asked
 //! (`pump_owned_with_gate`), and nothing there has to remember to forget them. Two things move the
 //! key without a term changing and both bump [`LettersKey::gen`]: the server's membership changed
@@ -62,11 +62,24 @@ impl SecState {
         LettersKey { unwatched, genre: genre.map(str::to_owned), gen: self.letters_gen }
     }
 
-    /// Does the landed list describe the listing the grid shows now? Runs every Library step and
-    /// every snapshot, so it compares in place.
-    pub(super) fn letters_current(&self) -> bool {
+    /// The list that describes the listing the grid shows now, if one is on hand: the landed one,
+    /// or the one it replaced ([`Self::land_letters`]). Runs every Library step and every snapshot,
+    /// so it compares in place, and it is the one place a list is picked: every reader goes
+    /// through it, so nothing has to remember to swap a list back.
+    pub(super) fn shown_letters(&self) -> Option<&Arc<Vec<(String, i64)>>> {
         let (unwatched, genre) = self.applied_terms();
-        self.letters_for.as_ref().is_some_and(|key| key.is(unwatched, genre, self.letters_gen))
+        if self.letters_for.as_ref().is_some_and(|key| key.is(unwatched, genre, self.letters_gen)) {
+            return Some(&self.letters);
+        }
+        self.letters_kept
+            .as_ref()
+            .filter(|(key, _)| key.is(unwatched, genre, self.letters_gen))
+            .map(|(_, list)| list)
+    }
+
+    /// Does a list on hand describe the listing the grid shows now?
+    pub(super) fn letters_current(&self) -> bool {
+        self.shown_letters().is_some()
     }
 
     /// Is a letters read owed: the list is not current, and a failed read of THIS key is not
@@ -94,11 +107,31 @@ impl SecState {
         }
     }
 
-    /// A read asked under `key` came back with `list`. It REPLACES whatever was there, and is shown
-    /// only if `key` is still the section's ([`Self::letters_current`]): an answer asked under older
-    /// terms is stored but never current, so the next step asks again.
+    /// A read asked under `key` came back with `list`. It becomes the landed list, and is shown only
+    /// if `key` is still the section's ([`Self::shown_letters`]): an answer asked under older terms is
+    /// stored but never current, so the next step asks again.
+    ///
+    /// The list it replaces is KEPT, one slot (so the last two keys are held, never more), unless it
+    /// was counted under Unwatched: turning a genre or Unwatched on and then off again finds the
+    /// unfiltered counts where they were instead of reading them anew. An Unwatched list is the
+    /// exception because which titles it counts changes with every watch, and a watch made while the
+    /// switch is OFF flags nothing ([`SecState::membership_depends_on_viewing`]), so a kept one
+    /// could come back wrong; its key's `gen` is the only thing that would tell. A list a
+    /// membership change or a type change made unshowable ([`Self::membership_changed`],
+    /// [`Self::forget_letters`]) is never brought back: its key carries the old `gen`, or it is gone.
     pub(super) fn land_letters(&mut self, key: LettersKey, list: Vec<(String, i64)>) {
-        self.letters = Arc::new(list);
+        match self.letters_for.take() {
+            Some(previous) if previous != key => {
+                let replaced = std::mem::replace(&mut self.letters, Arc::new(list));
+                self.letters_kept = (!previous.unwatched).then_some((previous, replaced));
+            }
+            _ => {
+                self.letters = Arc::new(list);
+                if self.letters_kept.as_ref().is_some_and(|(kept, _)| *kept == key) {
+                    self.letters_kept = None;
+                }
+            }
+        }
         self.letters_for = Some(key);
         self.letters_backoff = None;
     }
@@ -113,6 +146,7 @@ impl SecState {
     pub(super) fn forget_letters(&mut self) {
         self.letters = Arc::default();
         self.letters_for = None;
+        self.letters_kept = None;
         self.letters_backoff = None;
     }
 

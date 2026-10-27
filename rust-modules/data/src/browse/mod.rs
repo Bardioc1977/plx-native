@@ -601,10 +601,13 @@ struct SecState {
     genre_resolved: bool,
     /// per-letter (label, count) in titleSort order, from `/firstCharacter` — the letter rail. They
     /// count the listing [`Self::letters_for`] names and are shown only while that is the listing the
-    /// grid shows ([`SecState::letters_current`], `letters.rs`).
+    /// grid shows, or the kept list is ([`SecState::shown_letters`], `letters.rs`).
     letters: Arc<Vec<(String, i64)>>,
     /// What `letters` counted; `None` = no list has landed (or it was forgotten).
     letters_for: Option<LettersKey>,
+    /// The list `letters` replaced, with its key, while that is still worth showing again
+    /// ([`SecState::land_letters`]): turning a filter off must not cost the rail a read.
+    letters_kept: Option<(LettersKey, Arc<Vec<(String, i64)>>)>,
     /// Moves when the server's membership changed under the section ([`SecState::membership_changed`]).
     letters_gen: u32,
     /// A failed letters read of this key, and the steps left before it is asked again.
@@ -820,6 +823,7 @@ impl Default for SecState {
             genre_resolved: true,
             letters: Arc::default(),
             letters_for: None,
+            letters_kept: None,
             letters_gen: 0,
             letters_backoff: None,
             loaned: None,
@@ -2049,7 +2053,7 @@ impl BrowseState {
             Some(sort) => sort.key == "titleSort" && !state.sort_desc,
             None => true,
         };
-        title_asc && state.letters_current() && state.letters.len() > 1
+        title_asc && state.shown_letters().is_some_and(|letters| letters.len() > 1)
     }
     fn discovery_state(&self) -> SecFetch {
         if !self.sections.is_empty() || self.sources.iter().all(|source| source.sections_done) {

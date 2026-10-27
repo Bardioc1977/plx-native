@@ -659,3 +659,108 @@ fn a_failed_letters_read_keeps_the_rail_owed_and_is_retried_after_the_backoff() 
         assert_eq!(browse.jobs.len(), 1, "panics={panics}: a different key is asked at once");
     }
 }
+
+/// Turning a filter on and off again must not cost the rail: the unfiltered list is kept beside the
+/// filtered one (`SecState::letters_kept`), and is the grid's own again the moment the filter is
+/// off, with no read. Issue #869 review: one slot replaced it and re-asked on every return.
+#[test]
+fn turning_a_filter_off_brings_the_unfiltered_rail_back_without_a_read() {
+    for genre in [true, false] {
+        let _g = plx_base::testlock::serial();
+        let (_cleanup, mut browse, sid, client) = loopback_page_source();
+        a_genre_menu(&mut browse);
+        let plain: Vec<(String, i64)> = vec![("A".into(), 3), ("B".into(), 4)];
+        land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+
+        if genre {
+            assert!(browse.state.set_genre_by_id(Some("7")));
+        } else {
+            assert!(browse.state.set_unwatched(true));
+        }
+        assert!(shown_letters(&browse).is_empty(), "genre={genre}: the plain list does not describe the filtered grid");
+        land_letters(&mut browse, sid, client, &[("A", 1)]);
+        assert_eq!(shown_letters(&browse), [("A".to_owned(), 1)], "genre={genre}");
+
+        if genre {
+            assert!(browse.state.set_genre_by_id(None));
+        } else {
+            assert!(browse.state.set_unwatched(false));
+        }
+        assert_eq!(shown_letters(&browse), plain, "genre={genre}: back on the unfiltered grid, at once");
+        assert!(rail_shown(&browse), "genre={genre}");
+        tick_directory(&mut browse, sid, LibraryWork::Letters);
+        assert!(browse.jobs.is_empty(), "genre={genre}: nothing is owed: {:?}", browse.jobs);
+
+        // And the filtered list is still the one beside it: no read to switch the filter on again
+        // for a genre (Unwatched is the next test).
+        if genre {
+            assert!(browse.state.set_genre_by_id(Some("7")));
+            assert_eq!(shown_letters(&browse), [("A".to_owned(), 1)]);
+        }
+    }
+}
+
+/// A list counted under Unwatched is never the one kept: whether a title belongs to that listing
+/// changes with every watch, and a watch while Unwatched is OFF flags nothing
+/// (`membership_depends_on_viewing`), so a kept list would come back wrong.
+#[test]
+fn an_unwatched_list_is_not_kept_across_the_switch() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    assert!(browse.state.set_unwatched(true));
+    land_letters(&mut browse, sid, client, &[("A", 2), ("B", 4)]);
+    assert!(browse.state.set_unwatched(false));
+    land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+    assert_eq!(shown_letters(&browse), [("A".to_owned(), 3), ("B".to_owned(), 4)]);
+
+    // A title is watched here, with Unwatched off: no flag, no generation moves.
+    assert!(browse.state.set_unwatched(true));
+    assert!(shown_letters(&browse).is_empty(), "the Unwatched counts of before the watch: {:?}", shown_letters(&browse));
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert_eq!(browse.jobs.len(), 1, "asked afresh");
+}
+
+/// What moves the key without a term (a scan, a membership change) forgets the kept list as it
+/// forgets the shown one, and a library type change forgets both.
+#[test]
+fn a_membership_change_and_a_type_change_forget_the_kept_list() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    a_genre_menu(&mut browse);
+    land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+    assert!(browse.state.set_genre_by_id(Some("7")));
+    land_letters(&mut browse, sid, client, &[("A", 1)]);
+
+    browse.state.state_mut(0).unwrap().membership_changed();
+    assert!(browse.state.set_genre_by_id(None));
+    assert!(shown_letters(&browse).is_empty(), "the kept counts are of before the scan: {:?}", shown_letters(&browse));
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert_eq!(browse.jobs.len(), 1, "asked afresh");
+
+    browse.state.state_mut(0).unwrap().forget_letters();
+    assert!(browse.state.states()[0].letters_kept.is_none());
+}
+
+/// The cost, stated and bounded: two lists are held, the last two keys asked. A third filter
+/// evicts the oldest, so the way back to the unfiltered grid is read once more.
+#[test]
+fn only_the_last_two_lists_are_held() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    browse.state.state_mut(0).unwrap().genres = Arc::new(vec![
+        GenreEntry { id: "7".into(), title: "Drama".into() },
+        GenreEntry { id: "8".into(), title: "Comedy".into() },
+    ]);
+    land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+    assert!(browse.state.set_genre_by_id(Some("7")));
+    land_letters(&mut browse, sid, client, &[("A", 1)]);
+    assert!(browse.state.set_genre_by_id(Some("8")));
+    land_letters(&mut browse, sid, client, &[("B", 2)]);
+
+    assert!(browse.state.set_genre_by_id(Some("7")));
+    assert_eq!(shown_letters(&browse), [("A".to_owned(), 1)], "the previous one is held");
+    assert!(browse.state.set_genre_by_id(None));
+    assert!(shown_letters(&browse).is_empty(), "the oldest was evicted");
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert_eq!(browse.jobs.len(), 1, "and is asked once more");
+}
