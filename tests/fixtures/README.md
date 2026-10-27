@@ -142,12 +142,12 @@ items still scan, still get a ratingKey and still play — they just sit there u
 wrong-looking posters, and a stray match onto a real film would be worse than none.
 
 **The Movies library's scanner matters too, for the app.** PlxNative shows a library of type movie as
-*Other Videos* (its own pill, not Movies) when its agent is "none" AND its scanner is
+*Other Videos* (its own pill, not Movies, and off by default: it appears once the library is switched on in Favorite libraries) when its agent is "none" AND its scanner is
 **Plex Video Files** — Plex's own definition of the Other Videos library type. Keep the
 integration Movies library on the **Plex Movie** scanner (type *Movies*, as in the table), or the
 scenes that seat the Movies library (`plxnative-library` `true` or `"0"` in `tests/manifest.json`, and
 the Movies pill routes) find no Movies pill. A library that already uses the Video Files scanner is
-reached with `plxnative-library=2` instead, or re-scan it with the Plex Movie scanner.
+reached with `plxnative-library=2` instead (the trigger switches it on first), or re-scan it with the Plex Movie scanner.
 
 Then **wait for the scan and the analysis pass to finish** (*Settings → Manage →
 Console/Activity*). A ratingKey exists the moment the file is scanned, but the *stream
