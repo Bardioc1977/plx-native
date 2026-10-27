@@ -116,6 +116,8 @@ pub(crate) struct Scenarios {
     pub(crate) auto_tried: bool,
     pub(crate) replay_left: u32,
     pub(crate) grid_tried: bool,
+    /// `plxnative-library=2`'s wait for an off-by-default library (see [`LibraryBoot`]).
+    pub(crate) library_boot: LibraryBoot,
     pub(crate) settings_tried: bool,
     pub(crate) seek_tried: bool,
     pub(crate) seek_script: Vec<String>,
@@ -1184,10 +1186,16 @@ fn grid_library_search_heroidx_arm(app: &mut App, _fr: &mut Frame) {
         }
         if let Some(s) = plx_base::devtrig::read("library") {
             let kind = library_trigger_kind(s.parse::<usize>().unwrap_or(0));
-            app.bridge.enter_library(kind);
-            // Same pill semantics as the search trigger above: boot has already rooted Home,
-            // so this is `SelectTab`, not a `Root` that would discard it.
-            crate::app::bridge::nav_select_tab(&mut app.pages, AppArg::Library);
+            if kind.opt_in() {
+                // Off until switched on: the user who plays this trigger switches the library on
+                // first, and the section may not have landed yet (`library_boot_arm`, each frame).
+                app.scenarios.library_boot.arm(kind, _fr.now);
+            } else {
+                app.bridge.enter_library(kind);
+                // Same pill semantics as the search trigger above: boot has already rooted Home,
+                // so this is `SelectTab`, not a `Root` that would discard it.
+                crate::app::bridge::nav_select_tab(&mut app.pages, AppArg::Library);
+            }
         }
         if let Some(q) = plx_base::devtrig::read("search") {
             apply_search_boot_trigger(&q, &mut app.pages, &mut app.bridge);
@@ -1219,6 +1227,28 @@ fn grid_library_search_heroidx_arm(app: &mut App, _fr: &mut Frame) {
                 app.bridge.home_command(HomeCmd::PinHero(n));
             }
         }
+    }
+}
+
+/// `plxnative-library=2` (Other Videos): see [`LibraryBoot`]. Dev-only, like every arm here: it
+/// sends the command the Favorite libraries editor sends, so a `--guest` boot (no session to write
+/// to) keeps the switch for the run only.
+fn library_boot_arm(app: &mut App, fr: &mut Frame) {
+    let Some(kind) = app.scenarios.library_boot.kind() else { return };
+    let sections: Vec<(plx_data::stores::browse::SecKind, bool)> = app.bridge.browse_directory()
+        .sections().iter().map(|section| (section.kind, section.row.pinned)).collect();
+    match app.scenarios.library_boot.step(fr.now, &sections) {
+        LibraryBootStep::Wait => {}
+        LibraryBootStep::SwitchOn(section) => {
+            plx_base::eventlog::log(&format!("library boot: switching section {section} on, as Favorite libraries does"));
+            app.bridge.browse_run(plx_data::stores::browse::BrowseCmd::ApplyPins(vec![(section, true)]));
+        }
+        LibraryBootStep::Enter => {
+            app.bridge.enter_library(kind);
+            crate::app::bridge::nav_select_tab(&mut app.pages, AppArg::Library);
+        }
+        LibraryBootStep::GiveUp => plx_base::eventlog::log(
+            "BADTRIGGER library boot: no library of that kind after 10 s; nothing was opened"),
     }
 }
 
@@ -2144,7 +2174,6 @@ pub(crate) fn maybe_replay_after_eos(app: &mut App, handed_off_to_up_next: bool)
 /// [`LibraryBoot::GIVE_UP_MS`] with a log line, so a mock without such a library is a message and
 /// not a silent no-op. Movies and TV Shows keep the one-shot path and their exact timing.
 #[derive(Default)]
-#[cfg_attr(not(test), allow(dead_code))] // wired into the frame in the next commit
 pub(crate) struct LibraryBoot {
     armed: Option<(plx_data::stores::browse::SecKind, u32)>,
     sent: bool,
@@ -2152,7 +2181,6 @@ pub(crate) struct LibraryBoot {
 
 /// What [`LibraryBoot::step`] asks the frame to do.
 #[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum LibraryBootStep {
     Wait,
     /// send `BrowseCmd::ApplyPins(vec![(section, true)])`, the command the editor sends
@@ -2162,9 +2190,7 @@ pub(crate) enum LibraryBootStep {
     GiveUp,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl LibraryBoot {
-    #[allow(dead_code)] // read by `step` in the next commit
     const GIVE_UP_MS: u32 = 10_000;
     pub(crate) fn arm(&mut self, kind: plx_data::stores::browse::SecKind, now: u32) {
         self.armed = Some((kind, now));
@@ -2173,8 +2199,24 @@ impl LibraryBoot {
     pub(crate) fn kind(&self) -> Option<plx_data::stores::browse::SecKind> {
         self.armed.map(|(kind, _)| kind)
     }
-    pub(crate) fn step(&mut self, _now: u32, _sections: &[(plx_data::stores::browse::SecKind, bool)]) -> LibraryBootStep {
-        LibraryBootStep::Wait
+    /// One frame's answer, given the directory's `(kind, favourite)` rows in table order.
+    pub(crate) fn step(&mut self, now: u32, sections: &[(plx_data::stores::browse::SecKind, bool)]) -> LibraryBootStep {
+        let Some((kind, since)) = self.armed else { return LibraryBootStep::Wait };
+        if sections.iter().any(|&(k, favourite)| k == kind && favourite) {
+            self.armed = None;
+            return LibraryBootStep::Enter;
+        }
+        if now.wrapping_sub(since) > Self::GIVE_UP_MS {
+            self.armed = None;
+            return LibraryBootStep::GiveUp;
+        }
+        match sections.iter().position(|&(k, _)| k == kind) {
+            Some(index) if !self.sent => {
+                self.sent = true;
+                LibraryBootStep::SwitchOn(index)
+            }
+            _ => LibraryBootStep::Wait,
+        }
     }
 }
 
@@ -2301,6 +2343,7 @@ pub(crate) unsafe fn each_frame(app: &mut App, fr: &mut Frame) -> bool {
     phcount::tick(fr.now);
     autoplay_arm(app, fr);
     grid_library_search_heroidx_arm(app, fr);
+    library_boot_arm(app, fr);
     settings_boot_arm(app, fr);
     press_arm(app, fr);
     itemmenu_arm(app, fr);

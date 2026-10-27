@@ -393,7 +393,8 @@ def library_section_index(scene):
     """The directory index of the section `plxnative-library` seats: content `1` is the preferred
     Shows library (index 1), `2` the preferred Other Videos library (index 2), anything else (a bare
     flag, `0`, ...) the preferred Movies library (index 0) — `dev/scenarios.rs`, `library` trigger.
-    The mock lists Movies, Shows and, with `--other-videos`, Other Videos."""
+    The mock lists Movies, Shows and, with `--other-videos`, Other Videos (off until switched on, so
+    the trigger switches it on first: `LibraryBoot`)."""
     content = (scene.get("triggers") or {}).get("plxnative-library")
     return {"1": 1, "2": 2}.get(str(content).strip(), 0)
 
