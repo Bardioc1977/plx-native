@@ -525,9 +525,27 @@ something.
   1x every direct-play seek reloads in every mode (`pump::seek_must_reload`). `play_rate_permille` is the
   viewer's choice and persists across reloads; `applied_rate_permille` is the current pipeline's and is
   reset by `reset_session`. The feed throttle's run-on reads the applied one (`FeedPace::reference_at`).
-- **A Load that declares `"audio":"PCM"` has its audio fed 400 ms later than the picture it belongs with**
-  (#1086; FLAC and every other app-decoded codec, and a speed session at any speed other than 1x; a
-  compressed Load, DTS included, gets none).
+- **A Load that declares `"audio":"PCM"` on LG's `liblxa` audio stack has its audio fed later than the
+  picture it belongs with, by an amount that follows the sound output: 400 ms on the TV speakers, 250 ms on
+  Bluetooth headphones; a set on any other or an unknown stack gets no lead at all** (#1086, #1088; FLAC and
+  every other app-decoded codec, and a speed session at any speed other than 1x; a compressed Load, DTS
+  included, gets none).
+  *Where it applies, and why only there:* the 400 ms and the wireless 150 ms are compiled into ONE library,
+  `liblxa` (with its GStreamer sink `libgstlxaudiosink`), so the lead corrects a cause that is known to exist
+  only where that library is. The 14 firmware inventories behind `tools/fwcompat.py`
+  (`~/.cache/plxnative/fwsym/data`): `liblxa.so.2.0.0` on webOS 7.4, 8.3 and 9.2 with the same lip-sync exports
+  as the dev set (the newer ones add an eARC variant of the output-type lookup), the dev set (4.10.2) has it on
+  the device, and Realtek's `libgstrtkaudio-1.0` instead on 4.10.0, 5.3.1, 6.4.0 and 10.2.0 (neither on 1.2.0 to
+  4.4.2 or 11.2.0): one webOS version spans both stacks, so the firmware version cannot decide it.
+  `devcaps::audio_stack()` is the one device fact, probed at boot (`devcaps::probe`, on the `devcaps:` line as
+  `audio stack=`): `Liblxa` when `/usr/lib/liblxa.so.2` exists (a stat, not a symbol lookup: our build links
+  LG's libraries through stub `.so` files that define every symbol, so a lookup in our own process proves
+  nothing, and a `dlopen` would run LG's initialisation in the app), `Other` on a device without it,
+  `Unknown` before `probe` (hosts, hostsim, tests). The values inside `liblxa` are not in the inventories, and
+  another stack's PCM path may already be in step, in which case 400 ms would make it 0.4 s late: so it gets
+  0 ms (the behaviour before #1087) and the log says `not measured on this chip`. Owner decision: no
+  re-encoding to a codec the set decodes itself; playback stays straight and lossless, which is why the lead
+  is the mechanism.
   *Cause (read from the firmware, not measured):* a Load whose every audio track is `audio/x-raw` is
   allocated its audio as a `PCMMC` mixer channel instead of an `ADEC` decoder (libplayerAPIs
   `allocateResource`, libpf's resource manager renames the resource), and liblxa's `lxao_play`, in its
@@ -535,30 +553,62 @@ something.
   mixer channel. That stage's template offset is 505 ms and every value an app gives it is biased by
   +105, so the decoder path is delayed 400 ms and a PCM Load is not. libpf's `option.lipsyncOffset` cannot
   stand in for the lead: it moves the audio and the video sink alike below 400 and only feeds the DSP
-  stage that is off on a mixer channel from 400 up.
-  *Filmed* on the build that carries this change (TV speakers, a FLAC clip with a flash and a beep every
-  2.5 s; offset = beep minus flash, negative = audio early): no correction -0.377 s; `pcmavoffset=330`
-  -0.089; `=390` +0.047 (24 fps camera); `=400` -0.026 to -0.028 (30 fps). The set's own decoder on a DTS
-  clip: -0.02. So 400 ms puts app-decoded audio where the set puts its own, on that output.
+  stage that is off on a mixer channel from 400 up. *The per-output part (also firmware):* for its own
+  decoder the set additionally advances the audio by a delay chosen from the active output
+  (`_lxao_find_lipsync_output_type`: wireless 150 ms, Dolby bitstream 160, Atmos 170, DTS 160, WISA 100,
+  ES 30) so that it covers that output's latency; a mixer channel skips that query and always reads 0. So
+  the right lead is 400 ms minus the output's delay, which on Bluetooth is 250.
+  *Filmed* (a FLAC clip with a flash and a beep every 2.5 s; offset = beep minus flash, negative = audio
+  early). TV speakers: no correction -0.377 s; `pcmavoffset=330` -0.089; `=390` +0.047 (24 fps camera);
+  `=400` -0.026 to -0.028 (30 fps), -0.03 to +0.08 in a later run; the set's own decoder on a DTS clip
+  -0.02. Bluetooth headphones (`soundOutput` read `bt_soundbar`, phone microphone against an earcup): 400 ms
+  +0.13 to +0.19 s, late; 250 ms (`pcmavoffset=250`) +0.017 s, three of three; the set's own DTS decoder
+  -0.028 s.
   *The ONE correction* is `engine::audio_sink_pts`, at the audio lane's single Feed: the Load's
-  `Engine::pcm_sink_lead_ns` (`PCM_SINK_LEAD_NS`) is added to the SINK pts AFTER `to_sink_ns`, because it
-  is real time and must not be divided by the speed. `engine::load_audio` yields the declared audio name
-  and that lead as one value (0 for a compressed Load; a speed override makes any codec declare PCM, so
-  it takes the lead), logged once per Load as `pcm: audio sink pts +<N>ms (default 400ms)`. Content time
-  (`fp`, `max_fed_audio_pts`, `audio_start_fp`, stale-drop, throttle, prime) is untouched, so no producer
-  of PCM stamps its own offset. Dev instrument (debug builds, read per Load): `pcmavoffset=<ms>` sets the
-  lead, which is how another output gets measured.
+  `Engine::pcm_sink_lead_ns` is added to the SINK pts AFTER `to_sink_ns`, because it is real time and must
+  not be divided by the speed. `engine::load_audio` yields the declared audio name and a `PcmLead` plan as
+  one value (`Off` for a compressed Load; a speed override makes any codec declare PCM, so it plans a lead);
+  `PcmLead::resolve` settles the plan against the output with the table `PCM_LEAD_BY_OUTPUT`, and
+  `engine::pcm_output_lead(stack, output)` is the whole table: `liblxa` + `tv_speaker` 400, `liblxa` +
+  `bt_soundbar` 250, `liblxa` + any other output or no answer `PCM_SINK_LEAD_NS` = 400 (not measured), any
+  other or unknown stack 0 whatever the output (`PcmLead::Unmeasured`, settled on the frame thread, no read).
+  The `pcmavoffset` dev override (debug builds, read per Load) wins over the table AND the stack, and is how
+  another output or another chip gets measured. Content time (`fp`, `max_fed_audio_pts`, `audio_start_fp`, stale-drop, throttle, prime) is
+  untouched, so no producer of PCM stamps its own offset.
+  *Where the output is read:* `start_bufferfeed_inner` runs on the FRAME thread (the Engine is
+  main-thread-confined and the frame may not wait on the bus), so it cannot ask. A plan that follows the
+  output goes to `threads::load_thread` (the `media` worker, which blocks in `Load` anyway), which reads
+  `tv::sound::output` BEFORE `Load` (a `getSystemSettings {"category":"sound","keys":["soundOutput"]}` call
+  through the `tv` port, 300 ms budget, `NoPlatform` on hosts), logs `pcm: audio sink pts +<N>ms (stack
+  liblxa, output <name|unknown>, default 400ms[, not measured])` once per Load (a stack with no lead logs
+  `pcm: audio sink pts +0ms (stack <other|unknown>, not measured on this chip)` from the frame thread), and hands the lead back inside
+  `LoadCall::Returned` (`Shared::native_load_pcm_lead`). Nothing is fed before the Load returns, and
+  `settle_pcm_lead` takes the lead into the Engine, once, before the first audio unit; until then the audio
+  lane waits rather than stamp with a guess it would later move. A compressed Load, an override and a stack
+  that is not `liblxa` never read the output (the last pays nothing on the bus). A cost to know: on a PCM Load the read sits directly in front of `Load`, so it adds its
+  round trip to time-to-first-frame (its length is in the `sound: output ... read in Nms` line). *Worst
+  case:* the 300 ms bounds the CALL only. `ls2::register()` before it and the unregistration after it are
+  not bounded (`webos.rs`'s `ls2` doc), and `ls2` has no bounded registration to use instead, so a wedged
+  luna hub blocks the Load thread in the registration, before `Load`, for as long as the hub takes: that
+  Load is delayed by it, and the pump's `NATIVE_LOAD_BUDGET` fails it if the wait outlasts 20 s. A hub
+  that registers and then stays silent costs the 300 ms and keeps 400. The answer moves the lead by at
+  most 150 ms (400 to 250), which is why the call's budget is short. *Timing figures:* `native: Load
+  returned after Nms`, `LoadElapsedClass` telemetry and `native_load_elapsed_ms` measure Starfish `Load`
+  alone (`threads::load_alone` takes the Load thread's read out of them); `NATIVE_LOAD_BUDGET` still runs
+  on the wall clock from `begin_native_session`, so it counts the read, on purpose (a wedged registration
+  must fail, not park Connecting).
   *Seek (firmware, not filmed):* LG's audio sink hands each buffer's pts to the driver unchanged and
   re-derives its render base at every SEGMENT from the segment and the pipeline clock, never from a
-  buffer's pts; no late-drop or gap rule exists. So the relative 400 ms survives an in-place seek and a
-  reload.
-  *Not determined:* any sound output but the TV speakers. For the hardware decoder the set adds a render
-  delay per output (Bluetooth 150 ms, Dolby bitstream 160, Atmos 170, WISA 100, ES 30) that a mixer
-  channel never gets (it skips the query and always reads 0); whether that moves the audio later or
-  earlier against the picture is not known, so on those outputs app-decoded audio may sit up to that far
-  from the set's own decoder. The app cannot read the active output through the media libraries (only
-  Chromium's media stack reads `soundOutput`, through the settings service). Also unfilmed: a seek, the
-  speed path (it takes the same lead from the same code), another sample rate, another chip or firmware.
+  buffer's pts; no late-drop or gap rule exists. So the relative lead survives an in-place seek and a
+  reload. An in-place seek keeps the Engine and its lead; a reload (a Load) reads the output again.
+  *Filmed only on the dev set* (webOS 4.10.2, a `liblxa` set). *Not determined:* every other chip and audio
+  stack (Realtek's `libgstrtkaudio`, whatever the others run: no lead, unmeasured; `pcmavoffset` measures
+  one); on `liblxa`, any output but the two filmed (optical, ARC, wired headphones, LG Sound Sync, a
+  soundbar with its own latency: they keep 400 ms and the log says "not measured"); an output change in the
+  middle of a playback, which takes effect at the next Load; the user's "AV Sync Adjust" menu, whose effect
+  on a mixer channel is not known; a Bluetooth device whose own latency differs from the filmed one;
+  another sample rate, chip or firmware. Also unfilmed: a seek, and the speed path (it takes the same
+  lead from the same code).
 - **Seeks are in-place**, in one of three per-session modes (`player::SeekMode`, chosen by
   `engine::select_seek_mode` in `start_bufferfeed`, the `/tmp/plxnative-seekmode` dev trigger
   `native|segment|reload` wins): the demuxer is `av_seek_frame`d to the target, then on the first
