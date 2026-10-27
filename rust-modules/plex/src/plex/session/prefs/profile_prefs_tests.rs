@@ -1,9 +1,9 @@
-//! The ten player settings and hero trailer autoplay per profile: the record and its soft parse, the fallback read, the
+//! Per-profile playback and display settings: the record and its soft parse, the fallback read, the
 //! write that always records an own value and prunes foreign stamps, and the seat a publication
 //! seats. The live half (cells, the door, the restore) is `media::route::prefs_tests`; the seat
 //! trigger is the app's `restore_characterisation_tests`.
 use super::super::{
-    current_seat, AudioEnhancementsPref, CurrentProfile, DeckPress, DeckPressPref, UnderPosters, UnderPostersDetails, DirectPlayMode, DirectPlayModePref,
+    InstantDpadSeeking, current_seat, AudioEnhancementsPref, CurrentProfile, DeckPress, DeckPressPref, UnderPosters, UnderPostersDetails, DirectPlayMode, DirectPlayModePref,
     HdrOverlayBrightness, HdrOverlayBrightnessPref, NextEpisodeMode, NextEpisodeModePref, PlaybackQuality, QualityPref, Seat, Session, SkipInterval, SkipIntervalPref,
     SubtitlePosition, SubtitlePositionPref, SubtitleSize, SubtitleSizePref, SubtitleTone, SubtitleTonePref, TempSession,
     TrailerAutoplayPref, UserRef,
@@ -44,8 +44,8 @@ fn the_row_declares_a_profile_scoped_account_bound_soft_list() {
 }
 
 /// **T-fields.** `ProfilePrefs` has a field for exactly the settings whose `FALLBACK` is the legacy
-/// install key, under the same name: the ten player settings and `trailer_autoplay` (P1c), and no
-/// more. A twelfth Profile row without a field (or a field without its row) fails here.
+/// install key, under the same name. A Profile row without a field (or a field without its row)
+/// fails here.
 #[test]
 fn the_record_has_one_field_for_each_setting_with_a_legacy_fallback() {
     let full = ProfilePrefs {
@@ -57,6 +57,7 @@ fn the_record_has_one_field_for_each_setting_with_a_legacy_fallback() {
         hdr_overlay_brightness: Some(HdrOverlayBrightness::Half),
         next_episode_mode: Some(NextEpisodeMode::AfterCredits),
         skip_interval: Some(SkipInterval::Seconds30),
+        instant_dpad_seeking: Some(InstantDpadSeeking::On),
         deck_press: Some(DeckPress::Play),
         under_posters: Some(UnderPosters { title: true, details: UnderPostersDetails::Video }),
         audio_enhancements: Some(AudioEnhancements { boost_dialog: true, normalize_loudness: true }),
@@ -68,7 +69,7 @@ fn the_record_has_one_field_for_each_setting_with_a_legacy_fallback() {
         .filter(|d| d.fallback == Fallback::LegacyInstallKey)
         .map(|d| d.key.to_string())
         .collect();
-    assert_eq!(rows.len(), 12, "the ten player settings, hero trailer autoplay and Under posters fall back to a legacy key");
+    assert_eq!(rows.len(), 13, "every per-profile setting has a legacy fallback");
     assert_eq!(fields, rows, "ProfilePrefs and the rows with a legacy fallback drifted");
     assert!(DESCRIPTORS.iter().filter(|d| d.fallback == Fallback::LegacyInstallKey).all(|d| d.scope == Scope::Profile));
 }
@@ -537,7 +538,7 @@ fn hdr_overlay_brightness_defaults_to_three_quarters_and_round_trips() {
 const LEGACY: &str = "aaaaaaaaaaaaaaaa";
 const OWNER: &str = "o1:19afc47bcea99412";
 
-/// A profile that picked all twelve settings. Typed out in full, no `..Default::default()`, so a
+/// A profile that picked every setting. Typed out in full, no `..Default::default()`, so a
 /// setting added to [`ProfilePrefs`] stops this compiling until the adoption merge below is told.
 fn picked_everything() -> ProfilePrefs {
     ProfilePrefs {
@@ -549,6 +550,7 @@ fn picked_everything() -> ProfilePrefs {
         hdr_overlay_brightness: Some(HdrOverlayBrightness::Half),
         next_episode_mode: Some(NextEpisodeMode::AfterCredits),
         skip_interval: Some(SkipInterval::Seconds30),
+        instant_dpad_seeking: Some(InstantDpadSeeking::On),
         deck_press: Some(DeckPress::Play),
         under_posters: Some(UnderPosters { title: true, details: UnderPostersDetails::Video }),
         audio_enhancements: Some(AudioEnhancements { boost_dialog: true, normalize_loudness: true }),
@@ -558,7 +560,7 @@ fn picked_everything() -> ProfilePrefs {
 
 /// **Adopting a profile's picks keeps EVERY setting.** The record that carried the old sign-in's
 /// stamp is merged into the one already stamped for the owner field by field: the owner's own value
-/// wins, the adopted one fills what the owner never picked. With all twelve fields set on the
+/// wins, the adopted one fills what the owner never picked. With every field set on the
 /// adopted side a field the merge forgot would read as the default afterwards.
 #[test]
 fn adopting_profile_picks_merges_field_by_field_and_loses_no_setting() {
