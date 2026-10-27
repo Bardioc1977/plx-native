@@ -1498,7 +1498,7 @@ fn published_order(srcs: &[Src], pins: &[(ServerId, i64, bool)]) -> Vec<(usize, 
     for (i, source) in srcs.iter().enumerate() {
         let Some(build) = &source.last else { continue };
         for (j, shelf) in build.shelves.iter().enumerate() {
-            if shelf.released() || shelf.items.iter().any(|m| item_pinned(pins, m)) { order.push((i, j)); }
+            if shelf.released() || shelf.items.iter().any(|m| shelf_item_shown(pins, &shelf.hub_id, m)) { order.push((i, j)); }
         }
     }
     order
@@ -2166,7 +2166,7 @@ fn live_sources(srcs: &[Src]) -> Vec<(&str, &SourceBuild)> {
 /// gave its cards up to the ring holds none and publishes placeholder slots instead (see
 /// [`Shelf::released`]).
 fn publishable<'a>(sh: &'a Shelf, pins: &'a [(ServerId, i64, bool)]) -> impl Iterator<Item = &'a Arc<PmsMovie>> {
-    sh.items.iter().filter(move |m| item_pinned(pins, m)).take(MAX_SHELF_ITEMS)
+    sh.items.iter().filter(move |m| shelf_item_shown(pins, &sh.hub_id, m)).take(MAX_SHELF_ITEMS)
 }
 
 /// The card every released row of `sid`'s source publishes `shown` times: no rating key, and the
@@ -2943,6 +2943,19 @@ pub(crate) fn item_pinned(pins: &[(ServerId, i64, bool)], m: &PmsMovie) -> bool 
         Some((_, _, pinned)) => *pinned,
         None => true, // not enumerated yet
     }
+}
+
+/// May this card appear on the SHELF it sits on? [`item_pinned`], plus one rule for a personal-video
+/// row ([`personal_video_hub`]): a card that names no library (`sec == 0`) cannot prove its library
+/// is a favourite, and unlike a movie row's the library behind it may well be one the user never
+/// switched on (Other Videos is opt-in). Every item list measured on a real server carries the
+/// section id, so this is insurance, not a known leak. The Continue Watching deck is not a
+/// personal-video hub and keeps [`item_pinned`] as it was.
+fn shelf_item_shown(pins: &[(ServerId, i64, bool)], hub_id: &str, m: &PmsMovie) -> bool {
+    if m.sec == 0 && personal_video_hub(hub_id) {
+        return false;
+    }
+    item_pinned(pins, m)
 }
 
 /// The two server sets [`feeds_home`] takes, folded out of the retained directory's favourite
