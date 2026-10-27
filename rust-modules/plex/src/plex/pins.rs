@@ -97,7 +97,7 @@ pub struct LibRef<'a> {
 /// tab, no Home row and no place in Movies unasked, and it is not a type the strip would "lose"
 /// (nobody expected it there), so the per-type argument above does not apply to it.
 pub fn default_on(lib: LibRef<'_>) -> bool {
-    lib.household || !lib.household_type
+    !lib.opt_in && (lib.household || !lib.household_type)
 }
 
 /// Resolve the whole table for one profile: the recorded answer where there is one, the default
@@ -136,19 +136,29 @@ pub fn resolve(libs: &[LibRef<'_>], rec: Option<&HomePins>) -> Vec<bool> {
     // Absence here is not a preference anybody expressed; it is a selection that outlived the
     // server it named, and a front door with nothing on it is not a state this app has.
     //
+    // **The floor is drawn over the libraries that are not opt-in.** An opt-in kind (Other
+    // Videos) has no place on the front door unasked, so skipping it on the first machine alone
+    // would leave Home empty when that machine holds only such libraries and a later one holds
+    // Movies. Only a roster made of nothing else lets the opt-in libraries into the pool: a
+    // household whose single library is Other Videos still gets its front door.
+    //
     // **Keyed on the machine id, but ONLY when there is one.** `record` refuses to write down an
     // empty `machineIdentifier`, so a source nobody has learned one for yet carries `""` — and
     // `l.machine_id == first` is then `"" == ""`, true for every nameless library on every
     // registered server at once. Home would come up fed by an arbitrary mixture of your server
     // and a friend's, which is not "the FIRST source's libraries" and is not a state anyone
     // chose. With no id to group by, the honest floor is the first library itself.
-    match libs.first().map(|l| l.machine_id) {
+    let mut pool: Vec<usize> = (0..libs.len()).filter(|&i| !libs[i].opt_in).collect();
+    if pool.is_empty() {
+        pool = (0..libs.len()).collect();
+    }
+    match pool.first().map(|&i| libs[i].machine_id) {
         Some(first) if !first.is_empty() => {
-            for (i, l) in libs.iter().enumerate() {
-                out[i] = l.machine_id == first;
+            for &i in &pool {
+                out[i] = libs[i].machine_id == first;
             }
         }
-        Some(_) => out[0] = true,
+        Some(_) => out[pool[0]] = true,
         None => {}
     }
     out

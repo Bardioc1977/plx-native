@@ -315,10 +315,11 @@ pub struct BrowseSection {
     /// favourite-library hits first.
     ///
     /// Your HOUSEHOLD's libraries start favourite and a friend's start favourite only where the
-    /// household has no library of that type ([`plx_plex::plex::pins::default_on`]); a friend's
-    /// Other Videos library never does, whatever the household has (personal media of a source that
-    /// is not the household's is never on by default, [`BrowseState::lib_refs`]); the last
-    /// favourite cannot be turned off, or the app has nothing. The household and not the account
+    /// household has no library of that type ([`plx_plex::plex::pins::default_on`]); an Other
+    /// Videos library starts OFF for everybody, the household's own included, until somebody
+    /// switches it on here ([`SecKind::opt_in`]: personal media is never given a tab, a Home row
+    /// or a place in Movies on the user's behalf); the last favourite cannot be turned off, or the
+    /// app has nothing (the floor raises a library that is not opt-in first). The household and not the account
     /// — see [`BrowseSource::household`] and [`BrowseState::lib_refs`] for why plex.tv's raw
     /// `owned` cannot answer this for a Plex Home managed profile.
     pub pinned: bool,
@@ -2107,11 +2108,7 @@ impl BrowseState {
     /// and `owns_type` then found nothing of the household's either, so EVERY library defaulted On
     /// — a genuine friend's share included.
     fn lib_refs(&self) -> Vec<plx_plex::plex::pins::LibRef<'_>> {
-        // Personal media of a source that is not the household's is never on by default: a friend's
-        // Other Videos library would otherwise flip ON the moment the household owns none, and its
-        // clips (a Home row, with the hub gate) would reach every member's Home unasked. Counting
-        // the kind as always household-owned makes `pins::default_on` = `household` for it.
-        let household_type = |kind: SecKind| kind == SecKind::Video || self.sections.iter().any(|section| {
+        let household_type = |kind: SecKind| self.sections.iter().any(|section| {
             section.kind == kind
                 && self.sources.get(section.src).map(|source| source.household).unwrap_or(true)
         });
@@ -3446,7 +3443,8 @@ impl SecKind {
     /// Favorite libraries row's hint; the exhaustive `match` makes a new kind decide.
     pub const fn opt_in(self) -> bool {
         match self {
-            SecKind::Movie | SecKind::Show | SecKind::Video => false,
+            SecKind::Movie | SecKind::Show => false,
+            SecKind::Video => true,
         }
     }
     /// This kind's position in [`TAB_KINDS`] — the index of the per-kind arrays (`preferred`,
@@ -3551,7 +3549,8 @@ fn activate_source_of(_i: usize) {
 // Source rides inside the library pill's own label instead, so adding people never reshapes this strip.
 // The one exception to "a pill is a TYPE" is a lone Other Videos library: its pill wears that
 // library's own title (`sole_favorite_title`), and goes back to the type word the moment a second
-// favourite library of the type appears.
+// favourite library of the type appears. That kind is also opt-in ([`SecKind::opt_in`]): it has no
+// pill at all until somebody switches a library of it on in Favorite libraries.
 //
 // **What DOES reshape it is the favourite switch, and that is the change of 2026-09-05.** Movies
 // and TV Shows were permanent destinations — `tab_count` was a constant 2 and `tabs_gen` a
