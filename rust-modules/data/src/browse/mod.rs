@@ -2039,12 +2039,13 @@ impl BrowseState {
     fn rows_where(&self, keep: impl Fn(&BrowseSection) -> bool) -> Vec<SrcRow> {
         let last = self.pinned_count() == 1;
         let current = self.cur();
+        let has_tab = TAB_KINDS.map(|kind| self.tab_has_favorite(kind));
         self.sections.iter().enumerate().filter(|(_, section)| keep(section))
             .map(|(index, section)| SrcRow {
                 src: section.src, section: index, title: section.title.clone(),
                 count_line: count_line(section.count, section.kind), pinned: section.pinned,
                 last_pinned: last && section.pinned, current: index == current,
-                adds_tab: section.kind.opt_in(),
+                adds_tab: section.kind.opt_in() && !has_tab[section.kind.slot()],
             }).collect()
     }
     fn all_source_rows(&self) -> Vec<SrcRow> {
@@ -3686,8 +3687,9 @@ pub struct SrcRow {
     pub last_pinned: bool,
     /// the library being browsed — the Browse level's single tick
     pub current: bool,
-    /// switching this row on would ADD a tab to the strip (its kind is off until switched on,
-    /// [`SecKind::opt_in`]) — the editor's sub-line says so while the row is off
+    /// switching this row on would ADD a tab to the strip: its kind is off until switched on
+    /// ([`SecKind::opt_in`]) and no library of it is a favourite yet (a second library shares the
+    /// first one's pill) — the editor's sub-line says so while the row is off
     pub adds_tab: bool,
 }
 
