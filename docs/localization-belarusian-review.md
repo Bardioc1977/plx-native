@@ -185,3 +185,12 @@ library type "Other Videos".
 | `browse.kind.videos` | | Відэа |
 | `browse.library.videos` | one, few, many, other | {count} відэа |
 | `browse.library.no_videos` | | У бібліятэцы {library} няма відэа |
+
+The opt-in switch (Favorite libraries lists an Other Videos library off until it is switched on); the
+wording is pronoun-free on purpose, so it needs no agreement with the library's own title:
+
+`locales/be/widgets.json`:
+
+| Key | String |
+| --- | --- |
+| `widgets.source.opt_in_hint` | Дадае ўкладку пры ўключэнні |

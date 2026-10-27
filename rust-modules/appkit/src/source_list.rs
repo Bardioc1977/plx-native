@@ -278,6 +278,10 @@ pub fn form(
                         .value_dim(r.last_pinned)
                         .detail(if r.last_pinned {
                             plx_platform::i18n::msg::widgets_source_needs_library().to_string()
+                        } else if r.opt_in && !r.pinned {
+                            // an opt-in library (Other Videos) that is off: say what the switch
+                            // does, pronoun-free because the title is the user's own name for it
+                            plx_platform::i18n::msg::widgets_source_opt_in_hint().to_string()
                         } else {
                             r.count_line.clone()
                         });

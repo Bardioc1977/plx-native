@@ -26,6 +26,7 @@
   "widgets.source.remote": "Remote",
   "widgets.source.relay": "Relay",
   "widgets.source.needs_library": "Die App braucht eine Mediathek",
+  "widgets.source.opt_in_hint": "Fügt einen Tab hinzu, wenn aktiviert",
   "widgets.source.new_shares": "Nach Freigaben suchen",
   "widgets.source.shared_with_you": "Mit dir geteilt",
   "widgets.source.unauthorized": "Nicht autorisiert",

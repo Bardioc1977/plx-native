@@ -26,6 +26,7 @@
   "widgets.source.remote": "Удалённый",
   "widgets.source.relay": "Через ретранслятор",
   "widgets.source.needs_library": "Выберите хотя бы одну медиатеку",
+  "widgets.source.opt_in_hint": "Добавляет вкладку при включении",
   "widgets.source.new_shares": "Проверить общие медиатеки",
   "widgets.source.shared_with_you": "Доступно вам",
   "widgets.source.unauthorized": "Нет разрешения",
