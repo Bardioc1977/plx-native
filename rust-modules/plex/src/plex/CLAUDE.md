@@ -600,7 +600,7 @@ a dead source is **absent** from Home and states itself in its own library secti
   failed to load deletes nothing. (3) **One stamp inside a sign-in**: the cached roster is part of the
   stamp's input, so an empty `home/users` answer never replaces a roster cached for the same token
   (the `SignedIn` arm), the owner republishes the seat when a durable roster write moves the stamp
-  (`PersistencePurpose::Seat`, on the durable completion, never at admission; a Seat verdict that was overtaken or failed leaves `seat_republish_owed` set and the next durable completion of any write pays it, until then a pick is refused rather than written under a stamp the file does not hold), and the media mirrors
+  (`PersistencePurpose::Seat`, on the durable completion, never at admission; a Seat verdict that was overtaken or failed leaves `seat_republish_owed` set, holding the stamp it was owed for, and the next durable completion of any write pays it while the session still holds that stamp; the debt is dropped wherever `persisted` moves to another account (`drop_seat_debt`) and a completion drops one that names another stamp, so a profile is never published under another account's stamp; until paid, a pick is refused rather than written under a stamp the file does not hold), and the media mirrors
   read and write under the stamp they were seeded with or not at all. A new stamped list registers
   in `Preferences::restamp` (`prefs_tests` T-stamp fails until it does) and takes
   `StampedRecord`; **plaintext consent is not one of them**: it is a security grant, is answered
