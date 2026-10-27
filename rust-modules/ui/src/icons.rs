@@ -135,7 +135,7 @@ pub enum Icon {
     Collection,
     /// Three rows, each with a leading dot — "the episodes of the show": **the detail hero's Go to
     /// Show disc, and only that** (an episode's page names its show, and the disc opens it on the
-    /// episode's season).
+    /// episode's season, or on the show's default season when the episode has none).
     ///
     /// It is the same destination as the item menu's "Go to Show" row, which wears [`Icon::Show`],
     /// and the two marks differ deliberately, the way [`Icon::Restart`] and [`Icon::PlayStart`] do:

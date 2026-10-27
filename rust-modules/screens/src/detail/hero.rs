@@ -124,7 +124,8 @@ pub enum HeroCtl {
     /// versions; it opens the list of them (`screens::versions_panel`)
     Version,
     /// the Go to Show disc, present only on an episode's page that names its show; it opens the
-    /// show on the episode's season. LAST in the row, so every older set keeps its indices
+    /// show on the episode's season (the show's default season when the episode has no season
+    /// number, see [`show_target`]). LAST in the row, so every older set keeps its indices
     GoToShow,
 }
 

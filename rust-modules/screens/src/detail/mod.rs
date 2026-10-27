@@ -4429,7 +4429,7 @@ impl DetailScreen {
                 }
             }
             // The Go to Show disc: the item menu's own "Go to Show" row, so the application opens
-            // the show on the episode's season through the one route the menu already uses
+            // the show on the episode's season (the default one when it has no number) through the one route the menu already uses
             // (`apply_item_action` -> `open_detail`); the episode's page stays under it for BACK.
             hero::HeroCtl::GoToShow => {
                 if let Some(d) = self.detail(meta) {

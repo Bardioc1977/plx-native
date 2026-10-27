@@ -384,7 +384,7 @@ The action row:
 | **Play** / **Resume** | start, or resume from the stored position |
 | **↺** | play from the start (shown when there is a resume point) |
 | the watched disc | toggle watched — it **wears the face of the write it would perform**, so it is a **✓** on an unwatched item and a **−** on a watched one |
-| the list disc (episode pages only, last in the row) | **Go to Show** — opens the show on this episode's season; BACK returns to the episode. It is absent when the episode does not name its show |
+| the list disc (episode pages only, last in the row) | **Go to Show** — opens the show on this episode's season when the episode has a season number (a Special, or an episode without one, opens the show on its default season); BACK returns to the episode. It is absent when the episode does not name its show |
 
 Below, **Cast & Crew** — OK on a headshot opens that person's page, from which their other titles
 lead back into more detail pages. The BACK trail unwinds the whole chain.

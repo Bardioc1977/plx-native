@@ -177,7 +177,7 @@
   },
   "browse.detail.go_show": {
     "value": "Go to Show",
-    "description": "The detail page's Go to Show button, shown on an episode's page. It is a round icon button whose name slides out beside it when focused, so keep it short: its width counts against the room of the whole button row, and a label that is too wide makes every button in the row stay a plain circle. Pressing it opens the show's page on this episode's season."
+    "description": "The detail page's Go to Show button, shown on an episode's page. It is a round icon button whose name slides out beside it when focused, so keep it short: its width counts against the room of the whole button row, and a label that is too wide makes every button in the row stay a plain circle. Pressing it opens the show's page on this episode's season, or on the show's default season when the episode has no season number (Specials)."
   },
   "browse.detail.resume": {
     "value": "Resume",
