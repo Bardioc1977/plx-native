@@ -117,3 +117,36 @@ fn an_unpinned_library_keeps_its_clip_row_off_home() {
     assert!(items.iter().all(|m| item_pinned(&on, m)));
     assert!(items.iter().all(|m| item_pinned(&[(sid(0), 1, false)], m)), "another library's pin is not this one's");
 }
+
+/// **An Other Videos library that is off publishes no clip card, on the shelf the server filed it
+/// under.** The shelf survives in the build (it is the server's row); what Home publishes, and
+/// whether the shelf takes a place in the order at all, is decided by the library's switch.
+#[test]
+fn a_switched_off_other_videos_library_publishes_no_clip_row() {
+    let sh = shelf_in(0, 3, "", "home.videos.recent", &["901", "902"]);
+    let srcs = [src(0, "", HubState::Ready, Some(built(0, &[], vec![sh.clone()])))];
+    let off = [(sid(0), 3, false), (sid(0), 1, true)];
+    let on = [(sid(0), 3, true), (sid(0), 1, true)];
+    assert_eq!(publishable(&sh, &off).count(), 0, "switched off: no card");
+    assert!(published_order(&srcs, &off).is_empty(), "…and no place in the order");
+    assert_eq!(publishable(&sh, &on).count(), 2, "switched on: both cards");
+    assert_eq!(published_order(&srcs, &on), [(0, 0)]);
+}
+
+/// **A personal-video row whose cards name no library cannot prove its library is a favourite.**
+/// `item_pinned` lets a card with no `librarySectionID` through ("unknown is allowed"), which is
+/// right for a movie row and would publish a clip from a library that is off. Insurance: every
+/// item list measured on a real server carries the id, the global clip hub among them being empty
+/// there (`hidden` 1).
+#[test]
+fn a_clip_row_that_names_no_library_is_not_published() {
+    let clips = shelf(0, "", "home.videos.recent", &["901", "902"]);
+    let section_clips = shelf(0, "", "video.recent.3", &["903"]);
+    let movies = shelf(0, "", "home.movies.recent", &["1"]);
+    let pins = [(sid(0), 3, false), (sid(0), 1, true)];
+    assert_eq!(publishable(&clips, &pins).count(), 0, "home.videos.* without a section id");
+    assert_eq!(publishable(&section_clips, &pins).count(), 0, "video.* without a section id");
+    assert_eq!(publishable(&movies, &pins).count(), 1, "a movie row keeps the unknown-is-allowed rule");
+    let srcs = [src(0, "", HubState::Ready, Some(built(0, &[], vec![clips, section_clips, movies])))];
+    assert_eq!(published_order(&srcs, &pins), [(0, 2)], "only the movie shelf takes a place");
+}
