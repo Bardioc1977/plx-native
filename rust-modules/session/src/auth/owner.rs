@@ -817,15 +817,16 @@ pub struct SessionInit {
     /// only: a relaunch asks plex.tv again.
     #[serde(default)]
     pub switch_refused_for: Option<Identity>,
-    /// **A `Seat` write was admitted and the seat has not been republished since.** The seat
+    /// **A `Seat` write was admitted and the seat has not been republished since**, holding the
+    /// stamp that write moved the seat to. The seat
     /// (`plex::session::Seat`) carries the stamp it was published under, and a roster landing that
     /// moves the stamp of a published profile makes the stored pair and the seat disagree until the
     /// profile is published again. Set when a `Seat` commit is admitted; cleared by ANY publication
     /// ([`SessionMachine::publish_profile`]); and read by the next DURABLE completion of any write,
     /// which republishes while it is set (see `apply_persistence_completion`). Neither serialized nor
     /// hashed while false, so no recorded initial state or digest changes.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub seat_republish_owed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat_republish_owed: Option<String>,
 }
 
 impl SessionInit {
@@ -884,7 +885,7 @@ impl SessionInit {
             active_profile: None, profile_scope: ProfileScope(0),
             delete_leftovers: 0, incident: None, incidents_seen: Vec::new(), next_incident: 0,
             link_trouble: false, discovery_retry: None, plaintext: None, signin_account: None,
-            switch_refused_for: None, seat_republish_owed: false }
+            switch_refused_for: None, seat_republish_owed: None }
     }
 
     pub fn captured_boot(saved: PersistedSession, primary: Option<plx_plex::plex::session::ServerRef>,
@@ -1114,7 +1115,7 @@ impl LogicalState for SessionInit {
             w.str(&id.client_id).str(&id.account_token).str(&id.profile_uuid);
         });
         // Appended only when present, so every state without an offer keeps its digest.
-        if self.seat_republish_owed { w.u8(0xA5); }
+        if let Some(stamp) = &self.seat_republish_owed { w.u8(0xA5).str(stamp); }
         if let Some(verdict) = &self.plaintext {
             write_plaintext_verdict(w, verdict);
         }
@@ -1562,7 +1563,7 @@ impl SessionMachine {
             // a sign-in has begun, another handoff is held: their own publication pays it).
             // `!released` is deliberately DEFENSIVE: a held handoff's release publishes already,
             // and the conjunct keeps a future change from publishing twice.
-            let republish = self.state.seat_republish_owed && !released
+            let republish = self.state.seat_republish_owed.is_some() && !released
                 && !self.state.authorized_in_flow && self.state.held_handoff.is_none()
                 && self.state.active_profile.is_some()
                 && !plx_plex::plex::session::account_stamp(&self.state.persisted).is_empty();
@@ -1619,9 +1620,6 @@ impl SessionMachine {
             proves_saved_login: false,
         };
         self.state.persistence_purpose = None;
-        if admit_revision.is_some() && admit_purpose == Some(PersistencePurpose::Seat) {
-            self.state.seat_republish_owed = true;
-        }
         if !reply.admission.accepted() {
             if let Some(DevCommitDelta::StartAccount { login_req }) = commit.delta.dev {
                 self.retire(login_req, emit);
@@ -1677,6 +1675,9 @@ impl SessionMachine {
                     (commit.fresh && admit_revision.is_some()).then_some(prior);
                 self.state.committed_credentials = patch;
             }
+        }
+        if admit_revision.is_some() && admit_purpose == Some(PersistencePurpose::Seat) {
+            self.state.seat_republish_owed = Some(plx_plex::plex::session::account_stamp(&self.state.persisted));
         }
         if let Some(phase) = delta.phase { self.state.phase = phase; }
         if let Some(picker) = delta.picker { self.state.picker = picker; }
@@ -1907,7 +1908,7 @@ impl SessionMachine {
         self.state.active_profile = profile;
         // Every publication seats the stamp `persisted` names now: whatever republication a roster
         // write owed the seat is paid.
-        self.state.seat_republish_owed = false;
+        self.state.seat_republish_owed = None;
         emit(SessionFx::PublishProfile(ProfilePublication {
             epoch: self.state.epoch, profile: self.state.active_profile.clone(), scope: self.state.profile_scope,
             stamp: plx_plex::plex::session::account_stamp(&self.state.persisted),

@@ -237,15 +237,15 @@ fn a_failed_seat_write_is_made_good_by_the_next_durable_completion() {
 fn any_publication_clears_the_owed_republication() {
     let _g = plx_base::testlock::serial();
     let (mut owner, seat) = parked_roster_commit(Vec::new(), vec![admin_tile(7, "synthetic-owner-7")]);
-    assert!(owner.state.seat_republish_owed, "the admitted Seat write owes the seat a republication");
+    assert!(owner.state.seat_republish_owed.is_some(), "the admitted Seat write owes the seat a republication");
     step(&mut owner, SessionEvent::Persistence(completion(&seat, 7, false)));
-    assert!(owner.state.seat_republish_owed, "a failed verdict does not pay it");
+    assert!(owner.state.seat_republish_owed.is_some(), "a failed verdict does not pay it");
     step(&mut owner, SessionEvent::Command(Command::SignOut));
-    assert!(!owner.state.seat_republish_owed, "the sign-out's publication paid it");
+    assert!(owner.state.seat_republish_owed.is_none(), "the sign-out's publication paid it");
 
     let mut owner = seated_owner(vec![admin_ref(7, "synthetic-owner-7")]);
     let plain = later_roster_write(&mut owner, 3);
-    assert!(!owner.state.seat_republish_owed, "a write that does not move the stamp owes nothing");
+    assert!(owner.state.seat_republish_owed.is_none(), "a write that does not move the stamp owes nothing");
     assert!(publications(&step(&mut owner, SessionEvent::Persistence(completion(&plain, 3, true)))).is_empty());
 }
 
@@ -459,4 +459,103 @@ fn the_published_stamp_is_the_account_stamp_of_the_persisted_session() {
     assert_ne!(publish(vec![admin_ref(8, "synthetic-owner-8")], "synthetic-token-a"), OWNER_7, "another owner: another stamp");
     assert_eq!(publish(Vec::new(), "synthetic-token-a"), plx_plex::plex::grant::account_key("synthetic-token-a"));
     assert_eq!(publish(vec![admin_ref(7, "synthetic-owner-7")], ""), "");
+}
+
+/// A seated owner 7 whose Seat write FAILED (the debt stays), then "Use another account": the
+/// authorization with a new token, and the new account's sign-in (owner 9) up to its admitted
+/// Discovery write. Returns the owner, the Discovery commit and what was published on the way.
+fn owed_seat_then_a_second_account_at_discovery()
+    -> (SessionMachine, (u32, u64, u64, CommitPlan), std::cell::RefCell<Vec<ProfilePublication>>) {
+    use crate::auth::LoginProgress;
+    let (mut owner, seat) = parked_roster_commit(Vec::new(), vec![admin_tile(7, "synthetic-owner-7")]);
+    step(&mut owner, SessionEvent::Persistence(completion(&seat, 7, false)));
+    assert!(owner.state.seat_republish_owed.is_some(), "rig: the failed Seat write left its debt");
+    let published = std::cell::RefCell::new(Vec::<ProfilePublication>::new());
+    assert!(owner.restart_login(true, &mut |_| {}));
+    let (epoch, req) = (owner.state.epoch, owner.state.next_req);
+    for (arrival, progress) in [
+        (1, LoginProgress::CodeReady { epoch, code: "synthetic-code".into(), qr_png: vec![1] }),
+        (2, LoginProgress::Authorized { epoch, token: "synthetic-new-token".into() }),
+    ] {
+        let event = qr_event(&owner, req, arrival, progress, false);
+        published.borrow_mut().extend(publications(&step(&mut owner, SessionEvent::Result(event))));
+    }
+    let signed_in = qr_event(&owner, req, 3, LoginProgress::SignedIn { epoch, server: local_server(),
+        sources: Vec::new(), users: vec![admin_tile(9, "synthetic-owner-9")] }, true);
+    let discovery = commit_of(&step(&mut owner, SessionEvent::Result(signed_in)));
+    published.borrow_mut().extend(publications(&step(&mut owner, SessionEvent::Commit(CommitReply {
+        req: discovery.0, epoch: discovery.1, arrival: discovery.2,
+        admission: CommitAdmission::Admitted { revision: 1, purpose: PersistencePurpose::Discovery } }))));
+    (owner, discovery, published)
+}
+
+/// **A debt owed to one account is never paid under another's stamp.** Owner 7's seat is owed a
+/// republication (its Seat write failed), the person signs in as owner 9, and starts over before
+/// the Discovery write reports. `restart_login` clears `authorized_in_flow` and puts the
+/// committed pair back while the profile that is still active is owner 7's: the Discovery write's
+/// durable completion would publish owner 7's profile under owner 9's stamp.
+#[test]
+fn a_debt_owed_to_one_account_is_never_paid_under_another_accounts_stamp() {
+    let _g = plx_base::testlock::serial();
+    let (mut owner, discovery, published) = owed_seat_then_a_second_account_at_discovery();
+    assert!(owner.restart_login(true, &mut |_| {}), "rig: the person starts over");
+    assert_eq!(owner.state.active_profile.as_ref().map(|u| u.uuid.as_str()), Some("u-1"), "rig: owner 7's profile is still the active one");
+    published.borrow_mut().extend(publications(&step(&mut owner, SessionEvent::Persistence(completion(&discovery, 1, true)))));
+    assert!(published.borrow().is_empty(),
+        "nothing is published under another account: {:?}",
+        published.borrow().iter().map(|p| (p.stamp.clone(), p.profile.as_ref().map(|u| u.uuid.clone()))).collect::<Vec<_>>());
+}
+
+/// The debt is bound to the stamp it was owed for: a roster of another owner landing in `persisted`
+/// by any route other than a publication leaves a debt that names a stamp the session no longer
+/// has, and a durable completion drops it instead of paying it.
+#[test]
+fn a_debt_for_a_stamp_the_session_no_longer_has_is_dropped_not_paid() {
+    let _g = plx_base::testlock::serial();
+    let (mut owner, seat) = parked_roster_commit(Vec::new(), vec![admin_tile(7, "synthetic-owner-7")]);
+    step(&mut owner, SessionEvent::Persistence(completion(&seat, 7, false)));
+    assert_eq!(owner.state.seat_republish_owed.as_deref(), Some(OWNER_7), "rig: the debt names owner 7's stamp");
+    let later = later_roster_write(&mut owner, 8);
+    owner.state.persisted.home_users = vec![admin_ref(9, "synthetic-owner-9")];
+    assert!(publications(&step(&mut owner, SessionEvent::Persistence(completion(&later, 8, true)))).is_empty(),
+        "a debt for owner 7's stamp is not paid while the session holds owner 9's");
+    assert!(owner.state.seat_republish_owed.is_none(), "and it is dropped");
+}
+
+/// The debt does not outlive its account: every place that moves `persisted` to another account
+/// drops it (the authorization with a new token, a fresh restart, a refused token, the resume of
+/// a stored session).
+#[test]
+fn every_move_to_another_account_drops_the_debt() {
+    use crate::auth::LoginProgress;
+    let _g = plx_base::testlock::serial();
+    let owed = || {
+        let (mut owner, seat) = parked_roster_commit(Vec::new(), vec![admin_tile(7, "synthetic-owner-7")]);
+        step(&mut owner, SessionEvent::Persistence(completion(&seat, 7, false)));
+        assert!(owner.state.seat_republish_owed.is_some(), "rig: owed");
+        owner
+    };
+
+    let mut owner = owed();
+    assert!(owner.restart_login(true, &mut |_| {}));
+    assert!(owner.state.seat_republish_owed.is_none(), "a fresh restart");
+
+    let mut owner = owed();
+    assert!(owner.restart_login(true, &mut |_| {}));
+    owner.state.seat_republish_owed = Some(OWNER_7.into());
+    let (epoch, req) = (owner.state.epoch, owner.state.next_req);
+    for (arrival, progress) in [
+        (1, LoginProgress::CodeReady { epoch, code: "synthetic-code".into(), qr_png: vec![1] }),
+        (2, LoginProgress::Authorized { epoch, token: "synthetic-new-token".into() }),
+    ] {
+        let event = qr_event(&owner, req, arrival, progress, false);
+        step(&mut owner, SessionEvent::Result(event));
+    }
+    assert!(owner.state.seat_republish_owed.is_none(), "the authorization with a new token");
+
+    let mut owner = owed();
+    owner.state.authorized_in_flow = true;
+    owner.fail_login("refused", Some(IncidentContext::new(
+        plx_telemetry::telemetry::incident::IncidentKind::Authorization, None)), &mut |_| {});
+    assert!(owner.state.seat_republish_owed.is_none(), "a refused token");
 }
