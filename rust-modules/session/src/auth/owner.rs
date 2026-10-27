@@ -822,9 +822,9 @@ pub struct SessionInit {
     /// moves the stamp of a published profile makes the stored pair and the seat disagree until the
     /// profile is published again. Set when a `Seat` commit is admitted; cleared by ANY publication
     /// ([`SessionMachine::publish_profile`]); and read by the next DURABLE completion of any write,
-    /// which republishes while it is set (see `apply_persistence_completion`). Not hashed while
-    /// false, so no recorded state changes digest.
-    #[serde(default)]
+    /// which republishes while it is set (see `apply_persistence_completion`). Neither serialized nor
+    /// hashed while false, so no recorded initial state or digest changes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub seat_republish_owed: bool,
 }
 
