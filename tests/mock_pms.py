@@ -1089,11 +1089,19 @@ class Library:
             kind = {"1": "movie", "2": "show", "3": "season", "4": "episode"}.get(t, kind)
         rows = [it for it in self.items.values() if it["type"] == kind
                 and it["librarySectionID"] == int(key)]
-        # `unwatchedLeaves` is the key the app sends for shows and seasons (their leaves, not the
-        # row itself, carry the watch state); an episode has no leaves, so it reads as `unwatched`.
-        # The mock keeps one predicate for both keys: a show is unwatched here while some leaf is.
-        if q.get("unwatched") == "1" or q.get("unwatchedLeaves") == "1":
+        # Two keys, not one. `unwatchedLeaves=1` is the key the app sends for shows and seasons: a row
+        # whose leaves are not all watched. A real PMS answers `unwatched=1` on such a row differently
+        # (30 of 33 shows against 24, docs/pms-api.md "Unwatched"; its rule is not documented), so the
+        # mock models only that the two DIFFER: `unwatched=1` reads the row's own `viewCount`, which a
+        # show or season never carries here. An app sending the wrong key for a show gets an unnarrowed
+        # listing instead of passing by luck. Movies and episodes have no leaves: `unwatched` as usual.
+        if q.get("unwatchedLeaves") == "1":
             rows = [it for it in rows if not self._watched(it)]
+        if q.get("unwatched") == "1":
+            if kind in ("show", "season"):
+                rows = [it for it in rows if not it.get("viewCount", 0) > 0]
+            else:
+                rows = [it for it in rows if not self._watched(it)]
         g = q.get("genre")
         if g:
             rows = [it for it in rows if any(str(t["id"]) == g for t in it.get("Genre", []))]

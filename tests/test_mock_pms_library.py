@@ -292,19 +292,36 @@ class LetterRailFilters(unittest.TestCase):
         self.assertTrue(any(by_letter.get(r["title"], 0) < r["size"] for r in plain),
                         "the fixture has watched titles, so some letter shrinks")
 
-    def test_shows_are_scoped_by_type_and_unwatched_leaves(self):
+    def fully_watched_show_fixture(self):
         lib = Library(movies=0, rail_fixture=True)
         show = next(it for it in lib.items.values() if it["type"] == "show")
-        for episode in lib.leaves(show["ratingKey"] if isinstance(show["ratingKey"], int) else int(show["ratingKey"])):
+        for episode in lib.leaves(int(show["ratingKey"])):
             episode["viewCount"] = 1
         lib._roll_up()
-        pms = MockPms(lib)
+        return MockPms(lib)
+
+    def test_shows_are_scoped_by_type_and_unwatched_leaves(self):
+        pms = self.fully_watched_show_fixture()
         everything = self.counts(pms, 2, "type=2")
-        for terms in ("type=2&unwatchedLeaves=1", "type=2&unwatched=1"):
-            with self.subTest(terms=terms):
-                filtered = self.assert_offsets_land_on_their_letter(pms, 2, terms)
-                self.assertLess(sum(r["size"] for r in filtered), sum(r["size"] for r in everything),
-                                "the fixture has a fully watched show")
+        filtered = self.assert_offsets_land_on_their_letter(pms, 2, "type=2&unwatchedLeaves=1")
+        self.assertLess(sum(r["size"] for r in filtered), sum(r["size"] for r in everything),
+                        "the fixture has a fully watched show")
+
+    def test_unwatched_is_not_unwatched_leaves_on_shows(self):
+        """A real PMS answers the two keys differently for shows (docs/pms-api.md, "Unwatched":
+        30 of 33 against 24), so the mock must not treat them as one predicate: an app that sent
+        `unwatched` for a show listing would otherwise get the filtered rail and grid by luck.
+        The Rust half is `the_letters_request_carries_the_terms_the_grid_sends`
+        (`data/src/browse/listing_jobs_tests.rs`), which pins the key the app sends for shows; this
+        pins that the mock can tell a wrong key from the right one. Only the DIVERGENCE is
+        modelled (the row's own, never-set `viewCount`), not PMS's undocumented rule."""
+        pms = self.fully_watched_show_fixture()
+        everything = sum(r["size"] for r in self.counts(pms, 2, "type=2"))
+        leaves = sum(r["size"] for r in self.counts(pms, 2, "type=2&unwatchedLeaves=1"))
+        plain = sum(r["size"] for r in self.counts(pms, 2, "type=2&unwatched=1"))
+        self.assertLess(leaves, everything)
+        self.assertNotEqual(plain, leaves)
+        self.assertEqual(self.total(pms, 2, "type=2&unwatched=1"), plain, "counts still sum to totalSize")
 
     def test_a_filter_that_matches_nothing_answers_an_empty_directory(self):
         pms = MockPms(Library(movies=60, rail_fixture=True))
