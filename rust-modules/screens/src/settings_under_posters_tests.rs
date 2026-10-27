@@ -331,7 +331,7 @@ fn the_root_row_opens_the_page() {
 
 fn text_fit_inputs() -> RootInputs {
     RootInputs {
-        signed_in: true, multi_user: false, library_count: 0,
+        signed_in: true, multi_user: false, library_count: 0, opt_in_library_off: false,
         auto_sign_in: false, trailer_autoplay: true, resolution: UiResolution::Auto, resolution_offered: false,
         language: plx_platform::i18n::Preference::System,
         under_posters: plx_plex::plex::session::UnderPosters::DEFAULT, plaintext: Vec::new(),

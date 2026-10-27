@@ -25,7 +25,7 @@ fn overflowing(page: &str, table: &TableView, out: &mut Vec<String>) {
 /// product).
 fn base_root_inputs() -> RootInputs {
     RootInputs {
-        signed_in: true, multi_user: false, library_count: 0,
+        signed_in: true, multi_user: false, library_count: 0, opt_in_library_off: false,
         auto_sign_in: false, trailer_autoplay: true, resolution: UiResolution::Auto, resolution_offered: true,
         language: plx_platform::i18n::Preference::System,
         under_posters: plx_plex::plex::session::UnderPosters::DEFAULT, plaintext: Vec::new(),
@@ -76,6 +76,13 @@ fn every_settings_row_fits_its_column_in_every_language() {
         for &library_count in &[0i64, 1, 88] {
             overflowing_root(&format!("{tag} library_count={library_count}"),
                 &RootInputs { library_count, ..base_root_inputs() }, &mut out);
+        }
+        // the sub-line that names the off Other Videos library, beside the widest value column
+        for opt_in_library_off in [true, false] {
+            for &library_count in &[0i64, 88] {
+                overflowing_root(&format!("{tag} opt_in_library_off={opt_in_library_off} library_count={library_count}"),
+                    &RootInputs { opt_in_library_off, library_count, ..base_root_inputs() }, &mut out);
+            }
         }
         for language_pref in LANGUAGES {
             overflowing_root(&format!("{tag} language={language_pref:?}"),
@@ -156,4 +163,22 @@ fn the_restart_hint_fits_the_language_narrative_in_every_language() {
         }
     }
     assert!(out.is_empty(), "{}", out.join("\n"));
+}
+
+/// **The Favorite libraries row says Other Videos libraries are off by default while one is off**,
+/// in place of its usual line (which it replaces rather than extends, so a one-line root row never
+/// elides it), and keeps the usual line otherwise.
+#[test]
+fn the_libraries_row_names_the_off_by_default_kind_only_while_one_is_off() {
+    let _guard = plx_base::testlock::serial();
+    let _en = language_on_this_thread_for_test(plx_platform::i18n::Preference::En);
+    let detail = |opt_in_library_off| {
+        let mut form = FormTable::<RootId, Action, SettingsPage>::new(super::super::registry::BAND);
+        form.table.compact = false;
+        form.set(root_form(&RootInputs { opt_in_library_off, ..base_root_inputs() }), None);
+        let i = form.index_of_key(RootId::Favourites.key()).expect("the row is on a signed-in root");
+        form.table.sections.iter().flat_map(|s| s.rows.iter()).nth(i).expect("the row exists").detail.clone()
+    };
+    assert_eq!(detail(true), "Other Videos libraries are off by default.");
+    assert_eq!(detail(false), "Which libraries this television shows.");
 }

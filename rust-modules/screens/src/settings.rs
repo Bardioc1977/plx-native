@@ -1100,6 +1100,9 @@ struct RootInputs {
     /// shown the Automatically Sign In switch.
     multi_user: bool,
     library_count: i64,
+    /// Whether an opt-in library (Other Videos) exists and is off: the Favorite libraries row then
+    /// says so, because that is where it is switched on. Read from the directory, like the count.
+    opt_in_library_off: bool,
     auto_sign_in: bool,
     trailer_autoplay: bool,
     resolution: UiResolution,
@@ -1114,6 +1117,11 @@ struct RootInputs {
     /// Unencrypted-connection switches, in row order — empty when signed out or when nobody has
     /// an answered/offered plaintext question.
     plaintext: Vec<PlaintextRowInput>,
+}
+
+/// The Favorite libraries row's sub-line.
+fn libraries_detail(_opt_in_library_off: bool) -> String {
+    plx_platform::i18n::msg::settings_libraries_detail().to_string()
 }
 
 /// The Settings root as a [`Form`], built from plain arguments rather than `&self` — see
@@ -1134,7 +1142,7 @@ fn root_form(inputs: &RootInputs) -> Form<RootId, Action, SettingsPage> {
             RowKind::Nav(SettingsPage::Favourites),
             Action::Door,
             Row::new(plx_platform::i18n::msg::settings_libraries_title())
-                .detail(plx_platform::i18n::msg::settings_libraries_detail())
+                .detail(libraries_detail(inputs.opt_in_library_off))
                 .value(plx_platform::i18n::msg::settings_libraries_count(inputs.library_count))
                 .chevron(true),
         )
@@ -1308,6 +1316,7 @@ impl RootPage {
         let plaintext = if signed_in { self.plaintext_inputs() } else { Vec::new() };
         let form = root_form(&RootInputs {
             signed_in, multi_user, library_count: directory.pinned_count() as i64,
+            opt_in_library_off: directory.sections().iter().any(|s| s.row.opt_in && !s.row.pinned),
             auto_sign_in, trailer_autoplay, resolution, resolution_offered, language: self.state.language,
             under_posters: self.state.under_posters, plaintext,
         });

@@ -117,3 +117,39 @@ fn the_separator_before_recheck_is_inert_and_recheck_is_the_last_focusable_row()
     assert_eq!(built.step_key(SrcTarget::Library(2).key(), 1), Some(SrcTarget::Recheck.key()),
         "a step from the last library lands on Recheck, not on the separator");
 }
+
+/// An opt-in kind's library (Other Videos), as the editor's row carries it.
+fn opt_in_lib(src: usize, section: usize, title: &str, pinned: bool, last: bool) -> plx_data::stores::browse::SrcRow {
+    plx_data::stores::browse::SrcRow { opt_in: true, ..lib(src, section, title, pinned, last, false) }
+}
+
+/// **An off opt-in library says what switching it on does; every other state keeps its line.**
+/// While it is off the sub-line is the hint (no pronoun: the title is the user's own name for the
+/// library); on, it is the count line; as the only favourite the last-library rule wins (the row
+/// cannot be switched off); on the Browse level there is no sub-line at all.
+#[test]
+fn an_off_opt_in_row_carries_the_hint_and_loses_it_when_on_or_last() {
+    let groups = vec![group(SourceState::Reachable, None, "")];
+    let detail_of = |rows: &[plx_data::stores::browse::SrcRow]| {
+        let (sections, _) = sections(Level::OnHome, &groups, rows, Tail::None);
+        sections[0].rows.iter().map(|row| row.detail.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        detail_of(&[lib(0, 0, "Movies", true, false, true), opt_in_lib(0, 1, "Family Clips", false, false)]),
+        ["26 films", "Adds a tab when switched on"],
+        "off: the hint replaces the count line"
+    );
+    assert_eq!(
+        detail_of(&[lib(0, 0, "Movies", true, false, true), opt_in_lib(0, 1, "Family Clips", true, false)]),
+        ["26 films", "26 films"],
+        "on: the count line again"
+    );
+    assert_eq!(
+        detail_of(&[lib(0, 0, "Movies", false, false, true), opt_in_lib(0, 1, "Family Clips", true, true)]),
+        ["26 films", "The app needs one library"],
+        "the last favourite: the rule outranks the hint"
+    );
+    let (browse, _) = sections(Level::Browse, &groups,
+        &[lib(0, 0, "Movies", true, false, true), opt_in_lib(0, 1, "Family Clips", false, false)], Tail::None);
+    assert!(browse[0].rows.iter().all(|row| row.detail.is_empty()), "the Browse level draws no sub-line");
+}

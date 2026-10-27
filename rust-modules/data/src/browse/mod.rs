@@ -4125,6 +4125,14 @@ pub fn seed_two_source_table_for_owner_test(state: &mut BrowseState) {
     );
 }
 
+/// [`seed_two_source_table_for_owner_test`] plus the household's Other Videos library
+/// ("Family Clips", section key 3, the fifth row), which an opt-in kind leaves OFF.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_two_source_table_with_other_videos_for_owner_test(state: &mut BrowseState) {
+    seed_two_source_table_for_owner_test(state);
+    state.append_sections_with(0, vec![(3, "Family Clips".into(), SecKind::Video)], None);
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn seed_registered_table_for_owner_test(
     state: &mut BrowseState,
