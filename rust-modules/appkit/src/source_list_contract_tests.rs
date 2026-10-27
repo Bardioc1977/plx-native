@@ -26,6 +26,7 @@ fn lib(src: usize, section: usize, title: &str, pinned: bool, last: bool, curren
         pinned,
         last_pinned: last,
         current,
+        opt_in: false,
     }
 }
 

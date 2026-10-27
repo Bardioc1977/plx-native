@@ -468,11 +468,11 @@ mod tests {
         ];
         let rows = vec![
             plx_data::browse::SrcRow { src: 0, section: 0, title: "Movies".into(), count_line: "185 films".into(),
-                pinned: false, last_pinned: false, current: false },
+                pinned: false, last_pinned: false, current: false, opt_in: false },
             plx_data::browse::SrcRow { src: 1, section: 1, title: "TV Shows".into(), count_line: "40 shows".into(),
-                pinned: true, last_pinned: true, current: false },
+                pinned: true, last_pinned: true, current: false, opt_in: false },
             plx_data::browse::SrcRow { src: 2, section: 2, title: "Home Videos".into(), count_line: "12 films".into(),
-                pinned: true, last_pinned: false, current: true },
+                pinned: true, last_pinned: false, current: true, opt_in: false },
         ];
         let mut out = Vec::new();
         for language in SHIPPED {
@@ -493,7 +493,7 @@ mod tests {
 
     fn one_group_sections(g: SrcGroup) -> Vec<Section> {
         let rows = vec![plx_data::browse::SrcRow { src: 0, section: 0, title: "Movies".into(), count_line: "1 film".into(),
-            pinned: true, last_pinned: false, current: false }];
+            pinned: true, last_pinned: false, current: false, opt_in: false }];
         sections(Level::OnHome, &[g], &rows, Tail::None).0
     }
 

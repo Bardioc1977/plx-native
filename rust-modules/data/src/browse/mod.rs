@@ -932,6 +932,31 @@ pub struct BrowseState {
     pending_pins: Option<(String, std::sync::Arc<std::sync::Mutex<PinWrite>>)>,
 }
 
+/// A [`LibRef`](plx_plex::plex::pins::LibRef) the queued session write can own: the worker runs
+/// after the section table has moved on, so it carries its own copy of the strings.
+struct OwnedLibRef {
+    machine_id: String,
+    key: i64,
+    household: bool,
+    household_type: bool,
+    opt_in: bool,
+}
+
+impl OwnedLibRef {
+    fn of(lib: &plx_plex::plex::pins::LibRef<'_>) -> Self {
+        Self {
+            machine_id: lib.machine_id.to_owned(), key: lib.key, household: lib.household,
+            household_type: lib.household_type, opt_in: lib.opt_in,
+        }
+    }
+    fn borrowed(&self) -> plx_plex::plex::pins::LibRef<'_> {
+        plx_plex::plex::pins::LibRef {
+            machine_id: &self.machine_id, key: self.key, household: self.household,
+            household_type: self.household_type, opt_in: self.opt_in,
+        }
+    }
+}
+
 /// Shared by a cloned Browse snapshot, so consuming a receipt never makes another clone
 /// mistake a successful write for a disconnected worker. Failed writes keep the local choice.
 struct PinWrite {
@@ -2018,6 +2043,7 @@ impl BrowseState {
                 src: section.src, section: index, title: section.title.clone(),
                 count_line: count_line(section.count, section.kind), pinned: section.pinned,
                 last_pinned: last && section.pinned, current: index == current,
+                opt_in: section.kind.opt_in(),
             }).collect()
     }
     fn all_source_rows(&self) -> Vec<SrcRow> {
@@ -2095,6 +2121,7 @@ impl BrowseState {
             plx_plex::plex::pins::LibRef {
                 machine_id, key: section.key, household,
                 household_type: household_type(section.kind),
+                opt_in: section.kind.opt_in(),
             }
         }).collect()
     }
@@ -2255,13 +2282,11 @@ impl BrowseState {
         let answers = plx_plex::plex::pins::answers(&libraries, &on, touched, previous);
         let fresh = plx_plex::plex::pins::record(&user, asked, &libraries, &answers);
         let record = plx_plex::plex::pins::carry_forward(fresh, previous, &libraries);
-        let owned: Vec<_> = libraries.iter().map(|lib|
-            (lib.machine_id.to_owned(), lib.key, lib.household, lib.household_type)).collect();
+        let owned: Vec<OwnedLibRef> = libraries.iter().map(OwnedLibRef::of).collect();
         let touched = touched.to_vec();
         let pending_user = user.clone();
         let ticket = plx_plex::plex::session::queue_update_ticket(move |session| {
-            let libraries: Vec<_> = owned.iter().map(|(machine_id, key, household, household_type)|
-                plx_plex::plex::pins::LibRef { machine_id, key: *key, household: *household, household_type: *household_type }).collect();
+            let libraries: Vec<_> = owned.iter().map(OwnedLibRef::borrowed).collect();
             let previous = session.pins_for(&user);
             let answers = plx_plex::plex::pins::answers(&libraries, &on, &touched, previous);
             let fresh = plx_plex::plex::pins::record(&user, asked, &libraries, &answers);
@@ -3414,6 +3439,16 @@ impl SecKind {
     pub const fn pill_wears_library_title(self) -> bool {
         matches!(self, SecKind::Video)
     }
+    /// Whether a library of this kind is OFF until somebody switches it on: Other Videos only.
+    /// Movies and TV Shows are what the app is for and arrive on (the household's own); a folder
+    /// of home clips is a personal collection that must not grow a tab, a Home row or a place in
+    /// Movies unasked. The single source of [`plx_plex::plex::pins::LibRef::opt_in`] and of the
+    /// Favorite libraries row's hint; the exhaustive `match` makes a new kind decide.
+    pub const fn opt_in(self) -> bool {
+        match self {
+            SecKind::Movie | SecKind::Show | SecKind::Video => false,
+        }
+    }
     /// This kind's position in [`TAB_KINDS`] — the index of the per-kind arrays (`preferred`,
     /// `kind_fetch`). One definition instead of a `Movie => 0, Show => 1` copy per array.
     pub const fn slot(self) -> usize {
@@ -3652,6 +3687,9 @@ pub struct SrcRow {
     pub last_pinned: bool,
     /// the library being browsed — the Browse level's single tick
     pub current: bool,
+    /// the kind is off until switched on ([`SecKind::opt_in`]) — the editor's sub-line says so
+    /// while the row is off
+    pub opt_in: bool,
 }
 
 fn count_line(count: i64, kind: SecKind) -> String {

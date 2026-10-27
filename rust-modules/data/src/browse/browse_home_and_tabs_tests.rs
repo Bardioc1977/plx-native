@@ -1525,6 +1525,25 @@ fn only_other_videos_wears_its_library_title() {
     );
 }
 
+/// **Which kinds are off until somebody switches them on.** Only Other Videos; the editor's row
+/// carries the fact so its sub-line can say what switching it on does.
+#[test]
+fn only_other_videos_is_opt_in_and_its_editor_row_says_so() {
+    assert_eq!(
+        TAB_KINDS.map(|kind| (kind, kind.opt_in())),
+        [(SecKind::Movie, false), (SecKind::Show, false), (SecKind::Video, true)],
+    );
+    let _g = plx_base::testlock::serial();
+    let _t = TempPins::new("video-row-opt-in");
+    let mut browse = TestBrowse::default();
+    seed_three_types(&mut browse);
+    let rows = browse.state.all_source_rows();
+    assert_eq!(
+        rows.iter().map(|r| (r.title.as_str(), r.opt_in)).collect::<Vec<_>>(),
+        [("Movies", false), ("TV Shows", false), ("Other Videos", true)],
+    );
+}
+
 /// **The one rule that decides a pill's own title**, over plain `(kind, favourite, title)` rows:
 /// exactly one favourite library of a kind that wears its title, trimmed and not blank.
 #[test]
