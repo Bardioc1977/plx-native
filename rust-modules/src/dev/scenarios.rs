@@ -2133,6 +2133,51 @@ pub(crate) fn maybe_replay_after_eos(app: &mut App, handed_off_to_up_next: bool)
     }
 }
 
+/// `plxnative-library=<n>` for a kind that is OFF until switched on (Other Videos): the boot has to
+/// play the user who switched the library on, or there is no pill and no Library to enter.
+///
+/// The one-shot library trigger runs at 400 ms, usually before discovery has landed, so this waits
+/// for the section instead: each frame it is shown the directory's `(kind, favourite)` rows and
+/// answers what to do. It asks for the switch ONCE (`sent`; the editor's own `ApplyPins` takes a
+/// frame or two to reach the directory, and sending it again every frame would be the dev trigger
+/// fighting the store), enters once the kind has a favourite, and gives up after
+/// [`LibraryBoot::GIVE_UP_MS`] with a log line, so a mock without such a library is a message and
+/// not a silent no-op. Movies and TV Shows keep the one-shot path and their exact timing.
+#[derive(Default)]
+#[cfg_attr(not(test), allow(dead_code))] // wired into the frame in the next commit
+pub(crate) struct LibraryBoot {
+    armed: Option<(plx_data::stores::browse::SecKind, u32)>,
+    sent: bool,
+}
+
+/// What [`LibraryBoot::step`] asks the frame to do.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum LibraryBootStep {
+    Wait,
+    /// send `BrowseCmd::ApplyPins(vec![(section, true)])`, the command the editor sends
+    SwitchOn(usize),
+    /// `enter_library` and select the Library tab
+    Enter,
+    GiveUp,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl LibraryBoot {
+    #[allow(dead_code)] // read by `step` in the next commit
+    const GIVE_UP_MS: u32 = 10_000;
+    pub(crate) fn arm(&mut self, kind: plx_data::stores::browse::SecKind, now: u32) {
+        self.armed = Some((kind, now));
+        self.sent = false;
+    }
+    pub(crate) fn kind(&self) -> Option<plx_data::stores::browse::SecKind> {
+        self.armed.map(|(kind, _)| kind)
+    }
+    pub(crate) fn step(&mut self, _now: u32, _sections: &[(plx_data::stores::browse::SecKind, bool)]) -> LibraryBootStep {
+        LibraryBootStep::Wait
+    }
+}
+
 /// `plxnative-library=<n>`: which library type the boot opens, by the strip's type order (0 Movies,
 /// 1 TV Shows, 2 Other Videos). Anything else is Movies, as an unparsed value always was.
 fn library_trigger_kind(n: usize) -> plx_data::stores::browse::SecKind {
@@ -2159,6 +2204,70 @@ mod library_trigger_tests {
         }
         assert_eq!(library_trigger_kind(2), SecKind::Video);
         assert_eq!(library_trigger_kind(9), SecKind::Movie, "an unknown number is Movies, as before");
+    }
+
+    use super::{LibraryBoot, LibraryBootStep::{self, *}};
+
+    const MOVIES: (SecKind, bool) = (SecKind::Movie, true);
+
+    /// **The Other Videos trigger plays the user who switched the library on**, whenever discovery
+    /// lands the section: it asks for the switch ONCE, then enters, once.
+    #[test]
+    fn the_opt_in_boot_trigger_switches_the_library_on_once_then_enters_it() {
+        let mut boot = LibraryBoot::default();
+        boot.arm(SecKind::Video, 1_000);
+        assert_eq!(boot.kind(), Some(SecKind::Video));
+        // frames 1 and 2: the section has not landed yet
+        assert_eq!(boot.step(1_100, &[MOVIES]), Wait);
+        assert_eq!(boot.step(1_200, &[]), Wait);
+        // frame 3: it lands, off
+        let off = [MOVIES, (SecKind::Video, false)];
+        assert_eq!(boot.step(1_300, &off), SwitchOn(1));
+        // the switch takes a frame or two to reach the directory: it is not sent again
+        assert_eq!(boot.step(1_316, &off), Wait);
+        assert_eq!(boot.step(1_332, &off), Wait);
+        // on: enter, and only once
+        let on = [MOVIES, (SecKind::Video, true)];
+        assert_eq!(boot.step(1_348, &on), Enter);
+        assert_eq!(boot.step(1_364, &on), Wait);
+    }
+
+    /// A library that is already a favourite (the sole-library floor, or a recorded answer) is
+    /// entered without a switch being sent.
+    #[test]
+    fn a_library_that_is_already_on_is_entered_without_a_switch() {
+        let mut boot = LibraryBoot::default();
+        boot.arm(SecKind::Video, 0);
+        assert_eq!(boot.step(16, &[(SecKind::Video, true)]), Enter);
+    }
+
+    /// The first section of the kind is the one switched on, by its table index.
+    #[test]
+    fn the_first_section_of_the_kind_is_switched_on() {
+        let mut boot = LibraryBoot::default();
+        boot.arm(SecKind::Video, 0);
+        let rows = [MOVIES, (SecKind::Show, true), (SecKind::Video, false), (SecKind::Video, false)];
+        assert_eq!(boot.step(16, &rows), SwitchOn(2));
+    }
+
+    /// A mock without such a library is a log line after ten seconds, not a trigger that waits for
+    /// ever; after it the trigger is spent.
+    #[test]
+    fn the_opt_in_boot_trigger_gives_up_after_ten_seconds() {
+        let mut boot = LibraryBoot::default();
+        boot.arm(SecKind::Video, 2_000);
+        assert_eq!(boot.step(11_999, &[MOVIES]), Wait);
+        assert_eq!(boot.step(12_001, &[MOVIES]), LibraryBootStep::GiveUp);
+        assert_eq!(boot.step(12_017, &[MOVIES, (SecKind::Video, false)]), Wait, "spent");
+    }
+
+    /// Only a kind that is off until switched on takes the waiting path; Movies and TV Shows keep
+    /// the one-shot trigger at its exact timing.
+    #[test]
+    fn only_an_opt_in_kind_waits_for_its_section() {
+        for n in 0..3 {
+            assert_eq!(library_trigger_kind(n).opt_in(), n == 2, "plxnative-library={n}");
+        }
     }
 }
 
