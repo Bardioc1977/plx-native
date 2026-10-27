@@ -1322,7 +1322,7 @@ impl RootPage {
         let plaintext = if signed_in { self.plaintext_inputs() } else { Vec::new() };
         let form = root_form(&RootInputs {
             signed_in, multi_user, library_count: directory.pinned_count() as i64,
-            opt_in_library_off: directory.sections().iter().any(|s| s.row.opt_in && !s.row.pinned),
+            opt_in_library_off: directory.sections().iter().any(|s| s.row.adds_tab && !s.row.pinned),
             auto_sign_in, trailer_autoplay, resolution, resolution_offered, language: self.state.language,
             under_posters: self.state.under_posters, plaintext,
         });

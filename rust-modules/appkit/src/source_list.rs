@@ -278,7 +278,7 @@ pub fn form(
                         .value_dim(r.last_pinned)
                         .detail(if r.last_pinned {
                             plx_platform::i18n::msg::widgets_source_needs_library().to_string()
-                        } else if r.opt_in && !r.pinned {
+                        } else if r.adds_tab && !r.pinned {
                             // an opt-in library (Other Videos) that is off: say what the switch
                             // does, pronoun-free because the title is the user's own name for it
                             plx_platform::i18n::msg::widgets_source_opt_in_hint().to_string()
@@ -472,14 +472,14 @@ mod tests {
         ];
         let rows = vec![
             plx_data::browse::SrcRow { src: 0, section: 0, title: "Movies".into(), count_line: "185 films".into(),
-                pinned: false, last_pinned: false, current: false, opt_in: false },
+                pinned: false, last_pinned: false, current: false, adds_tab: false },
             plx_data::browse::SrcRow { src: 1, section: 1, title: "TV Shows".into(), count_line: "40 shows".into(),
-                pinned: true, last_pinned: true, current: false, opt_in: false },
+                pinned: true, last_pinned: true, current: false, adds_tab: false },
             plx_data::browse::SrcRow { src: 2, section: 2, title: "Home Videos".into(), count_line: "12 films".into(),
-                pinned: true, last_pinned: false, current: true, opt_in: false },
+                pinned: true, last_pinned: false, current: true, adds_tab: false },
             // an Other Videos library that is off draws the opt-in hint in the same column
             plx_data::browse::SrcRow { src: 2, section: 3, title: "Family Clips".into(), count_line: "9 videos".into(),
-                pinned: false, last_pinned: false, current: false, opt_in: true },
+                pinned: false, last_pinned: false, current: false, adds_tab: true },
         ];
         let mut out = Vec::new();
         for language in SHIPPED {
@@ -500,7 +500,7 @@ mod tests {
 
     fn one_group_sections(g: SrcGroup) -> Vec<Section> {
         let rows = vec![plx_data::browse::SrcRow { src: 0, section: 0, title: "Movies".into(), count_line: "1 film".into(),
-            pinned: true, last_pinned: false, current: false, opt_in: false }];
+            pinned: true, last_pinned: false, current: false, adds_tab: false }];
         sections(Level::OnHome, &[g], &rows, Tail::None).0
     }
 

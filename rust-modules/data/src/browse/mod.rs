@@ -2044,7 +2044,7 @@ impl BrowseState {
                 src: section.src, section: index, title: section.title.clone(),
                 count_line: count_line(section.count, section.kind), pinned: section.pinned,
                 last_pinned: last && section.pinned, current: index == current,
-                opt_in: section.kind.opt_in(),
+                adds_tab: section.kind.opt_in(),
             }).collect()
     }
     fn all_source_rows(&self) -> Vec<SrcRow> {
@@ -3686,9 +3686,9 @@ pub struct SrcRow {
     pub last_pinned: bool,
     /// the library being browsed — the Browse level's single tick
     pub current: bool,
-    /// the kind is off until switched on ([`SecKind::opt_in`]) — the editor's sub-line says so
-    /// while the row is off
-    pub opt_in: bool,
+    /// switching this row on would ADD a tab to the strip (its kind is off until switched on,
+    /// [`SecKind::opt_in`]) — the editor's sub-line says so while the row is off
+    pub adds_tab: bool,
 }
 
 fn count_line(count: i64, kind: SecKind) -> String {
