@@ -484,7 +484,7 @@ player, transport and tracks auditors, and is counted once in the themes above.
 
 - **Library sections past the 4th were unreachable from Home** — **closed 2026-09-01.**
   The global row is `Home`, one pill per type, the Watchlist bookmark, then `Search`; Movies, TV Shows and Other Videos name
-  types rather than individual Plex sections (the one exception: a lone favourite Other Videos library names its own pill; that type is off by default and has a pill only once a library of it is switched on). (Its VOCABULARY is permanent, its LENGTH is not: since
+  types rather than individual Plex sections (the one exception: a lone favourite Other Videos library names its own pill; that type is off by default and has a pill only once a library of it is switched on, or when it is the only library there is). (Its VOCABULARY is permanent, its LENGTH is not: since
   2026-09-05 a type with no favourite library draws no pill, so the row holds three to six stops (the bookmark and Search always draw) and
   a pill's index is not its identity — store a `Pill`.) The Library Source panel selects additional owned or
   shared sections of that type, so discovery never adds, removes or reorders a stop (it can still change the Other Videos pill's label: a rename, or a second favourite library, moves it between the library's name and the type word) and no section is hidden by
