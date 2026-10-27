@@ -1543,18 +1543,26 @@ impl SessionMachine {
             // while an unrelated fresh handoff is held must not free it.
             let released = self.state.held_handoff == Some(HeldHandoff { epoch: completion.epoch, req: completion.req });
             if released { self.release_held_handoff(emit); }
-            // A durable roster write that moved the stamp of the seat (see
-            // `commit_moves_a_published_seat`): the restore the publication triggers now reads the
-            // pair this write landed. The world is re-checked HERE, because the verdict can arrive
-            // after the owner moved on (a sign-out empties the stamp and the profile, a sign-in has
-            // begun, another handoff is held). A later admission overwrites the single
-            // `admitted_persistence` slot, so a Seat completion it overtook is dropped above: the
-            // seat then keeps the stamp it has, which still matches what Invariant I lets a reader
-            // use, and the next restore converges (fail closed).
-            // `!released` is deliberately DEFENSIVE: a Seat commit is planned only with no held
-            // handoff, so its completion never releases one; the conjunct keeps a future change
-            // from publishing twice (the release already published) if that ever stops holding.
-            let republish = completion.purpose == PersistencePurpose::Seat && !released
+            // A durable write while the seat is owed a republication (`seat_republish_owed`, set
+            // when a roster write that moved the stamp of the published profile was admitted, see
+            // `commit_moves_a_published_seat`): the restore the publication triggers now reads a
+            // pair this write landed. Any durable completion of THIS owner's admitted write pays
+            // it, not only the Seat write's own: a later admission overwrites the single
+            // `admitted_persistence` slot, so the Seat write's verdict is dropped above, but the
+            // storage worker runs the writes in order and the later one is built from the same
+            // `persisted` that holds the new roster, so its landing leaves the pair the seat
+            // must name. A Seat write that FAILED may or may not have left the new pair on disk
+            // (a non-durable canonical commit can still leave the fallback file the next read
+            // serves), so it republishes nothing and the debt stays until the next durable one.
+            // Until then the seat keeps the stamp it has, which is the fail-closed direction
+            // (`persist_profile_pref` and `remember` refuse a pick, nothing is written under a
+            // stamp the file does not hold).
+            // The world is re-checked HERE, because the verdict can arrive after the owner moved
+            // on (a sign-out empties the stamp and the profile and its publication pays the debt,
+            // a sign-in has begun, another handoff is held: their own publication pays it).
+            // `!released` is deliberately DEFENSIVE: a held handoff's release publishes already,
+            // and the conjunct keeps a future change from publishing twice.
+            let republish = self.state.seat_republish_owed && !released
                 && !self.state.authorized_in_flow && self.state.held_handoff.is_none()
                 && self.state.active_profile.is_some()
                 && !plx_plex::plex::session::account_stamp(&self.state.persisted).is_empty();
@@ -1611,6 +1619,9 @@ impl SessionMachine {
             proves_saved_login: false,
         };
         self.state.persistence_purpose = None;
+        if admit_revision.is_some() && admit_purpose == Some(PersistencePurpose::Seat) {
+            self.state.seat_republish_owed = true;
+        }
         if !reply.admission.accepted() {
             if let Some(DevCommitDelta::StartAccount { login_req }) = commit.delta.dev {
                 self.retire(login_req, emit);
@@ -1894,6 +1905,9 @@ impl SessionMachine {
         // rather than independently incrementing another generation.
         self.state.profile_scope.0 = self.state.profile_scope.0.wrapping_add(1);
         self.state.active_profile = profile;
+        // Every publication seats the stamp `persisted` names now: whatever republication a roster
+        // write owed the seat is paid.
+        self.state.seat_republish_owed = false;
         emit(SessionFx::PublishProfile(ProfilePublication {
             epoch: self.state.epoch, profile: self.state.active_profile.clone(), scope: self.state.profile_scope,
             stamp: plx_plex::plex::session::account_stamp(&self.state.persisted),
@@ -2514,7 +2528,10 @@ impl SessionMachine {
     /// purpose becomes [`PersistencePurpose::Seat`], and the owner republishes the profile when the
     /// write is DURABLE ([`Self::apply_persistence_completion`]), never now: the credential merge
     /// happens at admission while the disk write and the session cache install land later on the
-    /// storage worker, and the restore a publication triggers reads the cache.
+    /// storage worker, and the restore a publication triggers reads the cache. Admitting it sets
+    /// [`SessionInit::seat_republish_owed`], and the republication is owed until a publication is
+    /// made: if the Seat write's own verdict is overtaken by a later admission, or is a failure,
+    /// the next DURABLE completion of any write makes it.
     ///
     /// In practice that is the picker's `HomeRoster` commit (the only roster writer besides a
     /// sign-in) making a previously unknown owner known, or respelling the admin's identity when a

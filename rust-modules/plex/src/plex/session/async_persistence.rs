@@ -43,8 +43,10 @@ pub enum PersistencePurpose {
     Background,
     /// A routine credential write that moves the account stamp of a profile that is ALREADY
     /// published (the picker's Home roster making the owner known): once it is durable the owner
-    /// republishes the seat under the new stamp (#830). Like `Background`, never evidence that a
-    /// login was saved. Only the owner plans it, for exactly that case.
+    /// republishes the seat under the new stamp (#830), and when its own verdict never comes (a
+    /// later admission overtook it) or is a failure, on the next durable completion of any write.
+    /// Like `Background`, never evidence that a login was saved. Only the owner plans it, for
+    /// exactly that case.
     Seat,
 }
 
