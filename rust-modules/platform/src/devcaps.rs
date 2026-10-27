@@ -973,19 +973,47 @@ pub fn vp9_bit_depth_for(major: u32) -> u32 {
     }
 }
 
-/// Which audio library the set's sound output runs on, the fact the app-decoded audio's lead hangs on
-/// ([`AudioStack::Liblxa`] is the only stack the lead was measured on).
+/// Which audio stack the set's sound output runs on, the fact the app-decoded audio's lead hangs on.
 ///
-/// LG ships more than one: the dev set (webOS 4.10.2) and the firmware inventories behind
-/// `tools/fwcompat.py` for webOS 7.4, 8.3 and 9.2 carry `liblxa.so.2.0.0` and its GStreamer sink
-/// `libgstlxaudiosink`, while 4.10.0, 5.3.1, 6.4.0 and 10.2.0 carry Realtek's `libgstrtkaudio-1.0`
-/// instead, and 1.2.0 to 4.4.2 and 11.2.0 carry neither. So one webOS version spans both stacks, and
-/// the firmware version cannot stand in for it.
+/// LG ships a different GStreamer sink plugin family per generation (a 2018 image also ships the
+/// 2016/2017 one, so the probe order decides; Realtek and MStar images have none of the four; read
+/// from the 19 unpacked firmware images, 2016 to 2025). The plugin is what [`probe`] fingerprints,
+/// because in the firmware images read directly `liblxa.so.2` is not under the image's `/usr/lib` on
+/// any (it is in the BSP partition, `/mnt/bsppart/bsp/usr/lib`, found through `ld.so.conf`), the dev
+/// set's own firmware included, although a runtime stat of
+/// `/usr/lib/liblxa.so.2` did answer yes there: the runtime layout is not the image's. Checked in
+/// this order, the first present file decides:
+///
+/// | Stack | Present | Sets |
+/// |---|---|---|
+/// | 1 [`Liblxa`](AudioStack::Liblxa) | `libgstlxaudiosink.so` | 2019-2021 LG chips |
+/// | 2 [`LgAudioSink`](AudioStack::LgAudioSink) | `libgstlgaudiosink.so` | 2022/23 OLEDs on webOS 11, 2024, 2025 |
+/// | 3 [`Liblxa`](AudioStack::Liblxa) | `/usr/lib/liblxa.so.2` (the fallback) | the dev set answers it at runtime; 2022/23 OLEDs before webOS 11 (inferred from the `tools/fwcompat.py` inventories, not from an image read) |
+/// | 4 [`AudioSinkNew`](AudioStack::AudioSinkNew) | `libgstaudiosink_new-1.0.so` | 2018 LG chips (webOS 4.4.3) |
+/// | 5 [`AdecSink`](AudioStack::AdecSink) | `libgstaudiosink-1.0.so` (after `_new`: 2018 ships both) | 2016, 2017 LG chips |
+/// | 6 [`Other`](AudioStack::Other) | none | Realtek, MStar |
+///
+/// The `liblxa.so.2` stat comes after the webOS 11 plugin because its runtime meaning is not understood
+/// (no image has it under `/usr/lib`, yet the dev set answers yes), so a 2022/23 OLED updated to webOS 11
+/// that kept a `liblxa.so.2` must still be read as the `lgaudiosink` it plays through.
+///
+/// (The plugins live in `/usr/lib/gstreamer-1.0/`.) One webOS version therefore spans several stacks,
+/// and the firmware version cannot stand in for it. The `tools/fwcompat.py` inventories are
+/// per-library symbol tables: they carry `liblxa.so.2.0.0` on 7.4, 8.3 and 9.2 and hold no GStreamer
+/// plugin (`/usr/lib/gstreamer-1.0/*.so`), which is why the stack is fingerprinted from the plugin files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioStack {
-    /// `/usr/lib/liblxa.so.2` is on the set.
+    /// LG's `liblxa` renderer behind the `lxaudiosink` plugin: the stack the lead was filmed on (the
+    /// dev set, webOS 4.10.2).
     Liblxa,
-    /// [`probe`] ran on a device that does not have it.
+    /// LG's renderer built into the sink `libgstlgaudiosink.so` (element `lgaudiosink`).
+    LgAudioSink,
+    /// 2018's `audiosink` element (`libgstaudiosink_new-1.0.so`), which renders through `libkadaptor`.
+    AudioSinkNew,
+    /// The two `libgstaudiosink-1.0.so` stacks of 2016 (element `audio_sink`) and 2017 (element
+    /// `adecsink`); the label is `adecsink` for both.
+    AdecSink,
+    /// [`probe`] ran on a device that has none of those plugins (Realtek, MStar).
     Other,
     /// [`probe`] has not run: a host, the simulator, a test, or a boot that never got here.
     Unknown,
@@ -996,24 +1024,50 @@ impl AudioStack {
     pub fn label(self) -> &'static str {
         match self {
             Self::Liblxa => "liblxa",
+            Self::LgAudioSink => "lgaudiosink",
+            Self::AudioSinkNew => "audiosink_new",
+            Self::AdecSink => "adecsink",
             Self::Other => "other",
             Self::Unknown => "unknown",
         }
     }
 }
 
-/// The file whose presence says the set's audio stack is `liblxa`: the soname link
-/// `libgstlxaudiosink` and the rest of LG's audio code load it by. A stat, deliberately, and not a
-/// symbol lookup: the build links LG's libraries through stub `.so` files that define every symbol
-/// the app names, so a lookup in our own process proves nothing about the set, and `dlopen` would run
-/// LG's library initialisation inside the app to learn a fact a directory entry already states.
+/// The GStreamer plugin of [`AudioStack::Liblxa`]. Every probe path is a stat, deliberately, and not a
+/// symbol lookup: the build links LG's libraries through stub `.so` files that define every symbol the
+/// app names, so a lookup in our own process proves nothing about the set, and `dlopen` would run LG's
+/// library initialisation inside the app to learn a fact a directory entry already states.
+pub const LXAUDIOSINK_PLUGIN: &str = "/usr/lib/gstreamer-1.0/libgstlxaudiosink.so";
+
+/// The soname link of `liblxa`, the fallback way to say [`AudioStack::Liblxa`], stat after the webOS 11
+/// plugin: the dev set answers yes to it although no firmware image has it under `/usr/lib`, so its
+/// runtime meaning is not understood.
 pub const LIBLXA_SONAME_LINK: &str = "/usr/lib/liblxa.so.2";
 
-/// The stack for a set on which `present(path)` says whether a file exists. The seam [`probe`] uses
-/// with the real filesystem; PURE apart from `present`.
-pub fn audio_stack_from(present: impl FnOnce(&str) -> bool) -> AudioStack {
-    if present(LIBLXA_SONAME_LINK) {
+/// The plugin of [`AudioStack::LgAudioSink`].
+pub const LGAUDIOSINK_PLUGIN: &str = "/usr/lib/gstreamer-1.0/libgstlgaudiosink.so";
+
+/// The plugin of [`AudioStack::AudioSinkNew`].
+pub const AUDIOSINK_NEW_PLUGIN: &str = "/usr/lib/gstreamer-1.0/libgstaudiosink_new-1.0.so";
+
+/// The plugin of [`AudioStack::AdecSink`]; checked after [`AUDIOSINK_NEW_PLUGIN`], because 2018
+/// firmware ships both.
+pub const ADECSINK_PLUGIN: &str = "/usr/lib/gstreamer-1.0/libgstaudiosink-1.0.so";
+
+/// The stack for a set on which `present(path)` says whether a file exists, in the order of the
+/// [`AudioStack`] table; the first present file decides. The seam [`probe`] uses with the real
+/// filesystem (so `present` runs up to five times); PURE apart from `present`.
+pub fn audio_stack_from(mut present: impl FnMut(&str) -> bool) -> AudioStack {
+    if present(LXAUDIOSINK_PLUGIN) {
         AudioStack::Liblxa
+    } else if present(LGAUDIOSINK_PLUGIN) {
+        AudioStack::LgAudioSink
+    } else if present(LIBLXA_SONAME_LINK) {
+        AudioStack::Liblxa
+    } else if present(AUDIOSINK_NEW_PLUGIN) {
+        AudioStack::AudioSinkNew
+    } else if present(ADECSINK_PLUGIN) {
+        AudioStack::AdecSink
     } else {
         AudioStack::Other
     }
@@ -1160,17 +1214,106 @@ pub fn measured() -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_audio_stack_is_liblxa_only_where_its_soname_link_is() {
+    fn stack_on(files: &[&str]) -> AudioStack {
+        audio_stack_from(|path| files.contains(&path))
+    }
+
+    fn stats_made(answer: bool) -> Vec<String> {
         let asked = std::cell::RefCell::new(Vec::new());
-        let stack = audio_stack_from(|path| {
+        audio_stack_from(|path| {
             asked.borrow_mut().push(path.to_string());
-            true
+            answer
         });
-        assert_eq!(stack, AudioStack::Liblxa);
-        assert_eq!(*asked.borrow(), ["/usr/lib/liblxa.so.2"], "the one file, and nothing else is read");
-        assert_eq!(audio_stack_from(|_| false), AudioStack::Other, "a device without it runs another stack");
-        assert_eq!(audio_stack_from(|path| path.contains("rtkaudio")), AudioStack::Other, "another stack's files do not make it liblxa");
+        asked.into_inner()
+    }
+
+    /// One row per stack of the probe table: the plugin (or library) that says it, alone.
+    #[test]
+    fn each_lg_sink_plugin_alone_names_its_stack() {
+        assert_eq!(stack_on(&[LXAUDIOSINK_PLUGIN]), AudioStack::Liblxa, "2019-2021 LG chips (and, inferred from the fwcompat inventories, not from an image read, the 2022/23 OLEDs before webOS 11): the lxaudiosink plugin");
+        assert_eq!(stack_on(&[LIBLXA_SONAME_LINK]), AudioStack::Liblxa, "the fallback: the dev set answered the soname link at runtime");
+        assert_eq!(stack_on(&[LGAUDIOSINK_PLUGIN]), AudioStack::LgAudioSink, "webOS 11 on the 2022/23 OLEDs, 2024 and 2025");
+        assert_eq!(stack_on(&[AUDIOSINK_NEW_PLUGIN]), AudioStack::AudioSinkNew, "2018 LG chips");
+        assert_eq!(stack_on(&[ADECSINK_PLUGIN]), AudioStack::AdecSink, "2016 and 2017 LG chips");
+        assert_eq!(stack_on(&[]), AudioStack::Other);
+    }
+
+    #[test]
+    fn the_plugin_paths_are_the_firmware_file_names() {
+        assert_eq!(LXAUDIOSINK_PLUGIN, "/usr/lib/gstreamer-1.0/libgstlxaudiosink.so");
+        assert_eq!(LGAUDIOSINK_PLUGIN, "/usr/lib/gstreamer-1.0/libgstlgaudiosink.so");
+        assert_eq!(AUDIOSINK_NEW_PLUGIN, "/usr/lib/gstreamer-1.0/libgstaudiosink_new-1.0.so");
+        assert_eq!(ADECSINK_PLUGIN, "/usr/lib/gstreamer-1.0/libgstaudiosink-1.0.so");
+        assert_eq!(LIBLXA_SONAME_LINK, "/usr/lib/liblxa.so.2");
+    }
+
+    /// 2018 ships both its own plugin and the older one: `_new` has to answer first.
+    #[test]
+    fn the_2018_plugin_wins_over_the_older_one_it_ships_beside() {
+        assert_eq!(stack_on(&[ADECSINK_PLUGIN, AUDIOSINK_NEW_PLUGIN]), AudioStack::AudioSinkNew);
+    }
+
+    /// The lxaudiosink plugin outranks every other file; the bare `liblxa.so.2` stat outranks only the 2018 and
+    /// 2016/2017 plugins, never the webOS 11 one.
+    #[test]
+    fn the_webos11_plugin_outranks_the_bare_liblxa_soname_stat() {
+        assert_eq!(
+            stack_on(&[LGAUDIOSINK_PLUGIN, LIBLXA_SONAME_LINK]),
+            AudioStack::LgAudioSink,
+            "a set updated to webOS 11 that kept a liblxa.so.2 plays through lgaudiosink"
+        );
+        assert_eq!(
+            stack_on(&[LXAUDIOSINK_PLUGIN, LGAUDIOSINK_PLUGIN]),
+            AudioStack::Liblxa,
+            "cannot happen per the images; the order is pinned anyway"
+        );
+        assert_eq!(stack_on(&[LXAUDIOSINK_PLUGIN, LIBLXA_SONAME_LINK]), AudioStack::Liblxa);
+        for other in [LGAUDIOSINK_PLUGIN, AUDIOSINK_NEW_PLUGIN, ADECSINK_PLUGIN] {
+            assert_eq!(stack_on(&[LXAUDIOSINK_PLUGIN, other]), AudioStack::Liblxa, "lxaudiosink + {other}");
+        }
+        for other in [AUDIOSINK_NEW_PLUGIN, ADECSINK_PLUGIN] {
+            assert_eq!(stack_on(&[LIBLXA_SONAME_LINK, other]), AudioStack::Liblxa, "liblxa.so.2 + {other}");
+        }
+        assert_eq!(stack_on(&[LGAUDIOSINK_PLUGIN, AUDIOSINK_NEW_PLUGIN, ADECSINK_PLUGIN]), AudioStack::LgAudioSink);
+    }
+
+    /// The probe is stats, in a fixed order, and stops at the first that answers.
+    #[test]
+    fn the_probe_stats_in_the_table_order_and_stops_at_the_first_yes() {
+        assert_eq!(
+            stats_made(false),
+            [LXAUDIOSINK_PLUGIN, LGAUDIOSINK_PLUGIN, LIBLXA_SONAME_LINK, AUDIOSINK_NEW_PLUGIN, ADECSINK_PLUGIN],
+            "five stats, nothing else"
+        );
+        assert_eq!(stats_made(true), [LXAUDIOSINK_PLUGIN], "the first yes ends it");
+        let until = |last: &'static str| {
+            let order = stats_made(false);
+            let cut = order.iter().position(|p| p == last).unwrap();
+            let asked = std::cell::RefCell::new(Vec::new());
+            audio_stack_from(|path| {
+                asked.borrow_mut().push(path.to_string());
+                path == last
+            });
+            assert_eq!(*asked.borrow(), order[..=cut]);
+        };
+        for last in [LGAUDIOSINK_PLUGIN, LIBLXA_SONAME_LINK, AUDIOSINK_NEW_PLUGIN, ADECSINK_PLUGIN] {
+            until(last);
+        }
+    }
+
+    /// Realtek and MStar images ship none of LG's plugins: their own sink names are not LG's.
+    #[test]
+    fn realtek_and_mstar_plugins_are_not_an_lg_stack() {
+        for other in [
+            "/usr/lib/gstreamer-1.0/libgstrtkalsa.so",
+            "/usr/lib/gstreamer-1.0/libgstrtkaudio-1.0.so",
+            "/usr/lib/gstreamer-1.0/libgstomx.so",
+            "/usr/lib/gstreamer-1.0/libgstmasink.so",
+            "/usr/lib/openmax/libOMX.MStar.so.1.0.0",
+        ] {
+            assert_eq!(audio_stack_from(|path| path == other), AudioStack::Other, "{other}");
+        }
+        assert_eq!(audio_stack_from(|path| path.contains("rtkaudio")), AudioStack::Other);
     }
 
     #[test]
@@ -1187,8 +1330,16 @@ mod tests {
         }
         assert_eq!(audio_stack(), AudioStack::Unknown);
         assert_eq!(
-            [AudioStack::Liblxa, AudioStack::Other, AudioStack::Unknown].map(AudioStack::label),
-            ["liblxa", "other", "unknown"]
+            [
+                AudioStack::Liblxa,
+                AudioStack::LgAudioSink,
+                AudioStack::AudioSinkNew,
+                AudioStack::AdecSink,
+                AudioStack::Other,
+                AudioStack::Unknown
+            ]
+            .map(AudioStack::label),
+            ["liblxa", "lgaudiosink", "audiosink_new", "adecsink", "other", "unknown"]
         );
     }
 
