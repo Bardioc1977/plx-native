@@ -17,7 +17,7 @@
   },
   "settings.libraries.detail_opt_in": {
     "value": "Other Videos libraries are off by default.",
-    "description": "Sub-line of the Favorite libraries row on the Settings root while an Other Videos library exists and is switched off. It replaces the usual sub-line ('Which libraries this television shows.') and says where to switch the library on. The Other Videos library type is called 'Other Videos' elsewhere in the app (Plex's own name): use the same words. One line beside a value ('3 favorites') and a chevron, no wrap: keep it short."
+    "description": "Sub-line of the Favorite libraries row on the Settings root while an Other Videos library exists, is switched off and no library of that type is a favourite yet. It replaces the usual sub-line ('Which libraries this television shows.') and says where to switch the library on. The Other Videos library type is called 'Other Videos' elsewhere in the app (Plex's own name): use the same words, and a wording that does not depend on the number or gender of the library names (a label, a colon and a neutral predicate does). One line beside a value ('3 favorites') and a chevron, no wrap: keep it short."
   },
   "settings.privacy.section": {
     "value": "Privacy",

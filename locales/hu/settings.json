@@ -3,7 +3,7 @@
   "settings.libraries.section": "Könyvtárak",
   "settings.libraries.title": "Kedvenc könyvtárak",
   "settings.libraries.detail": "A TV-n megjelenő könyvtárak.",
-  "settings.libraries.detail_opt_in": "Az Egyéb videók alapból ki van kapcsolva.",
+  "settings.libraries.detail_opt_in": "Egyéb videók: alapból kikapcsolva.",
   "settings.privacy.section": "Adatvédelem",
   "settings.privacy.title": "Adatvédelem és adatok",
   "settings.privacy.detail": "Választható jelentések, adatvédelmi tudnivalók és helyi adatok.",

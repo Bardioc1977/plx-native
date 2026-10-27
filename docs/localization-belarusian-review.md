@@ -199,4 +199,8 @@ wording is pronoun-free on purpose, so it needs no agreement with the library's 
 
 | Key | String |
 | --- | --- |
-| `settings.libraries.detail_opt_in` | «Іншае відэа» выключана па змаўчанні. |
+| `settings.libraries.detail_opt_in` | Іншае відэа: выключана па змаўчанні. |
+
+For `settings.libraries.detail_opt_in` the reviewer is asked in particular about the agreement of
+**выключана** with the label "Іншае відэа" (a colon and a neutral predicate, so the sentence does not depend on the
+number or gender of the user's own library names).
