@@ -194,3 +194,9 @@ wording is pronoun-free on purpose, so it needs no agreement with the library's 
 | Key | String |
 | --- | --- |
 | `widgets.source.opt_in_hint` | Дадае ўкладку пры ўключэнні |
+
+`locales/be/settings.json`:
+
+| Key | String |
+| --- | --- |
+| `settings.libraries.detail_opt_in` | «Іншае відэа» выключана па змаўчанні. |

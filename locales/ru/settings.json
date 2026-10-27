@@ -3,6 +3,7 @@
   "settings.libraries.section": "Медиатеки",
   "settings.libraries.title": "Избранные медиатеки",
   "settings.libraries.detail": "Какие медиатеки показывать на телевизоре.",
+  "settings.libraries.detail_opt_in": "«Другие видео» выключены по умолчанию.",
   "settings.privacy.section": "Конфиденциальность",
   "settings.privacy.title": "Данные и приватность",
   "settings.privacy.detail": "Отчёты по желанию, конфиденциальность, данные на ТВ.",

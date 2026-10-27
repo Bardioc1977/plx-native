@@ -3,6 +3,7 @@
   "settings.libraries.section": "Бібліятэкі",
   "settings.libraries.title": "Абраныя бібліятэкі",
   "settings.libraries.detail": "Якія бібліятэкі паказвае гэты тэлевізар.",
+  "settings.libraries.detail_opt_in": "«Іншае відэа» выключана па змаўчанні.",
   "settings.privacy.section": "Прыватнасць",
   "settings.privacy.title": "Прыватнасць і даныя",
   "settings.privacy.detail": "Неабавязковыя справаздачы, прыватнасць і даныя.",

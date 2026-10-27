@@ -1119,9 +1119,15 @@ struct RootInputs {
     plaintext: Vec<PlaintextRowInput>,
 }
 
-/// The Favorite libraries row's sub-line.
-fn libraries_detail(_opt_in_library_off: bool) -> String {
-    plx_platform::i18n::msg::settings_libraries_detail().to_string()
+/// The Favorite libraries row's sub-line: the usual one, or, while an opt-in library (Other
+/// Videos) exists and is off, the sentence that says so, because this row is where it is switched
+/// on. It REPLACES the usual line rather than extending it, so the one-line root row never elides.
+fn libraries_detail(opt_in_library_off: bool) -> String {
+    if opt_in_library_off {
+        plx_platform::i18n::msg::settings_libraries_detail_opt_in().to_string()
+    } else {
+        plx_platform::i18n::msg::settings_libraries_detail().to_string()
+    }
 }
 
 /// The Settings root as a [`Form`], built from plain arguments rather than `&self` — see

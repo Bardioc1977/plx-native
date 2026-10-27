@@ -3,6 +3,7 @@
   "settings.libraries.section": "Bibliothèques",
   "settings.libraries.title": "Bibliothèques favorites",
   "settings.libraries.detail": "Les bibliothèques affichées sur ce téléviseur.",
+  "settings.libraries.detail_opt_in": "« Autres vidéos » est désactivé par défaut.",
   "settings.privacy.section": "Confidentialité",
   "settings.privacy.title": "Confidentialité et données",
   "settings.privacy.detail": "Rapports facultatifs, confidentialité et données locales.",

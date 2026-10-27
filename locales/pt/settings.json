@@ -3,6 +3,7 @@
   "settings.libraries.section": "Bibliotecas",
   "settings.libraries.title": "Bibliotecas favoritas",
   "settings.libraries.detail": "As bibliotecas que este televisor mostra.",
+  "settings.libraries.detail_opt_in": "« Outros vídeos » vem desativado por defeito.",
   "settings.privacy.section": "Privacidade",
   "settings.privacy.title": "Privacidade e dados",
   "settings.privacy.detail": "Relatórios opcionais, informação de privacidade e dados locais.",
