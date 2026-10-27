@@ -2931,7 +2931,8 @@ pub fn registry_keys_for_test() -> ClientKeys {
 /// Unknown is ALLOWED, in both directions: a row whose server sent no `librarySectionID`, and a
 /// library the section table has not enumerated yet, both pass. The pin is a decision about
 /// libraries we know about, and the alternative — hiding what we cannot classify — empties Home on
-/// the frame it boots, which is the same mistake [`feeds_home`] documents one level up.
+/// the frame it boots, which is the same mistake [`feeds_home`] documents one level up. (The one
+/// exception is a personal-video hub's SHELF card, see [`shelf_item_shown`].)
 pub(crate) fn item_pinned(pins: &[(ServerId, i64, bool)], m: &PmsMovie) -> bool {
     if m.sec == 0 {
         return true; // the server said nothing about this row's library

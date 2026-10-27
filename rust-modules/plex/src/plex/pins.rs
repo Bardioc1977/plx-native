@@ -9,7 +9,8 @@
 //! this file was written when the pin default was hard-wired to `true` because deliverable F (the
 //! first-run route) had nowhere to ask the question. It has one now, and these are its rules:
 //!
-//! * **Your HOUSEHOLD's libraries arrive On, a friend's arrive Off.** The point of asking is not
+//! * **Your HOUSEHOLD's libraries arrive On, a friend's arrive Off** — except an opt-in kind
+//!   (Other Videos, [`LibRef::opt_in`]), which arrives Off for everybody. The point of asking is not
 //!   to put a stranger's shelves on your front door unannounced (`Shared Sources.dc.html` §F).
 //!   The household and not the account, because plex.tv answers a Plex Home managed profile with
 //!   `owned:false` on the family's own server — so a rule written on raw ownership gave the
@@ -78,8 +79,8 @@ pub struct LibRef<'a> {
 /// What the first-run screen SHOWS for one library before anybody touches it.
 ///
 /// **Your household's, and anything of a type the household has none of.** With no server of the
-/// household's there is nothing to prefer, so everything comes On — which this still says, because
-/// a household that has nothing has nothing of every type.
+/// household's there is nothing to prefer, so every kind but an opt-in one comes On — which this
+/// still says, because a household that has nothing has nothing of every type.
 ///
 /// The per-type half arrived with the favourite switch on 2026-09-05, and it is a correctness fix
 /// rather than a nicety. The switch governs the tab strip now, so a library that is off draws no

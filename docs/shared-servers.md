@@ -757,7 +757,8 @@ Four places, all recorded so the next reader does not "fix" them back:
    the shipped Sources panel draws nothing, on its own stated rule that an empty handle is *the
    absence of an owner rather than an anonymous one*. The route and the panel must agree, and they
    do — that rule is the one that stays.
-3. **An account with no server of its HOUSEHOLD'S gets every library On.** The canvas's "a friend's
+3. **An account with no server of its HOUSEHOLD'S gets every library On** (an opt-in kind, Other
+   Videos, excepted: it is Off for everybody until switched on). The canvas's "a friend's
    arrives Off" has no answer for such an account; taken literally it opens the app on nothing.
    With nothing of the household's to prefer, a borrowed library is simply a library. The
    household and not the account, and the distinction is the whole managed-profile fix: plex.tv
