@@ -7082,9 +7082,28 @@ mod pcm_info_tests {
         }
     }
 
+    /// TrueHD under the gate (S4-5) is declared as `PCM`, stereo 48 kHz S16, like the other lossy ones.
+    #[test]
+    fn app_decoded_truehd_is_declared_as_pcm() {
+        let mut ps = crate::route::PlaybackSession::IDLE;
+        crate::route::set_stream_codecs(&mut ps, "h264", "truehd");
+        assert_eq!(crate::route::stream_pcm(&ps).and_then(Result::ok), None, "gate off");
+        crate::route::begin_attempt_for_test(
+            &mut ps, std::sync::Arc::new(plx_platform::devcaps::Caps::assumed().with_app_lossy()),
+        );
+        crate::route::set_stream_codecs(&mut ps, "h264", "truehd");
+        let shape = crate::route::stream_pcm(&ps).and_then(Result::ok);
+        assert_eq!(shape, Some(crate::route::PcmFormat::STEREO_48K));
+        assert_eq!(audio_declaration("truehd", shape.as_ref()), Some(("PCM", 5)));
+        let on = build_av_payload_at(&ps, "H264", "PCM", ENVELOPE_FHD60, crate::player::RATE_NORMAL);
+        assert_eq!(on.matches("pcmInfo").count(), 1, "{on}");
+        let planned = load_audio("truehd", crate::player::RATE_NORMAL, shape.as_ref(), None, AudioStack::Liblxa).unwrap();
+        assert_eq!((planned.name, planned.lead), ("PCM", PcmLead::FromOutput(AudioStack::Liblxa)), "planned the stack's lead");
+    }
+
     /// **An app-decoded lossy track at a playback speed still loads.** At a speed the speed decoder
     /// declares PCM itself and the app-decoded shape is dropped ([`app_pcm_for_rate`]), so `load_audio`
-    /// is asked for a codec the pipeline has no payload name for (`mp3`, `vorbis`): the Load must still
+    /// is asked for a codec the pipeline has no payload name for (`mp3`, `vorbis`, `truehd`): the Load must still
     /// declare PCM and take the stack's lead, as a speed session on any other codec does, not be
     /// refused as an "unsupported audio codec". The `pcm` argument is derived exactly as
     /// `start_bufferfeed_inner` derives it, so this goes through the Load's own path (the speed
@@ -7096,7 +7115,7 @@ mod pcm_info_tests {
         crate::route::begin_attempt_for_test(
             &mut ps, std::sync::Arc::new(plx_platform::devcaps::Caps::assumed().with_app_lossy()),
         );
-        for codec in ["mp3", "vorbis"] {
+        for codec in ["mp3", "vorbis", "truehd"] {
             crate::route::set_stream_codecs(&mut ps, "h264", codec);
             for rate in [500, 1500, 2000] {
                 let pcm = app_pcm_for_rate(rate, crate::route::stream_pcm(&ps)).and_then(Result::ok);
