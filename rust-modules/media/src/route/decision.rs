@@ -11687,6 +11687,10 @@ mod prefs_door_tests;
 mod memory_tests;
 
 #[cfg(test)]
+#[path = "decision_queue_beside_tests.rs"]
+mod queue_beside_tests;
+
+#[cfg(test)]
 #[path = "decision_track_memory_tests.rs"]
 mod track_memory_tests;
 
