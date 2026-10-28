@@ -254,9 +254,12 @@ something.
     `pump::land_recovery_flight`), because the branches' failure flags stay up for the whole flight
     and `fail_current_engine` would end it. `land_recovery_flight` fails nothing itself: it reloads
     onto the route, or hands `FlightRefused` to the machine. A refused facet conversion goes to the
-    HLS rung for a cold Auto Original and, for a manual pick, to the both-facets encode when it is
-    earned (below), else to the read-out; a refused rollback or both-facets flight is always the
-    read-out.
+    HLS rung for a cold Auto Original and otherwise, for a manual pick, to the both-facets encode when it is
+    earned and to the app-decode rung (below) when it is not, the two in the order the source's width sets (a
+    source of at most two channels takes the app decode first; a surround source never does, the app being its
+    last rung), else to the read-out; a refused both-facets flight (the HLS contingency or the manual
+    encode) goes to the app-decode rung, which a surround source's ladder has kept for last, or the read-out,
+    a refused rollback is always the read-out.
     `route::recovery_flight_outstanding` is how the pump waits.
   - **Two rollbacks have no Engine for a pump to drive** (`route::dispatch_engineless_rollback_rebase`,
     marked `flight_engineless` beside the recovery marker): the foreground restore's
@@ -321,10 +324,66 @@ something.
   aac/ac3/eac3, so a PCM Load refused before its first picture can take the facet rung (the server converts
   the track), and a proven conversion is stored by codec like any audio facet (`NativeAudioRefusal::of_facet`).
   After two such plays an ALAC or LPCM row can remove that codec from the set's value, as FLAC's already can.
-  That is existing behaviour, left as it is. A stream the Load declared PCM for but the app has no decoder for
+  That is existing behaviour, left as it is. A hi-res track (96 kHz FLAC, resampled by the app to 48 kHz S32) is declared
+  in the same shape as a 24-bit 48 kHz FLAC, and the facet is keyed by codec alone: two refused hi-res plays can remove
+  `flac` from the set's value and with it the bit-exact 44.1 and 48 kHz FLAC. Accepted knowingly, not keyed by (codec, resampled). A stream the Load declared PCM for but the app has no decoder for
   (float or 8-bit LPCM under PMS's `pcm`) is refused in the demuxer (`ff::pcm_load_feeds_raw`) and ends as
   `demux_failed` -> `LoadRefusal::SourceFailed`, which names no facet, so the audio-only conversion rung is not
-  reached: Auto Original falls to its HLS contingency, Force Direct Play shows the error. A named refusal comes from a native Load that ends
+  reached: Auto Original falls to its HLS contingency, Force Direct Play shows the error.
+  DTS, MP3, Vorbis and TrueHD are the lossy entries of `devcaps::APP_DECODED`, enabled **per row**: `Caps::app_lossy` (`AppLossy`) is `Off` in the assumed
+  fallback, `Measured` in a table that was read (the rows whose `AppDecoded::measured` carries TV evidence: DTS only, the
+  U5 core decode at 13.1% of one of four cores with 60 fps held; MP3, Vorbis and TrueHD are unmeasured, so not offered) and
+  `All` under the DEBUG trigger `/tmp/plxnative-appdecodelossy` (read once at boot by `devcaps::probe`), which is also how an
+  unmeasured row is measured. A row is DECODED IN THE APP only where it is in force
+  (`Caps::app_decodes_lossy_track`, the one answer): the trigger puts every lossy row in force (even where the set has the
+  decoder); otherwise Force Direct Play has no native path for the track on a set without a DTS row (webOS 10+, or a refusal
+  the install learned) AND the track has at most two channels, or the recovery rung below put the codec in force (`Caps::with_app_lossy_for`).
+  **The app never mixes a source of more than two channels down to stereo by default** (owner decision 2026-10-28;
+  D1(b) and D2 as amended). `devcaps::app_decode_mixes_down(channels)` (channels outside 1..=2, so an unknown
+  width counts too) is the ONE predicate, `Caps::app_may_mix_down` its gate, and both the planner and the recovery
+  ladder read it: under Force Direct Play (D1(b)) a surround track the set has no native path for is NOT decoded
+  in the app (`app_decodes_lossy_track` is false for it, in either arm, the codec being in force or not), so the
+  Forced pick refuses it like any unplayable track (`ForcedFailure::Audio`, naming the codec; before S4 the same)
+  and a pipeline refusal of it reads out; a track of one or two channels is no downmix and keeps the app decode. Under
+  Auto (D2) the surround downmix is only the very last rung of the ladder (below), after every server option was
+  refused, and stays labelled; Auto's default for a 5.1 track the set cannot take is the server conversion that keeps its channels.
+  **One exception, inside a request:** once the app-decode rung has put a codec in force (`Caps::app_lossy_in_force`) for a track of at most two channels,
+  the in-force arm of `Caps::app_decodes_lossy_track` admits a track of ANY width, so a later pick of a surround track of that
+  codec (`commit_audio_route`, `audio_track_direct_plays`) is a native switch that is mixed down and labelled "played in stereo"
+  WITHOUT that track's own server conversion or manual encode asked first. Admitting the mix-down only for a rung entered
+  for a surround source would send that pick to the server, and a refused switch rebuild is a `ClaimTail::Rejected` ("current
+  stream retained", `pump::rejected_tail`), not a `LoadRefusal` the `OpenRecovery` machine steps, so it would not reach the
+  labelled stereo play the ladder gives an open. Not built; the next request starts from `start` again.
+  The `appdecodelossy` debug trigger (`AppLossy::All`) is the one explicit override. Auto never decodes in
+  the app on its own, and Force Direct Play's pick is three passes (`route/plan.rs`): (1) a native track that honours the intent
+  (the selected track, or a same-language non-commentary sibling: `StandIn::SameKind`), (2) the app's decode of the
+  intended track (at most two channels), (3) only then the native stand-in of any track. A native sibling wins over the app decode, and a
+  native commentary or dub never does. An app-decoded track is never the set's own decoder's (the Load
+  declares `PCM`: stereo 48 kHz S16 for a lossy codec; the track's own table rate and width for FLAC, ALAC and LPCM, or the rate
+  they are resampled to as S32 below: `route::stream_pcm`), is announced without a table row, the track menu says a surround one plays in
+  stereo (`route::audio_decoded_in_app`), and
+  `ff_pcm::PcmDecoder` decodes it (DTS: the core only, `core_only`), downmixes by the frame's channel layout and resamples it
+  (`ff_pcm::PcmConverter`, lossy shape). The resample is linear from a source below 48 kHz and a windowed-sinc low-pass decimator from one above it
+  (`speed_audio::Resampler`, the one the speed path uses: a Kaiser-windowed sinc, `Kernel::FULL` = `zeros 41, cutoff 1.0, beta 12.8`, f64; flat within 0.01 dB to
+  90% of the output's Nyquist and at least 120 dB down from `fout - 0.9 * Nyquist` up, measured: pass band within 1e-5 dB, worst alias -124.5 dB at 176.4 kHz and
+  -126.7 dB at 96 kHz. A source of 4x the output or more that is an even rate first goes through exact 2:1 stages of the cheaper `Kernel::RELAXED`
+  (`zeros 12, beta 14`: 25 taps against 83; flat to 0.45 * out, 120 dB down over `[R/2 - 0.55 * out, R/2]`, the derivation is on the kernel),
+  one per halving while the rate is even and at least 4x the output, so 192 kHz to 48 kHz is half the multiply-adds of the one ratio-4 stage it used to be;
+  what is left goes through one FULL stage of ratio at most 8 down to `out * 2^k`, then `k` exact FULL 2:1 stages (halved from the output up, so an odd rate gets one table, not one per stage); the tables stay under 6.7 MB for any rate). MP3 and Vorbis stay
+  `audio_rate_bounded` (a 96 kHz Vorbis has not been through the TV), so a track above 48 kHz is the server's; DTS (a core is 48 kHz at most), TrueHD
+  (decimated by the app) and FLAC, ALAC and LPCM (below) are exempt. **Lossless hi-res**: a mono or stereo FLAC, ALAC or LPCM track above 48 kHz is
+  resampled by the app (`ff_pcm::PcmConverter`, lossless shape) to 48 kHz, or to 44.1 kHz for a multiple of 44.1 kHz (`devcaps::pcm_load_rate`, the one rule
+  for the planner, Forced, the track menu and the profile), and declared S32 whatever its own depth, at unity gain, saturating at the i32 range,
+  without dither or limiter; one log line per stream counts the clipped samples and the peak. A 5.1 hi-res track still converts on the server
+  (the profile keeps `audio.channels <= 2` for these codecs). A table rate (8 to 48 kHz) builds no converter and stays bit-exact. TrueHD is
+  decoded as FFmpeg's `truehd` decodes it, up to the 7.1 bed; an Atmos object substream is not rendered. Its access units are
+  1/1200 s, so the demuxer gathers decoded blocks shorter than 10 ms into AUs of about that length (`ff_pcm::AuBatcher`; a DTS,
+  MP3 or lossless block is longer and, while the stream is contiguous, passes whole; a gap in the content time ends the AU). The speed decoder (`SpeedDecoder`) mixes by the same layout mask
+  (`ff::frame_channel_mask`), so 2.1, 3.1, 4.1 and 7.1 are right at a speed too. Where DTS is not
+  in force it is native exactly as above. A Load whose DTS the app
+  decoded names no audio facet in the failed-open ladder (`StreamAudio::app_decoded_lossy`): the pipeline was fed PCM, and a
+  facet keyed `dts` would be stored as a refusal of the set's NATIVE decoder.
+  A named refusal comes from a native Load that ends
   in `type=18 num=200 Audio Codec Not Supported` before any picture (`mod.rs`'s callback sets
   `native_audio_refused` only while `native_audio::fed()` says the audio was fed natively; the
   machine turns it into `RecoveryEffect::ConfirmRefusal { Evidence::Named }`, which the pump runs as
@@ -366,7 +425,8 @@ something.
   **The ladder** (the order of `OpenRecovery::decide`): (1) a pending Original trial's
   rollback, which narrows the attempt first by the facet the refusal named, because its rebase, the next
   retry and a quality change must plan from the narrowed value; (2) under Forced Direct Play, the
-  read-out (a forced play is never converted); (3) the **facet rung**, for a refusal that names the
+  app-decode rung (6) for a track of at most two channels, else the read-out (a forced play is never converted, and the app never
+  mixes a surround source down for it); (3) the **facet rung**, for a refusal that names the
   pipeline (`type=18` of ANY number, or the stall; not a Load timeout or a source failure) of an
   Engine that has shown no picture (`OpenFacts::no_frames`: the machine lives per request but a
   picture is per Engine, so a reload after the request's first picture, a track pick, owes its own
@@ -388,25 +448,43 @@ something.
   stored Original candidate (`regrade_original`): its audio, so the ABR climb does not offer the
   refused audio's direct play again, and its video, which a candidate the attempt no longer direct
   plays leaves dropped). No track pick runs in S1a: the replacement converts the track the viewer was on, and the
-  AC3 sibling is only chosen once a learned row is in `start` (S2); (4) the **both-facets rung**. A cold
-  Auto Original's is its HLS contingency (`StartAutoHls`), whose attempt lacks every facet the request took
-  out and every stream this refusal named (the refused video raster, the suspect audio). A manual pick's
+  AC3 sibling is only chosen once a learned row is in `start` (S2); (4) the **HLS both-facets rung**, a cold
+  Auto Original's HLS contingency (`StartAutoHls`), whose attempt lacks every facet the request took
+  out and every stream this refusal named (the refused video raster, the suspect audio); (5) the **manual both-facets rung**
   (`RecoveryEffect::ConvertBoth`, `VideoLane::Both`) is one ENCODE with no video copy
   (`directStream=0&directStreamAudio=1`) of today's route, from an attempt that lacks the audio suspect and
   the refused raster of a numbered refusal. A pipeline refusal (`Refused` or `Stalled`; not a timeout or a
-  source failure) of a no-picture Engine earns it once the facet rung has no flight to give, when the
+  source failure) of a no-picture Engine earns it once the earlier rungs have nothing to give, when the
   source's video is still fed and not yet excluded, or an audio suspect still narrows the attempt. A
   refusal with nothing to lower (a 1080p frame-rate refusal) still earns the one encode, which keeps the
   route's own ceiling; a lowered video raster clamps it to the 1080p rung's. The encode's own refusal
-  reads out (it feeds an encoded video, `OpenFacts::video == None`, and no audio suspect), and so does a
-  refused HLS rescue. The converted route's video counts as fed whole only for an Original remux, so a
+  reads out (it feeds an encoded video, `OpenFacts::video == None`, and no audio suspect) unless the app decode
+  (6) is still open for it, and a refused HLS rescue ends the same way. The converted route's video counts as fed whole only for an Original remux, so a
   manual re-encode flavour with no stored Original candidate gets no both-facets rung (conservative);
-  (5) the read-out.
+  (6) the **app-decode rung** (`RecoveryEffect::DecodeInApp`): a pipeline refusal of a direct play
+  (`OpenFacts::direct`: no server session) that has shown no picture, whose audio
+  the pipeline itself decoded (`StreamAudio::app_decoded_lossy` is false), of a lossy codec the START value's policy admits
+  (`Caps::app_may_decode_lossy`), once per request (`in_app`), after a refused HLS contingency or a refused facet flight, or at
+  once under Forced (a track of at most two channels only, `Caps::app_may_mix_down`). **The source's width sets where it
+  sits (owner decision 2026-10-28):** for a source of at most two channels the app decode is no downmix, keeps the direct play
+  and asks no server, so it runs BEFORE (5); for a surround source (more than two channels, or an unknown
+  width: `devcaps::app_decode_mixes_down`, the planner's predicate) (5), which keeps the channels, runs first when it is earned
+  and the app decode is the very last rung, after the encode was refused too (a refused encode flight is
+  `app_decode_or_error`'s). The channel count is the SOURCE track's (`StreamAudio::channels`). It flies nothing and asks no
+  server: the attempt gets that codec in force (`Caps::with_app_lossy_for`,
+  applied after the facets, with the refused video raster given back since the reload feeds the same source video), and
+  `pump::decode_in_app` reloads the same direct play (`reload_at`, logged `open recovery: decoding dts in the app (stereo)
+  after type=18 num=601`), whose Load declares the PCM and so is planned the audio stack's PCM lead like any other PCM Load
+  (`engine::load_audio`); a surround track it takes is labelled "played in stereo" in the track menu. It never proves a facet, and a flight after an app-decoded refusal
+  never does either (`unprovable`); it flies no flight and so has no rescue to report (`ReportRecovered` names a flight's
+  rung). A remux or transcode route and a refused app decode go on to (5) or the read-out. A rebuild rung for a refused remux or
+  transcode, and a resolve-time `PlayVerdict::Server` refusal, are not covered;
+  (7) the read-out.
   The facet and both-facets rungs together are bounded by `MAX_RECOVERY_FLIGHTS` (2) per request, the facet rung runs once, and the
   rollback is not counted. A facet `start` already lacks (`start.without(facet) == start`: a stored
   refusal that `devcaps::start_caps` took out of `start`) narrows nothing and gets no flight, so a
   conversion that is still refused cannot loop; a refused conversion dispatch goes on to the next rung
-  too (HLS for a cold Auto Original, else the manual encode when earned, else the read-out), and a refused rollback is terminal. The viewer
+  too (HLS for a cold Auto Original, else for a source of at most two channels the app decode and then the manual encode when earned, for a surround source the manual encode when earned and then the app decode, else the read-out), and a refused rollback is terminal. The viewer
   keeps the connecting spinner: no read-out, no second play request. **The project hears about a
   rescue** (issue #1075): the machine keeps the request's first refusal that `LoadRefusal::reports`
   (a pipeline number, the stall or a Load timeout, never a source failure) with the stream it named,
@@ -414,7 +492,7 @@ something.
   `RecoveryEffect::ReportRecovered` per request, which the pump hands to `report::refusal_recovered`
   and which becomes the handled `refusal_recovered` event (closed fields only: codec class, channel
   bucket, the number or `timeout`/`stall`, and the rung `facet`/`hls`/`rollback`/`encode`, the last being the manual both-facets encode) under the
-  error-report consent and no other. A play that was never refused, a ladder that read out, a
+  error-report consent and no other. A play that was never refused, a ladder that read out, an app decode, a
   source failure and a flight Home abandoned send nothing. **A Load the machine did not
   ask for re-opens the ladder:** `RecoveryEvent::LoadStarted`, raised by
   `engine::start_bufferfeed_for` (which every Engine start passes: a fresh play, a reload, the
@@ -525,27 +603,74 @@ something.
   1x every direct-play seek reloads in every mode (`pump::seek_must_reload`). `play_rate_permille` is the
   viewer's choice and persists across reloads; `applied_rate_permille` is the current pipeline's and is
   reset by `reset_session`. The feed throttle's run-on reads the applied one (`FeedPace::reference_at`).
-- **A Load that declares `"audio":"PCM"` on LG's `liblxa` audio stack has its audio fed later than the
-  picture it belongs with, by an amount that follows the sound output: 400 ms on the TV speakers, 250 ms on
-  Bluetooth headphones; a set on any other or an unknown stack gets no lead at all** (#1086, #1088; FLAC and
-  every other app-decoded codec, and a speed session at any speed other than 1x; a compressed Load, DTS
-  included, gets none).
-  *Where it applies, and why only there:* the 400 ms and the wireless 150 ms are compiled into ONE library,
-  `liblxa` (with its GStreamer sink `libgstlxaudiosink`), so the lead corrects a cause that is known to exist
-  only where that library is. The 14 firmware inventories behind `tools/fwcompat.py`
-  (`~/.cache/plxnative/fwsym/data`): `liblxa.so.2.0.0` on webOS 7.4, 8.3 and 9.2 with the same lip-sync exports
-  as the dev set (the newer ones add an eARC variant of the output-type lookup), the dev set (4.10.2) has it on
-  the device, and Realtek's `libgstrtkaudio-1.0` instead on 4.10.0, 5.3.1, 6.4.0 and 10.2.0 (neither on 1.2.0 to
-  4.4.2 or 11.2.0): one webOS version spans both stacks, so the firmware version cannot decide it.
-  `devcaps::audio_stack()` is the one device fact, probed at boot (`devcaps::probe`, on the `devcaps:` line as
-  `audio stack=`): `Liblxa` when `/usr/lib/liblxa.so.2` exists (a stat, not a symbol lookup: our build links
-  LG's libraries through stub `.so` files that define every symbol, so a lookup in our own process proves
-  nothing, and a `dlopen` would run LG's initialisation in the app), `Other` on a device without it,
-  `Unknown` before `probe` (hosts, hostsim, tests). The values inside `liblxa` are not in the inventories, and
-  another stack's PCM path may already be in step, in which case 400 ms would make it 0.4 s late: so it gets
-  0 ms (the behaviour before #1087) and the log says `not measured on this chip`. Owner decision: no
-  re-encoding to a codec the set decodes itself; playback stays straight and lossless, which is why the lead
-  is the mechanism.
+- **A Load that declares `"audio":"PCM"` on one of LG's audio stacks has its audio fed later than the
+  picture it belongs with, by an amount the stack decides; a set with no lead (`adecsink` on 2016/2017, not
+  determined; Realtek; MStar; an unknown stack) gets none at all** (#1086, #1088, #1092, #1093; FLAC and every other app-decoded codec (a DTS the app decodes under the lossy gate
+  included: `engine::load_audio` plans the lead from the name the Load declares, which is PCM for it), and a speed
+  session at any speed other than 1x; a compressed Load, DTS the set decodes itself included, gets none).
+  App-decoded DTS, TrueHD, MP3 and Vorbis get the lead of the set's stack exactly as FLAC does, but none of them
+  was FILMED (the measurements below are FLAC on `liblxa`); the converter's own clock corrects the filter's lookahead
+  (about a millisecond) in the stamps, but Vorbis' decoder delay (a half-block pts offset, `ff_pcm.rs`) is not corrected and its effect on sync is not determined.
+  *Which stack:* `devcaps::audio_stack()` fingerprints it at boot (`devcaps::probe`, the `devcaps:` line's
+  `audio stack=`) by the GStreamer sink PLUGIN, because each LG generation has its own sink plugin family in `/usr/lib/gstreamer-1.0/`
+  (a 2018 image also ships the 2016/2017 one, so the probe order decides), no Realtek or MStar image has
+  any of the four, and in the firmware images read directly (the 19 unpacked images, 2016 to 2025; LG
+  chips, Realtek, MStar) `liblxa.so.2` itself is under the image's `/usr/lib` on none (it is in the BSP
+  partition, `/mnt/bsppart/bsp/usr/lib`, found through `ld.so.conf`; the dev set's own firmware too,
+  although its runtime stat of `/usr/lib/liblxa.so.2` answered yes: the runtime layout is not the
+  image's). Each probe step is a stat, never a symbol lookup (our build links LG's libraries through stub
+  `.so` files that define every symbol) and never a `dlopen` (it would run LG's initialisation in the
+  app). The first present file decides, in this order (OTA IDs and releases are firmware read by hand and
+  by decompile passes, cited as reasoning, never pasted): `libgstlxaudiosink.so` (`Liblxa`),
+  `libgstlgaudiosink.so` (`LgAudioSink`), `/usr/lib/liblxa.so.2` (`Liblxa`), `libgstaudiosink_new-1.0.so`
+  (`AudioSinkNew`), `libgstaudiosink-1.0.so` (`AdecSink`), none (`Other`). The bare `liblxa.so.2` stat is a
+  fallback checked AFTER the webOS 11 plugin because its runtime meaning is not understood (no image has it
+  under `/usr/lib`, yet the dev set answers yes): a 2022/23 OLED updated to webOS 11 that kept a
+  `liblxa.so.2` plays through `lgaudiosink`, and reading it as `Liblxa` would give Bluetooth 250 instead of
+  400, a needless bus read and a log naming the wrong stack.
+
+  | Stack (label) | Present | Sets | The lead (`engine::pcm_output_lead`) | Evidence |
+  |---|---|---|---|---|
+  | `Liblxa` (`liblxa`) | `libgstlxaudiosink.so` (first), or `/usr/lib/liblxa.so.2` (third, after `libgstlgaudiosink.so`) | 2019-2021 LG chips (dev set W19H 4.10.2), 2022/23 OLEDs before webOS 11 (INFERRED from the `tools/fwcompat.py` inventories, which carry `liblxa.so.2.0.0` for W22O 7.4.0 and W23O 8.3.0 / 9.2.0 and hold no plugin; no such image was unpacked) | `tv_speaker` 400 and `bt_soundbar` 250 (both MEASURED), any other output or none 400 (not measured) | dev set 505 with +105 = 400; W21O 6.5.3: template 400 raw, no +105, effective 400 by the same convention, its per-output walk still there |
+  | `LgAudioSink` (`lgaudiosink`) | `libgstlgaudiosink.so` | 2022/23 OLEDs on webOS 11 (W22O 11.2.0-74, W23O 11.2.0-3711), 2024 OLED (W24G 9.2.4), 2025 OLED (W25G 10.3.1) | 400 on every output, no read (not measured) | template `{150,150,400,5000,5000}`, 400 raw, no bias |
+  | `AudioSinkNew` (`audiosink_new`) | `libgstaudiosink_new-1.0.so` | 2018 LG chips, webOS 4.4.3 (OLED C8 W18O, LCD SK8500 W18H) | follows the output like `Liblxa` (400 / `bt_soundbar` 250 / else 400), ALL cells not measured | `libkadaptor`: default DSP offset 475 with a +75 app bias = 400 (hand-verified; 4.5: 505 with +105, also 400); AUTO plus a mixer channel turns lip sync off (hand); a decoder-only -150 ms for a wireless output (decompile only) => Bluetooth 250 |
+  | `AdecSink` (`adecsink`) | `libgstaudiosink-1.0.so`, checked AFTER `_new` (2018 ships both) | 2016 OLED 3.4.3 (W16M: element `audio_sink`, rank 256), 2017 OLED 3.9.2 (W17H: element `adecsink`) | NO lead (0, no read), logged `not measured on this chip` | 2016: default DSP offset 550, no per-output part found, the AUTO/mixer rule is not in the plugin (not determined). 2017: default 442/472 ms, app-offset bias unknown (so differential and DSP bias cannot be split), and a decoder-only per-output part (-100 DD, -150 WIRELESS). A 2017 measurement with `pcmavoffset` must therefore be taken per output: Bluetooth should differ by about 150 ms |
+  | `Other` (`other`) | none of them | Realtek, MStar | none | see below |
+
+  The label `adecsink` exists so a tester's log names the stack and `pcmavoffset` can measure it.
+  `Unknown` is before `probe` (hosts, hostsim, tests). The `tools/fwcompat.py` inventories
+  (`~/.cache/plxnative/fwsym/data`) are per-library symbol tables: they carry `liblxa.so.2.0.0` on 7.4, 8.3
+  and 9.2 and hold no GStreamer plugin (`/usr/lib/gstreamer-1.0/*.so`), which is why the stack is
+  fingerprinted from the plugin files and the firmware images are the evidence. One webOS version spans several stacks (the 2022/23 OLEDs are `liblxa` up to webOS 9
+  and `lgaudiosink` on 11), so the firmware version cannot decide it.
+  *Why Realtek and MStar get none:* their lip sync is NOT decoder-only (no mixer-off rule), so there is no
+  decoder-only compensation for the lead to match; it is not that they use one sink for both paths (the
+  `lgaudiosink` stack uses one sink for both too). What was read: Realtek's PCM path is in step on the
+  speakers and its Bluetooth is not determined; MStar may be up to about 128 ms early (its SoC delay
+  floor, the RTC path not verified by hand). A stack whose PCM path was already in step would be made 0.4 s
+  late by 400 ms, so these get 0 ms (the behaviour before #1087) and the log says `not measured on this
+  chip`.
+  *The `lgaudiosink` stack (firmware, NOT filmed, no webOS 11 set exists here):* the same rule as `liblxa`
+  (lip-sync mode AUTO is ON for the decoder and OFF for a mixer channel), and libpf's `CustomPipeline` never
+  sets the sink's `lipsync` property (CONFIRMED on webOS 11: in W22O libpf every cross-reference of the
+  string is inside `GenericPipeline::deepElementAddedCallback`). The template's 400 ms is raw (4.5 was 505
+  with a +105 bias; webOS 11 dropped both), and the sink's own 475 ms render delay is applied on both
+  paths and cancels. That the per-output table (`LIPSYNC_OFFSET_VALUES`) is unreferenced is checked in
+  part only: on W22O it has no relocation and no `movw`/`movt` pair for its address and its getter
+  `lgao_get_delay` has no direct call site (W24G the same); a pc-relative reference was not ruled out.
+  Per-output adjustment moved to the VIDEO plane (avSync keys by `soundOutput`), which moves both paths
+  equally. So the lead is 400 ms on every output, Bluetooth included, and the output is not read. If the
+  table were read after all, Bluetooth would need 250 and this gives it about 150 ms too late.
+  *The one link not proven on webOS 11: the `audio-port` value the `PCMMC` resource reaches the sink with.*
+  The sink's rule is `audio-port == -1` and `mixer-port >= 0` => mixer. In W22O libplayerAPIs
+  `acquireResources` retypes the ADEC entry to `"PCMMC"` in place and libpf `CustomPipeline::setResource`
+  forwards ports verbatim, so the decision and the rule are the same as on 4.5, where the measurement
+  shows the mixer path; the literal value was not read. If it were 0 or 1 the sink would stay off the
+  mixer path, AUTO would resolve to ON, app PCM would get the decoder's own 400 ms and already be in
+  step, and this lead would make every such set 0.4 s late. Check on a set: the sink logs `mixer mode
+  changing %s -> %s` and `mixer-port is %d`.
+  Owner decision: no re-encoding to a codec the set decodes itself; playback stays straight and lossless,
+  which is why the lead is the mechanism.
   *Cause (read from the firmware, not measured):* a Load whose every audio track is `audio/x-raw` is
   allocated its audio as a `PCMMC` mixer channel instead of an `ADEC` decoder (libplayerAPIs
   `allocateResource`, libpf's resource manager renames the resource), and liblxa's `lxao_play`, in its
@@ -569,9 +694,13 @@ something.
   not be divided by the speed. `engine::load_audio` yields the declared audio name and a `PcmLead` plan as
   one value (`Off` for a compressed Load; a speed override makes any codec declare PCM, so it plans a lead);
   `PcmLead::resolve` settles the plan against the output with the table `PCM_LEAD_BY_OUTPUT`, and
-  `engine::pcm_output_lead(stack, output)` is the whole table: `liblxa` + `tv_speaker` 400, `liblxa` +
-  `bt_soundbar` 250, `liblxa` + any other output or no answer `PCM_SINK_LEAD_NS` = 400 (not measured), any
-  other or unknown stack 0 whatever the output (`PcmLead::Unmeasured`, settled on the frame thread, no read).
+  `engine::pcm_output_lead(stack, output)` is the whole table (the stack table above): `liblxa` +
+  `tv_speaker` 400, `liblxa` + `bt_soundbar` 250, `liblxa` + any other output or no answer
+  `PCM_SINK_LEAD_NS` = 400 (not measured); `audiosink_new` the same three answers, none measured (its plan
+  is `PcmLead::FromOutput(stack)`, as `liblxa`'s, so the stack the log names is the one that was read for);
+  `lgaudiosink` + any output or none 400 (not measured; `PcmLead::Fixed`, settled on the frame thread with
+  the lead in the Engine from the start, no read); `adecsink`, other and unknown stacks 0 whatever the
+  output (`PcmLead::NoLead`, settled on the frame thread, no read).
   The `pcmavoffset` dev override (debug builds, read per Load) wins over the table AND the stack, and is how
   another output or another chip gets measured. Content time (`fp`, `max_fed_audio_pts`, `audio_start_fp`, stale-drop, throttle, prime) is
   untouched, so no producer of PCM stamps its own offset.
@@ -580,12 +709,15 @@ something.
   output goes to `threads::load_thread` (the `media` worker, which blocks in `Load` anyway), which reads
   `tv::sound::output` BEFORE `Load` (a `getSystemSettings {"category":"sound","keys":["soundOutput"]}` call
   through the `tv` port, 300 ms budget, `NoPlatform` on hosts), logs `pcm: audio sink pts +<N>ms (stack
-  liblxa, output <name|unknown>, default 400ms[, not measured])` once per Load (a stack with no lead logs
-  `pcm: audio sink pts +0ms (stack <other|unknown>, not measured on this chip)` from the frame thread), and hands the lead back inside
+  <liblxa|audiosink_new>, output <name|unknown>, default 400ms[, not measured])` once per Load (the
+  `lgaudiosink` stack logs `pcm: audio sink pts +400ms (stack lgaudiosink, every output, not measured)` and
+  a stack with no lead logs `pcm: audio sink pts +0ms (stack <adecsink|other|unknown>, not measured on this
+  chip)`, both from the frame thread), and hands the lead back inside
   `LoadCall::Returned` (`Shared::native_load_pcm_lead`). Nothing is fed before the Load returns, and
   `settle_pcm_lead` takes the lead into the Engine, once, before the first audio unit; until then the audio
   lane waits rather than stamp with a guess it would later move. A compressed Load, an override and a stack
-  that is not `liblxa` never read the output (the last pays nothing on the bus). A cost to know: on a PCM Load the read sits directly in front of `Load`, so it adds its
+  whose lead does not follow the output (`lgaudiosink` and the stacks with no lead) never read the output
+  (the last pay nothing on the bus). A cost to know: on a PCM Load the read sits directly in front of `Load`, so it adds its
   round trip to time-to-first-frame (its length is in the `sound: output ... read in Nms` line). *Worst
   case:* the 300 ms bounds the CALL only. `ls2::register()` before it and the unregistration after it are
   not bounded (`webos.rs`'s `ls2` doc), and `ls2` has no bounded registration to use instead, so a wedged
@@ -601,14 +733,22 @@ something.
   re-derives its render base at every SEGMENT from the segment and the pipeline clock, never from a
   buffer's pts; no late-drop or gap rule exists. So the relative lead survives an in-place seek and a
   reload. An in-place seek keeps the Engine and its lead; a reload (a Load) reads the output again.
-  *Filmed only on the dev set* (webOS 4.10.2, a `liblxa` set). *Not determined:* every other chip and audio
-  stack (Realtek's `libgstrtkaudio`, whatever the others run: no lead, unmeasured; `pcmavoffset` measures
-  one); on `liblxa`, any output but the two filmed (optical, ARC, wired headphones, LG Sound Sync, a
-  soundbar with its own latency: they keep 400 ms and the log says "not measured"); an output change in the
-  middle of a playback, which takes effect at the next Load; the user's "AV Sync Adjust" menu, whose effect
-  on a mixer channel is not known; a Bluetooth device whose own latency differs from the filmed one;
-  another sample rate, chip or firmware. Also unfilmed: a seek, and the speed path (it takes the same
-  lead from the same code).
+  *Filmed only on the dev set* (webOS 4.10.2, a `liblxa` set); nothing else was filmed. *Not determined:*
+  the `audio-port` value the `PCMMC` resource reaches the `lgaudiosink` sink with (above: the sink's
+  `mixer mode changing %s -> %s` / `mixer-port is %d` log lines settle it); the whole `lgaudiosink` stack
+  (webOS 11, 2024, 2025: its 400 ms is read from the template and the 4.5 measurement, never measured there,
+  and its per-output table is only partly checked as unreferenced); the whole `audiosink_new` stack (2018:
+  every cell not measured, its Bluetooth 250 from a decompile only); 2016/2017's `adecsink` (no lead: the
+  2017 offset cannot be split into differential and DSP bias and 2017 has a decoder-only per-output part
+  (-100 DD, -150 wireless), so a `pcmavoffset` measurement there must be per output, Bluetooth about
+  150 ms different; 2016's AUTO/mixer rule is not in the plugin); Realtek (Bluetooth not determined) and MStar (possibly up to about
+  128 ms early, the RTC path unverified): no lead; on `liblxa`, any output but the two filmed (optical,
+  ARC, wired headphones, LG Sound Sync, a soundbar with its own latency: they keep 400 ms and the log says
+  "not measured"), and the newer firmware's mixer channel forced to type PCM (hand-verified on 4.5
+  only); an output change in the middle of a playback, which takes effect at the next Load; the user's
+  "AV Sync Adjust" menu, whose effect on a mixer channel is not known; a Bluetooth device whose own latency
+  differs from the filmed one; another sample rate, chip or firmware. Also unfilmed: a seek, and the speed
+  path (it takes the same lead from the same code).
 - **Seeks are in-place**, in one of three per-session modes (`player::SeekMode`, chosen by
   `engine::select_seek_mode` in `start_bufferfeed`, the `/tmp/plxnative-seekmode` dev trigger
   `native|segment|reload` wins): the demuxer is `av_seek_frame`d to the target, then on the first
