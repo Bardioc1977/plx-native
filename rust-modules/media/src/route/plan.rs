@@ -163,8 +163,9 @@ pub struct CarriedAudio {
     pub can_normalize_loudness: bool,
     /// Dolby Atmos (`metadata::Stream::has_atmos`) — the Load payload's `contents.immersive`.
     pub immersive: bool,
-    /// PMS `samplingRate` (Hz) and `bitDepth` — what a PCM Load declares for a track the app
-    /// decodes itself (FLAC, ALAC, LPCM: `devcaps::PCM_AUDIO_CODECS`). 0 = not said, and the Load refuses.
+    /// PMS `samplingRate` (Hz) and `bitDepth` of a track the app decodes itself (FLAC, ALAC, LPCM:
+    /// `devcaps::PCM_AUDIO_CODECS`); the PCM Load declares `devcaps::pcm_load_rate(sample_rate)` (a rate
+    /// above the table is resampled to 48 or 44.1 kHz, S32; `route::pcm_format_of`). 0 = not said, and the Load refuses.
     pub sample_rate: i64,
     pub bit_depth: i64,
 }
@@ -3081,10 +3082,10 @@ pub(super) fn pick_dp_audio_pref(
 /// track of at most two channels, because the app never mixes a surround source down under Force)? Auto and Forced both go
 /// through `devcaps`' canonicaliser (PMS's `dca` is the pipeline's `dts`), so they cannot drift apart.
 /// Both also apply the Load's own limits ([`plx_platform::devcaps::audio_track_fits`]): the PCM
-/// path's channel count and rate table, and the sample-rate ceiling every other codec shares
-/// (DTS and TrueHD excepted). They belong to the app's decoder and the Load, not to a hardware decoder
-/// Forced may trust past its table, so a 5.1 or 96 kHz FLAC, or a 96 kHz AAC, is refused under
-/// Forced instead of failing at the Load.
+/// path's channel count and rate rule (`pcm_load_rate`: a table rate, or any faster one the app
+/// resamples), and the sample-rate ceiling every other codec shares (DTS and TrueHD excepted). They belong
+/// to the app's decoder and the Load, not to a hardware decoder Forced may trust past its table, so a 5.1
+/// FLAC, or a 96 kHz AAC, is refused under Forced instead of failing at the Load; a 96 kHz stereo FLAC is not.
 pub(super) fn audio_direct_plays_with(
     caps: &plx_platform::devcaps::Caps, mode: DirectPlayMode, codec: &str, channels: i64,
     sample_rate: i64,
