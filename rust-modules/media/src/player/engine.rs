@@ -1095,8 +1095,8 @@ fn with_opus_info(p: &str, channels: i64) -> Option<String> {
     })
 }
 
-/// **Who owns the PCM a Load declares.** Audio the app decodes at 1x (FLAC, ALAC, LPCM, and DTS on a
-/// value with the lossy gate on: `ff_pcm`)
+/// **Who owns the PCM a Load declares.** Audio the app decodes at 1x (FLAC, ALAC, LPCM, and a lossy codec the attempt decodes in
+/// the app: `ff_pcm`)
 /// declares its own shape; at any other speed the speed decoder (`ff::SpeedDecoder`) decodes every
 /// codec, those included, and feeds stereo PCM that [`build_av_payload`] declares with its own
 /// fixed `pcmInfo` (kilohertz). The app-decoded shape is then dropped and, at 1x, that fixed node is dropped
@@ -7028,8 +7028,8 @@ mod pcm_info_tests {
         assert!(app_pcm_for_rate(750, missing()).is_none());
     }
 
-    /// **DTS under the gate** (S4 PR 2) is declared as PCM — stereo 48 kHz S16, one `pcmInfo` — and
-    /// with the gate off is `DTS` exactly as before. The shape is the session's own
+    /// **DTS the attempt decodes in the app** is declared as PCM — stereo 48 kHz S16, one `pcmInfo` — and
+    /// where it does not is `DTS` exactly as before. The shape is the session's own
     /// (`route::stream_pcm`), so a native DTS Load can never carry a PCM node nor the reverse.
     #[test]
     fn app_decoded_dts_is_declared_as_pcm_and_native_dts_as_dts() {
@@ -7055,7 +7055,40 @@ mod pcm_info_tests {
         serde_json::from_str::<serde_json::Value>(&on).unwrap();
     }
 
-    /// MP3 and Vorbis under the gate (S4-4) are declared exactly as DTS is: `PCM`, stereo 48 kHz S16.
+    /// **Force Direct Play on a set with no DTS row declares a STEREO DTS track as stereo 48 kHz PCM**: the
+    /// app decodes it (the table's lossy policy admits DTS, the set has no native path, and a 2.0 source
+    /// is no downmix, `Caps::app_may_mix_down`), so the Load carries one `pcmInfo` and `PCM` instead of a
+    /// `DTS` the pipeline would hang on. Under Auto the same value still declares `DTS`. The carried track
+    /// supplies the channel count the rule reads; a 5.1 one is refused before any Load
+    /// (`forced_resolve_refuses_a_surround_dts_track_instead_of_mixing_it_down`).
+    #[test]
+    fn a_forced_dts_with_no_row_is_declared_as_stereo_48k_pcm() {
+        let caps = std::sync::Arc::new(plx_platform::devcaps::Caps {
+            app_lossy: plx_platform::devcaps::AppLossy::Measured,
+            ..plx_platform::devcaps::Caps::assumed()
+        });
+        let mut ps = crate::route::PlaybackSession::IDLE;
+        crate::route::begin_attempt_for_test(&mut ps, caps);
+        crate::route::set_stream_codecs(&mut ps, "h264", "dts");
+        crate::route::set_carried_audio_for_test(
+            &mut ps,
+            crate::route::CarriedAudio {
+                sid: 7, ordinal: 1, codec: "dts".into(), channels: 2,
+                can_normalize_loudness: false, immersive: false, sample_rate: 48_000, bit_depth: 0,
+            },
+        );
+        assert_eq!(crate::route::stream_pcm(&ps).and_then(Result::ok), None, "Auto: the native decoder's");
+        crate::route::set_direct_play_mode_for_test(&mut ps, crate::route::DirectPlayMode::Forced);
+        let shape = crate::route::stream_pcm(&ps).and_then(Result::ok);
+        assert_eq!(shape, Some(crate::route::PcmFormat::STEREO_48K));
+        assert_eq!(audio_declaration("dts", shape.as_ref()), Some(("PCM", 5)));
+        let on = build_av_payload_at(&ps, "H264", "PCM", ENVELOPE_FHD60, crate::player::RATE_NORMAL);
+        assert!(on.contains(r#""audio":"PCM""#) && !on.contains(r#""audio":"DTS""#), "{on}");
+        assert_eq!(on.matches("pcmInfo").count(), 1, "{on}");
+        serde_json::from_str::<serde_json::Value>(&on).unwrap();
+    }
+
+    /// MP3 and Vorbis in force (S4-4) are declared exactly as DTS is: `PCM`, stereo 48 kHz S16.
     #[test]
     fn app_decoded_mp3_and_vorbis_are_declared_as_pcm_and_native_ones_are_refused() {
         let mut ps = crate::route::PlaybackSession::IDLE;
@@ -7082,12 +7115,12 @@ mod pcm_info_tests {
         }
     }
 
-    /// TrueHD under the gate (S4-5) is declared as `PCM`, stereo 48 kHz S16, like the other lossy ones.
+    /// TrueHD in force (S4-5) is declared as `PCM`, stereo 48 kHz S16, like the other lossy ones.
     #[test]
     fn app_decoded_truehd_is_declared_as_pcm() {
         let mut ps = crate::route::PlaybackSession::IDLE;
         crate::route::set_stream_codecs(&mut ps, "h264", "truehd");
-        assert_eq!(crate::route::stream_pcm(&ps).and_then(Result::ok), None, "gate off");
+        assert_eq!(crate::route::stream_pcm(&ps).and_then(Result::ok), None, "not in force");
         crate::route::begin_attempt_for_test(
             &mut ps, std::sync::Arc::new(plx_platform::devcaps::Caps::assumed().with_app_lossy()),
         );

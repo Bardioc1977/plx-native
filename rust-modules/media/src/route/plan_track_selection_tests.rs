@@ -984,9 +984,9 @@ fn auto_and_forced_agree_on_the_dca_spelling() {
     assert!(!audio_direct_plays_with(&assumed, DirectPlayMode::Forced, "truehd", 8, 0));
 }
 
-/// **DTS under the lossy-decode gate** (S4 PR 2): a set with no DTS row direct-plays a DTS track in
+/// **DTS the app decodes** (S4 PR 2): a set with no DTS row direct-plays a DTS track in
 /// BOTH modes, up to 8 channels (the app decodes the core and downmixes), whatever a native
-/// ceiling says; with the gate off nothing changes — no row, no DTS — and the lossless codecs do
+/// ceiling says; with the policy off nothing changes — no row, no DTS — and the lossless codecs do
 /// not depend on it.
 #[test]
 fn the_lossy_gate_lets_the_app_direct_play_dts_in_both_modes_and_off_changes_nothing() {
@@ -1001,12 +1001,22 @@ fn the_lossy_gate_lets_the_app_direct_play_dts_in_both_modes_and_off_changes_not
         assert!(!audio_direct_plays_with(&on, mode, "mlp", 8, 0), "{mode:?}: only the app-decoded set joined");
         assert!(!audio_direct_plays_with(&on, mode, "aac", 2, 96_000), "{mode:?}: hardware limits stand");
     }
+    // A policy that merely ADMITS DTS (a read table's `Measured`) is not "in force": Auto never decodes
+    // in the app on its own, Force Direct Play does only where the set has no native path.
+    let admitted = plx_platform::devcaps::Caps { app_lossy: plx_platform::devcaps::AppLossy::Measured, ..off.clone() };
+    assert!(!audio_direct_plays_with(&admitted, DirectPlayMode::Auto, "dca", 6, 0), "Auto: the server converts it");
+    assert!(audio_direct_plays_with(&admitted, DirectPlayMode::Forced, "dca", 2, 0), "Forced: no native path, nothing to mix down");
+    assert!(
+        !audio_direct_plays_with(&admitted, DirectPlayMode::Forced, "dca", 6, 0),
+        "Forced: no native path and the app will not mix a surround source down (owner, 2026-10-28)"
+    );
+    assert!(!audio_natively_plays_with(&admitted, DirectPlayMode::Forced, "dca", 2, 0));
     let measured = plx_platform::devcaps::Caps { native_ceiling: [("dts".into(), 2)].into(), ..dts_row_caps() };
     assert!(!audio_direct_plays_with(&measured, DirectPlayMode::Forced, "dca", 6, 0), "native ceiling applies natively");
     assert!(audio_direct_plays_with(&measured.with_app_lossy(), DirectPlayMode::Forced, "dca", 6, 0));
 }
 
-/// **MP3 and Vorbis under the lossy gate** (S4-4) direct-play in both modes on a set with no row for
+/// **MP3 and Vorbis in force** (S4-4) direct-play in both modes on a set with no row for
 /// them, and not with it off; a Vorbis above 48 kHz is the server's.
 #[test]
 fn the_lossy_gate_lets_the_app_direct_play_mp3_and_vorbis_in_both_modes() {
@@ -1024,7 +1034,7 @@ fn the_lossy_gate_lets_the_app_direct_play_mp3_and_vorbis_in_both_modes() {
     }
 }
 
-/// **TrueHD under the lossy gate** (S4-5) direct-plays in both modes at any rate it has, 8 channels,
+/// **TrueHD in force** (S4-5) direct-plays in both modes at any rate it has, 8 channels,
 /// on a set with no row for it, and not with the gate off.
 #[test]
 fn the_lossy_gate_lets_the_app_direct_play_truehd_at_any_rate_in_both_modes() {
