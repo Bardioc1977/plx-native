@@ -5651,6 +5651,7 @@ pub fn stream_audio(ps: &PlaybackSession) -> Option<crate::player::recovery::Str
     (!codec.is_empty()).then(|| crate::player::recovery::StreamAudio {
         codec,
         channels: u32::try_from(stream_achannels(ps)).unwrap_or(0),
+        app_decoded_lossy: stream_pcm_is_lossy(ps),
     })
 }
 /// The SOURCE's video, when the pipeline was fed it whole, for the failed-open ladder
@@ -5711,7 +5712,8 @@ pub fn stream_immersive(ps: &PlaybackSession) -> bool {
 }
 
 /// The PCM a Load must declare for audio the app decodes itself
-/// (`devcaps::PCM_AUDIO_CODECS` — FLAC, ALAC, LPCM).
+/// (`devcaps::PCM_AUDIO_CODECS` — FLAC, ALAC, LPCM — and the lossy entries when the attempt's
+/// [`Caps::app_decodes_lossy`](plx_platform::devcaps::Caps::app_decodes_lossy) is on).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PcmFormat {
     pub sample_rate: u32,
@@ -5721,15 +5723,30 @@ pub struct PcmFormat {
     pub channels: u32,
 }
 
+impl PcmFormat {
+    /// What the lossy decode outputs (`ff_pcm::PcmDecoder`): the source downmixed to stereo and
+    /// resampled to 48 kHz, as 16-bit samples — the same shape the speed decoder feeds.
+    pub const STEREO_48K: PcmFormat = PcmFormat { sample_rate: 48_000, bits: 16, channels: 2 };
+}
+
 /// [`PcmFormat`] for the stream now being fed, `None` when it is not app-decoded audio.
 /// `Some(Err(why))` when it IS, but the facts the Load needs are missing or outside the PCM path:
 /// the caller refuses the Load rather than declare a rate the decoder would contradict.
 pub fn stream_pcm(ps: &PlaybackSession) -> Option<Result<PcmFormat, String>> {
     let id = plx_platform::devcaps::audio_codec_id(&ps.stream_acodec);
-    if !plx_platform::devcaps::PCM_AUDIO_CODECS.split(',').any(|c| c == id) {
-        return None;
+    if plx_platform::devcaps::PCM_AUDIO_CODECS.split(',').any(|c| c == id) {
+        return Some(pcm_format_of(ps.cur_audio.as_ref(), &id));
     }
-    Some(pcm_format_of(ps.cur_audio.as_ref(), &id))
+    // A lossy codec the attempt's value lets the app decode: its output has one shape, whatever
+    // the source is, so no track fact is needed (and none can contradict it).
+    stream_pcm_is_lossy(ps).then_some(Ok(PcmFormat::STEREO_48K))
+}
+
+/// Whether the stream now being fed is one the app decodes LOSSILY (DTS under the attempt's gate):
+/// what `ff` is told so a lossless PCM Load never makes it decode a DTS stream in the app.
+pub fn stream_pcm_is_lossy(ps: &PlaybackSession) -> bool {
+    let id = plx_platform::devcaps::audio_codec_id(&ps.stream_acodec);
+    ps.attempt_caps().app_decodes_lossy_codec(&id)
 }
 
 /// PURE half of [`stream_pcm`]: the carried track must be the same codec, with a stated rate and
@@ -5794,6 +5811,40 @@ mod pcm_format_tests {
         assert!(pcm_format_of(Some(&track("alac", 6, 48_000, 16)), "alac").is_err());
         assert!(pcm_format_of(Some(&track("pcm_s24le", 2, 96_000, 24)), "pcm").is_err());
         assert!(pcm_format_of(Some(&track("flac", 2, 48_000, 16)), "pcm").is_err(), "a track of another codec");
+    }
+
+    /// **DTS under the gate** (S4 PR 2): the Load declares the SHAPE THE DECODER OUTPUTS, stereo
+    /// 48 kHz S16, whatever the source's channels and rate; and only on an attempt whose capability
+    /// value turned the lossy decode on. Off, DTS declares nothing here and stays native.
+    #[test]
+    fn dts_declares_stereo_48k_only_when_the_attempt_has_the_gate_on() {
+        let mut ps = PlaybackSession::IDLE;
+        set_stream_codecs(&mut ps, "h264", "dts");
+        assert_eq!(stream_pcm(&ps), None, "no attempt begun: the assumed value, gate off");
+        ps.begin_attempt(std::sync::Arc::new(plx_platform::devcaps::Caps::assumed()));
+        assert_eq!(stream_pcm(&ps), None, "gate off");
+        assert!(!stream_pcm_is_lossy(&ps));
+        assert!(!stream_audio(&ps).unwrap().app_decoded_lossy, "the ladder's fact: native DTS is the pipeline's");
+        ps.begin_attempt(std::sync::Arc::new(plx_platform::devcaps::Caps::assumed().with_app_lossy()));
+        for spelling in ["dts", "dca", "DTS"] {
+            set_stream_codecs(&mut ps, "h264", spelling);
+            assert_eq!(stream_pcm(&ps), Some(Ok(PcmFormat::STEREO_48K)), "{spelling}");
+            assert!(stream_pcm_is_lossy(&ps), "{spelling}");
+            assert!(stream_audio(&ps).unwrap().app_decoded_lossy, "{spelling}: the ladder must not name a native facet");
+        }
+        set_stream_codecs(&mut ps, "h264", "flac");
+        assert!(!stream_pcm_is_lossy(&ps), "a lossless PCM Load is never the lossy one");
+        assert_eq!(PcmFormat::STEREO_48K, PcmFormat { sample_rate: 48_000, bits: 16, channels: 2 });
+        let out = crate::ff_pcm::STEREO_48K;
+        assert_eq!(
+            (PcmFormat::STEREO_48K.sample_rate, PcmFormat::STEREO_48K.bits, PcmFormat::STEREO_48K.channels),
+            (out.rate, out.bits, out.channels),
+            "the shape the Load declares is the one the decoder outputs"
+        );
+        for other in ["ac3", "eac3", "aac", "truehd"] {
+            set_stream_codecs(&mut ps, "h264", other);
+            assert_eq!(stream_pcm(&ps), None, "{other}");
+        }
     }
 
     #[test]
@@ -5968,6 +6019,12 @@ pub fn set_stream_declaration_for_test(
     capability: plx_platform::devcaps::dv::DvCapability,
 ) -> bool {
     set_stream_declaration_with_capability(ps, vc, ac, fps, dovi, immersive, capability)
+}
+
+/// Begin an attempt on `caps`, so [`stream_pcm`] and the planner read that value (tests).
+#[cfg(any(test, feature = "test-support"))]
+pub fn begin_attempt_for_test(ps: &mut PlaybackSession, caps: std::sync::Arc<plx_platform::devcaps::Caps>) {
+    ps.begin_attempt(caps);
 }
 
 /// Carry `audio` as the playing track, so [`stream_pcm`] reads its facts (rate, depth, channels).

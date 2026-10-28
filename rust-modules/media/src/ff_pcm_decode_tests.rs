@@ -116,6 +116,11 @@ fn encode(dir: &Path, file: &str, raw: Raw, rate: u32, channels: usize, samples:
 /// Open `path`, hand every packet of its first audio stream to a [`PcmDecoder`] declared as `out`,
 /// and return everything it produced. `Err` is whatever refused: the open or a decode.
 unsafe fn decode_file(path: &Path, out: PcmOut) -> Result<Vec<u8>, String> {
+    decode_file_with(path, out, |_| {})
+}
+
+/// [`decode_file`], showing `inspect` the opened decoder first.
+unsafe fn decode_file_with(path: &Path, out: PcmOut, inspect: impl FnOnce(&PcmDecoder)) -> Result<Vec<u8>, String> {
     let c_path = CString::new(path.to_str().unwrap()).unwrap();
     let mut fmt = avformat_alloc_context();
     let r = avformat_open_input(&mut fmt, c_path.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
@@ -127,6 +132,7 @@ unsafe fn decode_file(path: &Path, out: PcmOut) -> Result<Vec<u8>, String> {
         .expect("an audio stream");
     let result = (|| {
         let mut dec = PcmDecoder::open(stream_codecpar(*streams.add(ai)), out)?;
+        inspect(&dec);
         let mut pkt = av_packet_alloc();
         let mut all = Vec::new();
         let mut failure = None;
@@ -235,6 +241,44 @@ fn a_file_that_contradicts_the_declared_load_is_refused_not_played_wrong() {
     assert!(why.contains("not an app-decoded codec"), "{why}");
 }
 
+/// **DTS, the lossy entry**: a 5.1 core goes in, stereo 48 kHz S16 comes out, for a 48 kHz and a
+/// 44.1 kHz source alike, over the real `dca` decoder of the bundled component list with
+/// `core_only` accepted. A lossy codec is not bit-exact, so the signal is a sine in the front-left
+/// only: the output must carry it on the left (the downmix ran), be about as long as the source
+/// (the resample kept the duration), and a file declared as anything but stereo 48 kHz is refused.
+#[test]
+#[ignore = "requires the bundled host FFmpeg and the ffmpeg tool; run make check-ffmpeg"]
+fn dts_decodes_to_stereo_48k_through_the_bundled_ffmpeg() {
+    let _g = plx_base::testlock::serial();
+    if skip() {
+        return;
+    }
+    let _ffmpeg = bind_host_ffmpeg();
+    let scratch = Scratch::new("dts");
+    let stereo = PcmOut { rate: 48_000, bits: 16, channels: 2 };
+    for (file, rate) in [("a.mkv", 48_000u32), ("b.mkv", 44_100)] {
+        let frames = rate as usize * 2;
+        let mut samples = Vec::with_capacity(frames * 6);
+        for i in 0..frames {
+            let v = ((i as f64 * 2.0 * std::f64::consts::PI * 440.0 / rate as f64).sin() * 12_000.0) as i32;
+            samples.extend_from_slice(&[v, 0, 0, 0, 0, 0]);
+        }
+        let src = encode(&scratch.0, file, S16, rate, 6, &samples, "dca", &["-strict", "-2", "-b:a", "768k"]);
+        let got = unsafe { decode_file_with(&src, stereo, |d| assert!(d.core_only(), "core_only was not accepted")) }
+            .unwrap_or_else(|why| panic!("{rate} Hz: {why}"));
+        let pcm: Vec<i16> = got.chunks(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+        let frames_out = pcm.len() / 2;
+        assert!((95_000..=97_500).contains(&frames_out), "{rate} Hz: 2 s is ~96000 frames at 48 kHz, got {frames_out}");
+        let energy = |ch: usize| pcm.iter().skip(ch).step_by(2).map(|&v| (v as f64).powi(2)).sum::<f64>();
+        assert!(energy(0) > 100.0 * energy(1).max(1.0), "{rate} Hz: the front-left sine must stay on the left");
+    }
+    let src = scratch.0.join("a.mkv");
+    for wrong in [PcmOut { rate: 44_100, bits: 16, channels: 2 }, PcmOut { rate: 48_000, bits: 32, channels: 2 }, PcmOut { rate: 48_000, bits: 16, channels: 6 }] {
+        let why = unsafe { decode_file(&src, wrong) }.expect_err("DTS is only converted to stereo 48 kHz S16");
+        assert!(why.contains("stereo 48 kHz"), "{why}");
+    }
+}
+
 /// The LPCM flavours the app cannot decode (float, 8-bit) reach the demuxer under PMS's `pcm` and a
 /// PCM Load: the real FFmpeg names them `pcm_f32le` / `pcm_s8` / `pcm_u8`, none of which is in
 /// `APP_DECODED`, so `PcmDecoder::open` refuses them and the demuxer's `pcm_load_feeds_raw` guard
@@ -256,5 +300,76 @@ fn float_and_8_bit_lpcm_are_not_app_decodable() {
                 .expect_err(&format!("{file}: must not decode"));
             assert!(why.contains("not an app-decoded codec"), "{file}: {why}");
         }
+    }
+}
+
+/// Output of the audio packet numbered `k` of `path`, decoded by a [`PcmDecoder`] declared as `out`.
+/// With `history`, the packets before `k` are decoded first (the decoder has played that far) and the
+/// decoder is then [reset](PcmDecoder::reset_stream) as a seek does; without, `k` is the first packet
+/// a fresh decoder sees. A flush must make the two the same.
+unsafe fn packet_output(path: &Path, out: PcmOut, k: usize, history: bool) -> Vec<u8> {
+    let c_path = CString::new(path.to_str().unwrap()).unwrap();
+    let mut fmt = avformat_alloc_context();
+    assert!(avformat_open_input(&mut fmt, c_path.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut()) >= 0);
+    assert!(avformat_find_stream_info(fmt, std::ptr::null_mut()) >= 0);
+    let streams = (*fmt).streams;
+    let ai = (0..(*fmt).nb_streams as usize)
+        .find(|&i| (*stream_codecpar(*streams.add(i))).codec_type == 1)
+        .expect("an audio stream");
+    let mut dec = PcmDecoder::open(stream_codecpar(*streams.add(ai)), out).expect("open");
+    let mut pkt = av_packet_alloc();
+    let mut n = 0;
+    let mut result = None;
+    while av_read_frame(fmt, pkt) >= 0 {
+        if (*pkt).stream_index as usize == ai {
+            if n == k {
+                if history {
+                    dec.reset_stream();
+                }
+                result = Some(dec.decode(pkt).expect("decode").to_vec());
+                av_packet_unref(pkt);
+                break;
+            }
+            if history {
+                dec.decode(pkt).expect("decode");
+            }
+            n += 1;
+        }
+        av_packet_unref(pkt);
+    }
+    av_packet_free(&mut pkt);
+    avformat_close_input(&mut fmt);
+    result.expect("the file has packet k")
+}
+
+/// **A seek leaves no history in the lossy decoder.** The first frame decoded after
+/// `reset_stream` equals the same frame decoded by a decoder that never saw what came before it
+/// (the DTS synthesis filter bank carries state from one frame to the next, so without
+/// `avcodec_flush_buffers` it would not). Run on a 48 kHz and a 44.1 kHz source: the second also
+/// proves the resampler's tail is dropped.
+#[test]
+#[ignore = "requires the bundled host FFmpeg and the ffmpeg tool; run make check-ffmpeg"]
+fn a_reset_leaves_no_history_of_the_stream_before_it() {
+    let _g = plx_base::testlock::serial();
+    if skip() {
+        return;
+    }
+    let _ffmpeg = bind_host_ffmpeg();
+    let scratch = Scratch::new("dts-reset");
+    let stereo = PcmOut { rate: 48_000, bits: 16, channels: 2 };
+    for (file, rate) in [("a.mkv", 48_000u32), ("b.mkv", 44_100)] {
+        let frames = rate as usize * 2;
+        let mut samples = Vec::with_capacity(frames * 6);
+        for i in 0..frames {
+            let t = i as f64 / rate as f64;
+            let v = ((t * 2.0 * std::f64::consts::PI * 440.0).sin() * 9_000.0
+                + (t * 2.0 * std::f64::consts::PI * 3_100.0).sin() * 6_000.0) as i32;
+            samples.extend_from_slice(&[v, -v / 2, v / 3, 0, v / 4, -v / 5]);
+        }
+        let src = encode(&scratch.0, file, S16, rate, 6, &samples, "dca", &["-strict", "-2", "-b:a", "768k"]);
+        let fresh = unsafe { packet_output(&src, stereo, 20, false) };
+        let after_seek = unsafe { packet_output(&src, stereo, 20, true) };
+        assert!(!fresh.is_empty() && fresh.iter().any(|&b| b != 0), "{rate} Hz: the packet decodes to sound");
+        assert!(fresh == after_seek, "{rate} Hz: the first frame after a reset must not depend on what was decoded before");
     }
 }

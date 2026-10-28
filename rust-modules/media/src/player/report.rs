@@ -2048,7 +2048,7 @@ mod tests {
             refusal: LoadRefusal::Refused { num: 601 },
             facts: OpenFacts {
                 no_frames: true,
-                audio: Some(StreamAudio { codec: "dca".into(), channels: 6 }),
+                audio: Some(StreamAudio { codec: "dca".into(), channels: 6, app_decoded_lossy: false }),
                 ..OpenFacts::default()
             },
         }

@@ -1035,6 +1035,17 @@ fn audio_payload_codec(codec: &str) -> Option<(&'static str, u8)> {
     }
 }
 
+/// The audio name and diagnostic code a Load declares for `codec`: PCM whenever the app decodes the
+/// stream itself (`pcm` is the shape [`crate::route::stream_pcm`] declared), whatever the codec
+/// is — DTS is `DTS` only when the set's own decoder takes it — else [`audio_payload_codec`]'s.
+/// PURE.
+fn audio_declaration(codec: &str, pcm: Option<&crate::route::PcmFormat>) -> Option<(&'static str, u8)> {
+    if pcm.is_some() {
+        return Some(("PCM", 5));
+    }
+    audio_payload_codec(codec)
+}
+
 /// RFC 7845 §5.1 `OpusHead` as libopus's surround encoder writes it: mapping family 0 for mono and
 /// stereo, family 1 (Vorbis channel order) for 3-8 channels, pre-skip 312, 48 kHz, 0 dB gain.
 /// The Load is built before the demuxer opens the file, so the file's own CodecPrivate is not
@@ -1084,7 +1095,8 @@ fn with_opus_info(p: &str, channels: i64) -> Option<String> {
     })
 }
 
-/// **Who owns the PCM a Load declares.** Audio the app decodes at 1x (FLAC, ALAC, LPCM: `ff_pcm`)
+/// **Who owns the PCM a Load declares.** Audio the app decodes at 1x (FLAC, ALAC, LPCM, and DTS on a
+/// value with the lossy gate on: `ff_pcm`)
 /// declares its own shape; at any other speed the speed decoder (`ff::SpeedDecoder`) decodes every
 /// codec, those included, and feeds stereo PCM that [`build_av_payload`] declares with its own
 /// fixed `pcmInfo` (kilohertz). The app-decoded shape is then dropped and, at 1x, that fixed node is dropped
@@ -1742,16 +1754,6 @@ fn start_bufferfeed_inner(
             // wrong string leaves the audio ES unconfigured, and with audioSync the video
             // sink slaves to the dead audio clock and stalls (verified: video-only plays).
             let codec = crate::route::stream_acodec(ps);
-            // Dev trigger `pcmavoffset=<ms>` (debug builds, read per Load): how the lead is measured
-            // on an output the default was not filmed on.
-            let lead_override = plx_base::devtrig::read("pcmavoffset");
-            let Some(audio) =
-                load_audio(&codec, session_rate, lead_override.as_deref(), plx_platform::devcaps::audio_stack())
-            else {
-                log(&format!("start_bufferfeed: unsupported audio codec {codec:?}; refusing incorrect Load declaration"));
-                SHARED.fail_demux(DemuxExitClass::LoadRefused);
-                return Err(crate::route::RouteStartResult::StartFailed);
-            };
             // App-decoded audio: the Load must state the PCM shape, and the demuxer must produce
             // exactly that. Missing facts refuse the Load — a guessed rate plays at the wrong pitch.
             let pcm = match app_pcm_for_rate(session_rate, crate::route::stream_pcm(ps)) {
@@ -1763,7 +1765,20 @@ fn start_bufferfeed_inner(
                 }
                 None => None,
             };
-            crate::ff::set_pcm_out(pcm.map(|f| (f.sample_rate, f.bits, f.channels)));
+            // Dev trigger `pcmavoffset=<ms>` (debug builds, read per Load): how the lead is measured
+            // on an output the default was not filmed on.
+            let lead_override = plx_base::devtrig::read("pcmavoffset");
+            let Some(audio) = load_audio(
+                &codec, session_rate, pcm.as_ref(), lead_override.as_deref(), plx_platform::devcaps::audio_stack(),
+            ) else {
+                log(&format!("start_bufferfeed: unsupported audio codec {codec:?}; refusing incorrect Load declaration"));
+                SHARED.fail_demux(DemuxExitClass::LoadRefused);
+                return Err(crate::route::RouteStartResult::StartFailed);
+            };
+            crate::ff::set_pcm_out(
+                pcm.map(|f| (f.sample_rate, f.bits, f.channels)),
+                pcm.is_some() && crate::route::stream_pcm_is_lossy(ps),
+            );
             if let Some(f) = pcm {
                 log(&format!(
                     "pcm: {codec} decoded in-app -> {}Hz {}-bit {}ch",
@@ -1771,8 +1786,8 @@ fn start_bufferfeed_inner(
                 ));
             }
             SHARED.dg_load_a.store(audio.diagnostic, Ordering::Relaxed);
-            // At a speed the sound is decoded and stretched in the app (`ff::SpeedDecoder`), which
-            // `load_audio` has already put into the declared name.
+            // App-decoded audio (`pcm`) and a speed session (`ff::SpeedDecoder`) both declare PCM;
+            // `load_audio` has already put that into the declared name and the lead plan with it.
             let ac = audio.name;
             audio_declared = ac;
             audio_lead = audio.lead;
@@ -3342,10 +3357,16 @@ struct LoadAudio {
 
 /// [`LoadAudio`] for a track of `codec` at `session_rate` (permille); `None` when the pipeline has no
 /// name for the codec. A speed session decodes and stretches the sound in the app
-/// (`ff::SpeedDecoder`), so at any speed but 1x every codec declares `"PCM"`. `lead_override_ms` is
+/// (`ff::SpeedDecoder`), so at any speed but 1x every codec declares `"PCM"`; so does a track the app
+/// decodes itself at 1x (`app_pcm`, the shape [`crate::route::stream_pcm`] declared: DTS under the
+/// lossy gate, FLAC and the like), whatever its codec, and that name is what the lead plan is made
+/// from, so every Load that declares `"audio":"PCM"` is planned a lead. `lead_override_ms` is
 /// the dev trigger's text and `stack` the set's audio stack ([`plx_platform::devcaps::audio_stack`]).
-fn load_audio(codec: &str, session_rate: i32, lead_override_ms: Option<&str>, stack: AudioStack) -> Option<LoadAudio> {
-    let (name, diagnostic) = audio_payload_codec(codec)?;
+fn load_audio(
+    codec: &str, session_rate: i32, app_pcm: Option<&crate::route::PcmFormat>, lead_override_ms: Option<&str>,
+    stack: AudioStack,
+) -> Option<LoadAudio> {
+    let (name, diagnostic) = audio_declaration(codec, app_pcm)?;
     let name = if session_rate != super::RATE_NORMAL { "PCM" } else { name };
     Some(LoadAudio { name, diagnostic, lead: pcm_lead_plan(name, lead_override_ms, stack) })
 }
@@ -7001,6 +7022,33 @@ mod pcm_info_tests {
         assert!(app_pcm_for_rate(750, missing()).is_none());
     }
 
+    /// **DTS under the gate** (S4 PR 2) is declared as PCM — stereo 48 kHz S16, one `pcmInfo` — and
+    /// with the gate off is `DTS` exactly as before. The shape is the session's own
+    /// (`route::stream_pcm`), so a native DTS Load can never carry a PCM node nor the reverse.
+    #[test]
+    fn app_decoded_dts_is_declared_as_pcm_and_native_dts_as_dts() {
+        let mut ps = crate::route::PlaybackSession::IDLE;
+        crate::route::set_stream_codecs(&mut ps, "h264", "dts");
+        assert_eq!(audio_declaration("dts", crate::route::stream_pcm(&ps).and_then(Result::ok).as_ref()), Some(("DTS", 4)));
+        let off = build_av_payload_at(&ps, "H264", "DTS", ENVELOPE_FHD60, crate::player::RATE_NORMAL);
+        assert!(off.contains(r#""audio":"DTS""#) && !off.contains("pcmInfo"), "{off}");
+
+        crate::route::begin_attempt_for_test(
+            &mut ps, std::sync::Arc::new(plx_platform::devcaps::Caps::assumed().with_app_lossy()),
+        );
+        let shape = crate::route::stream_pcm(&ps).and_then(Result::ok);
+        assert_eq!(shape, Some(crate::route::PcmFormat::STEREO_48K));
+        assert_eq!(audio_declaration("dts", shape.as_ref()), Some(("PCM", 5)));
+        let on = build_av_payload_at(&ps, "H264", "PCM", ENVELOPE_FHD60, crate::player::RATE_NORMAL);
+        assert!(on.contains(r#""audio":"PCM""#), "{on}");
+        assert_eq!(on.matches("pcmInfo").count(), 1, "{on}");
+        assert!(on.contains(r#""format":"S16LE","channelMode":"stereo","layout":"interleaved","sampleRate":48,"bitsPerSample":16"#), "{on}");
+        // at a speed the speed decoder declares PCM itself, from the same codec: still one node
+        let fast = build_av_payload_at(&ps, "H264", "PCM", ENVELOPE_FHD60, 1500);
+        assert_eq!(fast.matches("pcmInfo").count(), 1, "{fast}");
+        serde_json::from_str::<serde_json::Value>(&on).unwrap();
+    }
+
     #[test]
     fn only_a_pcm_load_carries_pcm_info() {
         let f = PcmFormat { sample_rate: 48_000, bits: 16, channels: 2 };
@@ -8006,7 +8054,7 @@ mod pcm_sink_lead_pure_tests {
     fn a_pcm_load_asks_for_the_output_only_on_a_stack_whose_lead_follows_it() {
         for stack in ALL_STACKS {
             let reads = std::cell::Cell::new(0);
-            let lead = load_audio("flac", crate::player::RATE_NORMAL, None, stack).unwrap().lead;
+            let lead = load_audio("flac", crate::player::RATE_NORMAL, None, None, stack).unwrap().lead;
             let resolved = lead.resolve(|| {
                 reads.set(reads.get() + 1);
                 Some("bt_soundbar".to_string())
@@ -8079,7 +8127,7 @@ mod pcm_sink_lead_pure_tests {
     #[test]
     fn the_engines_lead_follows_the_declared_audio_the_speed_override_and_the_stack() {
         use crate::player::RATE_NORMAL;
-        let plan = |codec: &str, rate: i32| load_audio(codec, rate, None, AudioStack::Liblxa).map(|a| (a.name, a.lead));
+        let plan = |codec: &str, rate: i32| load_audio(codec, rate, None, None, AudioStack::Liblxa).map(|a| (a.name, a.lead));
         let from_output = PcmLead::FromOutput(AudioStack::Liblxa);
         assert_eq!(plan("flac", RATE_NORMAL), Some(("PCM", from_output)));
         assert_eq!(plan("alac", RATE_NORMAL), Some(("PCM", from_output)));
@@ -8091,21 +8139,44 @@ mod pcm_sink_lead_pure_tests {
         assert_eq!(plan("flac", 1500), Some(("PCM", from_output)));
         assert_eq!(plan("not-a-codec", RATE_NORMAL), None, "an undeclarable codec still refuses the Load");
         let sink = AudioStack::LgAudioSink;
-        let on_sink = |codec: &str, rate: i32| load_audio(codec, rate, None, sink).map(|a| (a.name, a.lead));
+        let on_sink = |codec: &str, rate: i32| load_audio(codec, rate, None, None, sink).map(|a| (a.name, a.lead));
         assert_eq!(on_sink("flac", RATE_NORMAL), Some(("PCM", PcmLead::Fixed(sink))));
         assert_eq!(on_sink("ac3", 1500), Some(("PCM", PcmLead::Fixed(sink))), "a speed session declares PCM on this stack too");
         assert_eq!(on_sink("ac3", RATE_NORMAL), Some(("AC3", PcmLead::Off)), "a compressed Load keeps the set's own decoder");
         let y2018 = AudioStack::AudioSinkNew;
-        let on_2018 = |codec: &str, rate: i32| load_audio(codec, rate, None, y2018).map(|a| (a.name, a.lead));
+        let on_2018 = |codec: &str, rate: i32| load_audio(codec, rate, None, None, y2018).map(|a| (a.name, a.lead));
         assert_eq!(on_2018("flac", RATE_NORMAL), Some(("PCM", PcmLead::FromOutput(y2018))));
         assert_eq!(on_2018("ac3", 1500), Some(("PCM", PcmLead::FromOutput(y2018))));
         assert_eq!(on_2018("ac3", RATE_NORMAL), Some(("AC3", PcmLead::Off)));
         for stack in NO_LEAD_STACKS {
-            let on = |codec: &str, rate: i32| load_audio(codec, rate, None, stack).map(|a| (a.name, a.lead));
+            let on = |codec: &str, rate: i32| load_audio(codec, rate, None, None, stack).map(|a| (a.name, a.lead));
             assert_eq!(on("flac", RATE_NORMAL), Some(("PCM", PcmLead::NoLead(stack))), "{stack:?}");
             assert_eq!(on("ac3", 1500), Some(("PCM", PcmLead::NoLead(stack))), "{stack:?}");
             assert_eq!(on("ac3", RATE_NORMAL), Some(("AC3", PcmLead::Off)), "{stack:?}");
         }
+    }
+
+    /// **App-decoded DTS** (S4, the lossy gate on) declares `"audio":"PCM"` and so takes the lead of the
+    /// set's stack exactly like FLAC; the same track left to the set's own decoder (`a="DTS"`) gets none.
+    /// `load_audio` is given the shape the session declared (`route::stream_pcm`), so the name the
+    /// payload carries and the lead plan cannot disagree.
+    #[test]
+    fn app_decoded_dts_takes_the_stacks_lead_and_native_dts_none() {
+        use crate::player::RATE_NORMAL;
+        let shape = crate::route::PcmFormat::STEREO_48K;
+        for stack in ALL_STACKS {
+            let app = load_audio("dts", RATE_NORMAL, Some(&shape), None, stack).unwrap();
+            let like_flac = load_audio("flac", RATE_NORMAL, Some(&shape), None, stack).unwrap();
+            assert_eq!((app.name, app.diagnostic), ("PCM", 5), "{stack:?}");
+            assert_eq!(app.lead, like_flac.lead, "{stack:?}: the same plan as a FLAC Load");
+            assert_eq!(app.lead, pcm_lead_plan("PCM", None, stack), "{stack:?}");
+            let native = load_audio("dts", RATE_NORMAL, None, None, stack).unwrap();
+            assert_eq!((native.name, native.lead), ("DTS", PcmLead::Off), "{stack:?}: a compressed Load gets none");
+        }
+        assert_eq!(
+            load_audio("dts", RATE_NORMAL, Some(&shape), None, AudioStack::Liblxa).unwrap().lead,
+            PcmLead::FromOutput(AudioStack::Liblxa)
+        );
     }
 
     /// The per-Load override reaches the Engine's lead through the same value, for a PCM Load only,
@@ -8114,11 +8185,11 @@ mod pcm_sink_lead_pure_tests {
     fn the_dev_override_reaches_the_engines_lead_through_the_declaration() {
         use crate::player::RATE_NORMAL;
         for stack in ALL_STACKS {
-            assert_eq!(load_audio("flac", RATE_NORMAL, Some("330"), stack).unwrap().lead, PcmLead::Override(330_000_000, stack));
-            assert_eq!(load_audio("ac3", 1500, Some("0"), stack).unwrap().lead, PcmLead::Override(0, stack));
-            assert_eq!(load_audio("ac3", RATE_NORMAL, Some("330"), stack).unwrap().lead, PcmLead::Off);
+            assert_eq!(load_audio("flac", RATE_NORMAL, None, Some("330"), stack).unwrap().lead, PcmLead::Override(330_000_000, stack));
+            assert_eq!(load_audio("ac3", 1500, None, Some("0"), stack).unwrap().lead, PcmLead::Override(0, stack));
+            assert_eq!(load_audio("ac3", RATE_NORMAL, None, Some("330"), stack).unwrap().lead, PcmLead::Off);
         }
-        let flac = load_audio("flac", RATE_NORMAL, None, AudioStack::Liblxa).unwrap();
+        let flac = load_audio("flac", RATE_NORMAL, None, None, AudioStack::Liblxa).unwrap();
         assert_eq!(flac.diagnostic, 5, "the diagnostics code is the same pair's");
     }
 

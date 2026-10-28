@@ -1,5 +1,6 @@
-//! Lossless audio decoded in the app and fed as PCM: FLAC, ALAC and integer LPCM
-//! (`devcaps::APP_DECODED` is the set).
+//! Audio decoded in the app and fed as PCM: the lossless FLAC, ALAC and integer LPCM, bit-exact,
+//! and DTS, the lossy entry, converted to stereo 48 kHz S16 ([`Stereo48`]) and only on a
+//! `Caps::app_decodes_lossy` value (`devcaps::APP_DECODED` is the set).
 //!
 //! libpf has no FLAC or ALAC input — its Load vocabulary is AAC / AC3 / AC3 PLUS / DTS / MP3 / MPEG
 //! / OPUS / VORBIS / WMA / PCM (read from `libpf-1.0` on a webOS 4.4.3 OLED55B8) — but it does take
@@ -15,9 +16,18 @@
 use std::os::raw::c_int;
 
 use crate::ff::{
-    AVCodecContext, AVCodecParameters, AVPacket, OFF_AFRAME_NB_SAMPLES, OFF_FRAME_DATA,
-    OFF_FRAME_FORMAT,
+    AVCodecContext, AVCodecParameters, AVPacket, OFF_AFRAME_CH_MASK, OFF_AFRAME_CH_ORDER,
+    OFF_AFRAME_NB_CHANNELS, OFF_AFRAME_NB_SAMPLES, OFF_AFRAME_SAMPLE_RATE, OFF_FRAME_DATA, OFF_FRAME_FORMAT,
 };
+use crate::speed_audio::{self, Resampler, SampleFormat};
+
+/// `av_opt_set`'s `search_flags`: look in the object's children (the decoder's private options,
+/// where `core_only` lives) too. A value FFmpeg has not changed since the flag was added.
+const AV_OPT_SEARCH_CHILDREN: c_int = 1;
+
+/// `AV_CHANNEL_ORDER_NATIVE`: the layout is a bit mask, channels in ascending bit order
+/// (`ci/ffabi-assert.c` proves the value).
+const CH_ORDER_NATIVE: c_int = 1;
 
 /// FFmpeg `AVSampleFormat` values the lossless decoders produce (FLAC, ALAC, `pcm_s*`). The enum has been stable since
 /// FFmpeg 1.x (`S16 = 1`, `S32 = 2`, `S16P = 6`, `S32P = 7`).
@@ -34,11 +44,67 @@ pub struct PcmOut {
     pub channels: u32,
 }
 
+/// The shape the lossy decode outputs, whatever the source: stereo, 48 kHz, 16 bits
+/// (`route::PcmFormat::STEREO_48K`).
+pub const STEREO_48K: PcmOut = PcmOut { rate: speed_audio::OUT_RATE, bits: 16, channels: 2 };
+
 pub struct PcmDecoder {
     ctx: *mut AVCodecContext,
     frame: *mut std::ffi::c_void,
     out: PcmOut,
     buf: Vec<u8>,
+    /// Some for a lossy codec (DTS): the frame is converted to [`STEREO_48K`] instead of passed
+    /// through bit-exact.
+    lossy: Option<Stereo48>,
+    /// `core_only` took on a lossy decoder (FFmpeg accepted the option). Reported in the log line
+    /// and held by a host test; the decode works without it, only costlier.
+    core_only: bool,
+    errors: ErrorBudget,
+}
+
+/// PURE (no FFmpeg): any channel layout and rate to interleaved stereo S16 LE at 48 kHz. The
+/// downmix is [`speed_audio::downmix`], the resample its linear [`Resampler`] (the bundled FFmpeg
+/// is built without swresample), kept across frames so their edges are seamless.
+pub struct Stereo48 {
+    rate: u32,
+    resampler: Resampler,
+}
+
+impl Stereo48 {
+    pub fn new() -> Self {
+        Stereo48 { rate: speed_audio::OUT_RATE, resampler: Resampler::new(speed_audio::OUT_RATE) }
+    }
+
+    /// Forget the resampler's carried tail (a seek).
+    pub fn reset(&mut self) {
+        self.resampler = Resampler::new(self.rate);
+    }
+
+    /// Append `frames` frames (`planes`: one slice per channel when `planar`, else one) to `out`.
+    /// `mask`: the layout's native channel mask (0 = not stated, mixed by count).
+    /// A frame at a different `rate` than the last starts a new resampler.
+    pub fn convert(
+        &mut self, rate: u32, fmt: SampleFormat, planar: bool, channels: usize, mask: u64,
+        frames: usize, planes: &[&[u8]], out: &mut Vec<u8>,
+    ) {
+        if rate == 0 || frames == 0 {
+            return;
+        }
+        if rate != self.rate {
+            self.rate = rate;
+            self.resampler = Resampler::new(rate);
+        }
+        let stereo = speed_audio::downmix_by_mask(fmt, planar, mask, channels, frames, planes);
+        let mut at_48k = Vec::with_capacity(stereo.len() * 48_000 / rate as usize + 2);
+        self.resampler.run(&stereo, &mut at_48k);
+        out.reserve(at_48k.len() * 4);
+        for [l, r] in at_48k {
+            for v in [l, r] {
+                let s = (v * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
+                out.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+    }
 }
 
 // Owned by the one demux thread that opened it.
@@ -48,17 +114,25 @@ impl PcmDecoder {
     /// Open the FFmpeg decoder for `par`'s codec, refusing a stream that is not the declared shape
     /// or whose codec is not one of the app-decoded set.
     pub unsafe fn open(par: *const AVCodecParameters, out: PcmOut) -> Result<PcmDecoder, String> {
-        let rate = (*par).sample_rate;
-        let channels = (*par).ch_layout.nb_channels;
-        if rate as u32 != out.rate || channels as u32 != out.channels {
-            return Err(format!(
-                "the file is {rate}Hz {channels}ch but the Load declared {}Hz {}ch",
-                out.rate, out.channels
-            ));
-        }
         let name = std::ffi::CStr::from_ptr(crate::ff::avcodec_get_name((*par).codec_id)).to_string_lossy();
-        if plx_platform::devcaps::app_decoded_by_ffmpeg_name(&name).is_none() {
+        let Some(entry) = plx_platform::devcaps::app_decoded_by_ffmpeg_name(&name) else {
             return Err(format!("{name} is not an app-decoded codec"));
+        };
+        // A lossless stream must be the declared shape (a wrong rate is wrong pitch); a lossy one
+        // is converted to its one output shape whatever the source is.
+        if entry.lossy {
+            if out != STEREO_48K {
+                return Err(format!("{name} is converted to stereo 48 kHz but the Load declared {out:?}"));
+            }
+        } else {
+            let rate = (*par).sample_rate;
+            let channels = (*par).ch_layout.nb_channels;
+            if rate as u32 != out.rate || channels as u32 != out.channels {
+                return Err(format!(
+                    "the file is {rate}Hz {channels}ch but the Load declared {}Hz {}ch",
+                    out.rate, out.channels
+                ));
+            }
         }
         let codec = crate::ff::avcodec_find_decoder((*par).codec_id);
         if codec.is_null() {
@@ -69,6 +143,14 @@ impl PcmDecoder {
             return Err("avcodec_alloc_context3 failed".into());
         }
         let r = crate::ff::avcodec_parameters_to_context(ctx, par);
+        let mut core_only = false;
+        if r >= 0 && entry.lossy {
+            // DTS: the 5.1 core only. The extensions (XLL, XBR, X96) are costly and the output is
+            // stereo anyway; best-effort, so an FFmpeg without the option still decodes the core.
+            core_only = crate::ff::av_opt_set(
+                ctx as *mut std::ffi::c_void, c"core_only".as_ptr(), c"1".as_ptr(), AV_OPT_SEARCH_CHILDREN,
+            ) >= 0;
+        }
         let r = if r < 0 { r } else { crate::ff::avcodec_open2(ctx, codec, std::ptr::null_mut()) };
         if r < 0 {
             crate::ff::avcodec_free_context(&mut ctx);
@@ -79,20 +161,41 @@ impl PcmDecoder {
             crate::ff::avcodec_free_context(&mut ctx);
             return Err("av_frame_alloc failed".into());
         }
-        Ok(PcmDecoder { ctx, frame, out, buf: Vec::new() })
+        Ok(PcmDecoder { ctx, frame, out, buf: Vec::new(), lossy: entry.lossy.then(Stereo48::new), core_only, errors: ErrorBudget::default() })
+    }
+
+    /// Whether the decoder is a lossy one running its core only (see the field).
+    pub fn core_only(&self) -> bool {
+        self.core_only
     }
 
     /// Decode one packet into interleaved little-endian PCM of the declared width. These codecs
-    /// have no decoder delay: one packet is one frame, so the packet's pts is the PCM's. That pts
-    /// is content time and stays so: the set renders a PCM Load through a mixer channel that lacks
-    /// the lip sync its own decoder gets (`player::engine::pcm_output_lead` is the table: on LG's
-    /// `liblxa` stack 400 ms, less the output's own delay on a wireless one, the one stack that was
-    /// filmed; 2018's `audiosink_new` the same figures and `lgaudiosink` 400 ms on every output, both
-    /// read from the firmware; none on 2016/2017's `adecsink`, Realtek and MStar), and
+    /// have no decoder delay: one packet is one frame, so the packet's pts is the PCM's. (DTS's
+    /// core decoder delays nothing either; the resampler holds back at most one input frame.) That
+    /// pts is content time and stays so: the set renders a PCM Load through a mixer channel that
+    /// lacks the lip sync its own decoder gets (`player::engine::pcm_output_lead` is the table: on
+    /// LG's `liblxa` stack 400 ms, less the output's own delay on a wireless one, the one stack that
+    /// was filmed; 2018's `audiosink_new` the same figures and `lgaudiosink` 400 ms on every output,
+    /// both read from the firmware; none on 2016/2017's `adecsink`, Realtek and MStar), and
     /// the correction is NOT made here but at the audio lane's one Feed (`player::engine`,
     /// `PCM_SINK_LEAD_NS`), so every producer of PCM gets it once and none stamps its own.
+    ///
+    /// A LOSSY stream (DTS) skips a packet or frame that fails, as the speed decoder does, and
+    /// ends only after [`MAX_CONSECUTIVE_DECODE_ERRORS`] in a row; a lossless one is bit-exact or
+    /// nothing, so its first failure ends it.
     pub unsafe fn decode(&mut self, pkt: *const AVPacket) -> Result<&[u8], String> {
         self.buf.clear();
+        match self.decode_packet(pkt) {
+            Ok(()) => self.errors.ok(),
+            Err(why) if self.lossy.is_some() && self.errors.skip() => {
+                crate::player::log(&format!("ff: a packet was skipped — {why}"));
+            }
+            Err(why) => return Err(why),
+        }
+        Ok(&self.buf)
+    }
+
+    unsafe fn decode_packet(&mut self, pkt: *const AVPacket) -> Result<(), String> {
         let r = crate::ff::avcodec_send_packet(self.ctx, pkt);
         if r < 0 {
             return Err(format!("avcodec_send_packet failed ({r})"));
@@ -100,14 +203,46 @@ impl PcmDecoder {
         loop {
             let r = crate::ff::avcodec_receive_frame(self.ctx, self.frame);
             if r == crate::ff::AVERROR_EAGAIN || r == crate::ff::AVERROR_EOF {
-                break;
+                return Ok(());
             }
             if r < 0 {
                 return Err(format!("avcodec_receive_frame failed ({r})"));
             }
             self.append_frame()?;
         }
-        Ok(&self.buf)
+    }
+
+    /// The demuxer sought: what the decode carried from the old position is dropped, so the first
+    /// sound at the new one is not blended with the last of the old. The decoder is flushed
+    /// (`avcodec_flush_buffers`: a DTS synthesis filter bank carries state from frame to frame, which
+    /// is a click at every seek), the frame buffer emptied, the error count started again and a lossy
+    /// decode's resampler tail forgotten.
+    pub fn reset_stream(&mut self) {
+        unsafe { crate::ff::avcodec_flush_buffers(self.ctx) };
+        self.buf.clear();
+        self.errors = ErrorBudget::default();
+        if let Some(conv) = self.lossy.as_mut() {
+            conv.reset();
+        }
+    }
+}
+
+/// How many bad packets in a row a lossy stream is allowed before it is declared dead.
+const MAX_CONSECUTIVE_DECODE_ERRORS: u32 = 50;
+
+/// PURE: the count of consecutive failures a lossy stream has had.
+#[derive(Default)]
+struct ErrorBudget(u32);
+
+impl ErrorBudget {
+    /// A failure: whether it may be skipped (the budget is not spent).
+    fn skip(&mut self) -> bool {
+        self.0 += 1;
+        self.0 <= MAX_CONSECUTIVE_DECODE_ERRORS
+    }
+
+    fn ok(&mut self) {
+        self.0 = 0;
     }
 }
 
@@ -119,6 +254,36 @@ impl PcmDecoder {
         let nb = *(base.add(OFF_AFRAME_NB_SAMPLES) as *const c_int) as usize;
         let format = *(base.add(OFF_FRAME_FORMAT) as *const c_int);
         let data = base.add(OFF_FRAME_DATA) as *const *const u8;
+        if let Some(conv) = self.lossy.as_mut() {
+            let rate = *(base.add(OFF_AFRAME_SAMPLE_RATE) as *const c_int);
+            if rate <= 0 {
+                return Err(format!("decoder reported sample rate {rate}"));
+            }
+            let channels = (*(base.add(OFF_AFRAME_NB_CHANNELS) as *const c_int)).max(0) as usize;
+            let Some((fmt, planar)) = SampleFormat::from_av(format) else {
+                return Err(format!("unexpected decoder sample format {format}"));
+            };
+            // `data[]` holds eight planes; a core has at most six channels.
+            if channels == 0 || channels > 8 {
+                return Err(format!("unexpected decoder channel count {channels}"));
+            }
+            let width = fmt.bytes();
+            let planes: Vec<&[u8]> = if planar {
+                (0..channels).map(|c| std::slice::from_raw_parts(*data.add(c), nb * width)).collect()
+            } else {
+                vec![std::slice::from_raw_parts(*data, nb * width * channels)]
+            };
+            // The layout's mask is valid only for a native-order layout (else the union holds a
+            // pointer or nothing); an unspecified one mixes by count.
+            let order = *(base.add(OFF_AFRAME_CH_ORDER) as *const c_int);
+            let mask = if order == CH_ORDER_NATIVE {
+                std::ptr::read_unaligned(base.add(OFF_AFRAME_CH_MASK) as *const u64)
+            } else {
+                0
+            };
+            conv.convert(rate as u32, fmt, planar, channels, mask, nb, &planes, &mut self.buf);
+            return Ok(());
+        }
         let ch = self.out.channels as usize;
         let Some(width) = sample_width(format) else {
             return Err(format!("unexpected decoder sample format {format}"));
@@ -246,6 +411,111 @@ mod tests {
     fn a_decode_wider_than_the_declared_width_is_refused_not_truncated() {
         assert!(width_is_exact(2, 2) && width_is_exact(2, 4) && width_is_exact(4, 4));
         assert!(!width_is_exact(4, 2), "24-bit audio declared as 16");
+    }
+
+    fn flt(v: &[f32]) -> Vec<u8> {
+        v.iter().flat_map(|x| x.to_ne_bytes()).collect()
+    }
+    fn s16_le(out: &[u8]) -> Vec<i16> {
+        out.chunks(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()
+    }
+
+    /// **Lossy mode's one conversion**: any layout in, interleaved stereo S16 LE at 48 kHz out.
+    /// A planar 5.1 of silence plus a full-scale front-left becomes a stereo frame whose left is
+    /// the scaled front-left and whose right is silent, so the downmix really ran.
+    #[test]
+    fn a_planar_51_is_downmixed_to_interleaved_stereo_s16() {
+        let mut conv = Stereo48::new();
+        let one = flt(&[1.0, 1.0]);
+        let zero = flt(&[0.0, 0.0]);
+        let planes: Vec<&[u8]> = vec![&one, &zero, &zero, &zero, &zero, &zero];
+        let mut out = Vec::new();
+        conv.convert(48_000, crate::speed_audio::SampleFormat::Flt, true, 6, 0, 2, &planes, &mut out);
+        let v = s16_le(&out);
+        assert_eq!(v.len(), 4, "two stereo frames");
+        assert!(v[0] > 8_000 && v[0] < 32_767, "front-left scaled so a full-scale 5.1 cannot clip: {}", v[0]);
+        assert_eq!((v[1], v[3]), (0, 0), "nothing on the right");
+        assert_eq!(v[0], v[2]);
+    }
+
+    /// The layout reaches the mix: a quad (FL FR SL SR) with sound only on its left surround comes
+    /// out on the left, where mixing by count (a 4-channel layout has no surrounds) would drop it.
+    #[test]
+    fn the_frames_own_channel_layout_decides_where_a_surround_goes() {
+        let mut conv = Stereo48::new();
+        let sl_only = [flt(&[0.0]), flt(&[0.0]), flt(&[0.0]), flt(&[0.0])];
+        let (fl, fr, sl, sr) = (sl_only[0].clone(), sl_only[1].clone(), flt(&[0.5]), sl_only[3].clone());
+        let planes: Vec<&[u8]> = vec![&fl, &fr, &sl, &sr];
+        let quad = (1u64 << 0) | (1 << 1) | (1 << 9) | (1 << 10);
+        let mut out = Vec::new();
+        conv.convert(48_000, crate::speed_audio::SampleFormat::Flt, true, 4, quad, 1, &planes, &mut out);
+        let v = s16_le(&out);
+        assert!(v[0] > 1_000 && v[1] == 0, "the left surround is on the left only: {v:?}");
+    }
+
+    #[test]
+    fn a_44100_source_comes_out_at_48000_in_the_same_duration() {
+        let mut conv = Stereo48::new();
+        let block = flt(&vec![0.25; 4410]);
+        let mut out = Vec::new();
+        for _ in 0..10 {
+            conv.convert(44_100, crate::speed_audio::SampleFormat::Flt, false, 1, 0, 4410, &[&block], &mut out);
+        }
+        let frames = out.len() / 4;
+        assert!((47_990..=48_010).contains(&frames), "1 s of 44.1 kHz is ~48000 frames, got {frames}");
+    }
+
+    #[test]
+    fn a_rate_change_mid_stream_is_followed_not_played_at_the_old_pitch() {
+        let mut conv = Stereo48::new();
+        let mut out = Vec::new();
+        let a = flt(&vec![0.1; 480]);
+        conv.convert(48_000, crate::speed_audio::SampleFormat::Flt, false, 1, 0, 480, &[&a], &mut out);
+        assert_eq!(out.len() / 4, 480);
+        let b = flt(&vec![0.1; 441]);
+        let before = out.len();
+        conv.convert(44_100, crate::speed_audio::SampleFormat::Flt, false, 1, 0, 441, &[&b], &mut out);
+        let got = (out.len() - before) / 4;
+        assert!((470..=482).contains(&got), "10 ms of 44.1 kHz is ~480 frames, got {got}");
+    }
+
+    #[test]
+    fn samples_past_full_scale_clamp_instead_of_wrapping() {
+        let mut conv = Stereo48::new();
+        let src = flt(&[2.0, -2.0, 1.0, -1.0]);
+        let mut out = Vec::new();
+        conv.convert(48_000, crate::speed_audio::SampleFormat::Flt, false, 1, 0, 4, &[&src], &mut out);
+        assert_eq!(s16_le(&out), vec![32_767, 32_767, -32_768, -32_768, 32_767, 32_767, -32_768, -32_768]);
+    }
+
+    /// A lossy stream survives the odd bad packet (the speed decoder skips them too) but not a
+    /// dead one: a run of consecutive failures ends it, and any success starts the count again.
+    #[test]
+    fn a_lossy_stream_skips_isolated_bad_packets_and_gives_up_on_a_run() {
+        let mut b = ErrorBudget::default();
+        for _ in 0..MAX_CONSECUTIVE_DECODE_ERRORS {
+            assert!(b.skip(), "within the budget");
+        }
+        assert!(!b.skip(), "one past it: the stream is dead");
+        let mut b = ErrorBudget::default();
+        for _ in 0..10 * MAX_CONSECUTIVE_DECODE_ERRORS {
+            assert!(b.skip());
+            b.ok();
+        }
+    }
+
+    #[test]
+    fn a_reset_forgets_the_resampler_tail_so_a_seek_does_not_blend_positions() {
+        let mut conv = Stereo48::new();
+        let mut out = Vec::new();
+        let a = flt(&vec![1.0; 441]);
+        conv.convert(44_100, crate::speed_audio::SampleFormat::Flt, false, 1, 0, 441, &[&a], &mut out);
+        conv.reset();
+        out.clear();
+        let b = flt(&vec![-1.0; 441]);
+        conv.convert(44_100, crate::speed_audio::SampleFormat::Flt, false, 1, 0, 441, &[&b], &mut out);
+        let first = i16::from_le_bytes([out[0], out[1]]);
+        assert_eq!(first, -32_768, "the first frame after a seek is the new position's, not a blend with the old tail");
     }
 
     #[test]

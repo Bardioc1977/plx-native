@@ -324,7 +324,15 @@ something.
   That is existing behaviour, left as it is. A stream the Load declared PCM for but the app has no decoder for
   (float or 8-bit LPCM under PMS's `pcm`) is refused in the demuxer (`ff::pcm_load_feeds_raw`) and ends as
   `demux_failed` -> `LoadRefusal::SourceFailed`, which names no facet, so the audio-only conversion rung is not
-  reached: Auto Original falls to its HLS contingency, Force Direct Play shows the error. A named refusal comes from a native Load that ends
+  reached: Auto Original falls to its HLS contingency, Force Direct Play shows the error.
+  DTS is the lossy entry of `devcaps::APP_DECODED`, **gated off**: on a DEBUG build, `/tmp/plxnative-appdecodelossy` (read once
+  at boot by `devcaps::probe`) sets `Caps::app_decodes_lossy`, and then DTS is announced without a table row, is
+  never the set's own decoder's (the Load declares `PCM`, stereo 48 kHz S16: `route::stream_pcm`), and
+  `ff_pcm::PcmDecoder` decodes the core (`core_only`), downmixes and resamples it (`Stereo48`). It stays
+  off until the TV has measured the CPU (S4 U5); with it off DTS is native exactly as above. A Load whose DTS the app
+  decoded names no audio facet in the failed-open ladder (`StreamAudio::app_decoded_lossy`): the pipeline was fed PCM, and a
+  facet keyed `dts` would be stored as a refusal of the set's NATIVE decoder.
+  A named refusal comes from a native Load that ends
   in `type=18 num=200 Audio Codec Not Supported` before any picture (`mod.rs`'s callback sets
   `native_audio_refused` only while `native_audio::fed()` says the audio was fed natively; the
   machine turns it into `RecoveryEffect::ConfirmRefusal { Evidence::Named }`, which the pump runs as
@@ -527,8 +535,9 @@ something.
   reset by `reset_session`. The feed throttle's run-on reads the applied one (`FeedPace::reference_at`).
 - **A Load that declares `"audio":"PCM"` on one of LG's audio stacks has its audio fed later than the
   picture it belongs with, by an amount the stack decides; a set with no lead (`adecsink` on 2016/2017, not
-  determined; Realtek; MStar; an unknown stack) gets none at all** (#1086, #1088, #1092, #1093; FLAC and every other app-decoded codec, and a speed
-  session at any speed other than 1x; a compressed Load, DTS included, gets none).
+  determined; Realtek; MStar; an unknown stack) gets none at all** (#1086, #1088, #1092, #1093; FLAC and every other app-decoded codec (a DTS the app decodes under the lossy gate
+  included: `engine::load_audio` plans the lead from the name the Load declares, which is PCM for it), and a speed
+  session at any speed other than 1x; a compressed Load, DTS the set decodes itself included, gets none).
   *Which stack:* `devcaps::audio_stack()` fingerprints it at boot (`devcaps::probe`, the `devcaps:` line's
   `audio stack=`) by the GStreamer sink PLUGIN, because each LG generation has its own sink plugin family in `/usr/lib/gstreamer-1.0/`
   (a 2018 image also ships the 2016/2017 one, so the probe order decides), no Realtek or MStar image has
