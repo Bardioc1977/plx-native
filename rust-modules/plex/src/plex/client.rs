@@ -179,6 +179,15 @@ fn next_gen() -> u32 {
     GEN_SEQ.fetch_add(1, Relaxed)
 }
 
+/// A client's credential counters read as ONE value ([`Client::credential`]): the token
+/// generation the request keys compare and the grant epoch (the identity the token speaks for).
+/// A named pair so the two `u32`s cannot be transposed silently.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Credential {
+    pub token_gen: u32,
+    pub grant_epoch: u32,
+}
+
 /// [`Client::link`] before discovery has activated a candidate. Distinct from every real tier on
 /// purpose: "unknown" is not "local", and the policy treats the two differently.
 const LINK_UNKNOWN: u8 = 0;
@@ -389,6 +398,11 @@ impl Client {
     /// retoken; moved by every revocation and by the admission that follows one.
     pub fn grant_epoch(&self) -> u32 {
         self.grant_epoch.load(Relaxed)
+    }
+    /// Both counters of this client's credential, as ONE reading (the stub of commit 1: the real
+    /// generation, a grant that never moves, and no lock).
+    pub fn credential(&self) -> Option<Credential> {
+        Some(Credential { token_gen: self.token_gen(), grant_epoch: 0 })
     }
     /// Token generation for THIS server — moved by [`Client::set_token`]; caches keyed on paths
     /// that embed the token compare this to know when to flush. Signature unchanged from the
@@ -1301,6 +1315,100 @@ mod tests {
             StreamUrl::parse("http://192.0.2.10:8020/f.mkv").port(),
             8020
         );
+    }
+
+    // ---- the credential: token generation and grant epoch as one reading ----------------------
+
+    #[test]
+    fn a_revocation_edge_moves_the_grant_and_the_token_generation_in_one_credential() {
+        let c = a_client("m", "tok");
+        let live = c.credential().expect("the lock is not poisoned");
+        assert_eq!((live.token_gen, live.grant_epoch), (c.token_gen(), c.grant_epoch()));
+
+        c.set_token("tok2"); // a live token replaced by another live one
+        let refreshed = c.credential().unwrap();
+        assert_ne!(refreshed.token_gen, live.token_gen);
+        assert_eq!(refreshed.grant_epoch, live.grant_epoch, "a refresh is the same identity");
+        assert_eq!((refreshed.token_gen, refreshed.grant_epoch), (c.token_gen(), c.grant_epoch()));
+
+        c.set_token("");
+        c.set_token("tok3"); // revoked, then admitted again
+        let readmitted = c.credential().unwrap();
+        assert_ne!(readmitted.token_gen, refreshed.token_gen);
+        assert_ne!(readmitted.grant_epoch, refreshed.grant_epoch, "a blank edge is a new identity");
+        assert_eq!((readmitted.token_gen, readmitted.grant_epoch), (c.token_gen(), c.grant_epoch()));
+
+        assert!(c.revoke_unless_same("someone-else"));
+        let revoked = c.credential().unwrap();
+        assert_ne!(revoked.token_gen, readmitted.token_gen);
+        assert_ne!(revoked.grant_epoch, readmitted.grant_epoch);
+    }
+
+    /// The pair is read while holding the token's read lock, so a reading that starts inside a
+    /// writer's critical section waits for it: it can never see the new generation with the old
+    /// epoch. The writer here is a test holding the guard, so the outcome does not depend on timing.
+    #[test]
+    fn credential_is_read_under_the_token_lock() {
+        let c = a_client("m", "tok");
+        let writer = c.token.write().unwrap();
+        c.token_gen.store(777, Relaxed); // half of an edit: the new generation, the old epoch
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let c = &c;
+            scope.spawn(move || tx.send(c.credential()).unwrap());
+            assert!(rx.recv_timeout(std::time::Duration::from_millis(100)).is_err(),
+                "the credential was read while a writer held the token lock");
+            c.grant_epoch.store(888, Relaxed); // the other half
+            drop(writer);
+            let got = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the reading finishes once the writer is done");
+            assert_eq!(got, Some(Credential { token_gen: 777, grant_epoch: 888 }));
+        });
+    }
+
+    #[test]
+    fn a_poisoned_token_lock_gives_no_credential() {
+        let c = a_client("m", "tok");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = c.token.write().unwrap();
+            panic!("poisoning the token lock on purpose");
+        }));
+        assert!(c.token.is_poisoned());
+        assert_eq!(c.credential(), None, "no proof of the identity is claimed");
+        let generation = c.token_gen();
+        c.set_token("never-stored"); // a poisoned lock stores nothing and bumps nothing
+        assert_eq!(c.token_gen(), generation);
+    }
+
+    /// Every edit below is a blank edge (live to blank, blank to live), so every edit moves the
+    /// grant AND the generation. A reader must therefore never see the generation differ between
+    /// two readings while the grant stayed. A regression stress for the writers: it cannot flake on
+    /// a correct implementation. The writers are held to the single method that stores both
+    /// counters inside the guard BY STRUCTURE; this is the probabilistic net behind that.
+    #[test]
+    fn a_blank_edge_is_never_observed_as_a_moved_key_with_the_same_grant() {
+        let c = a_client("m", "tok");
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let mut seen_a_change = false;
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..20_000 {
+                    c.set_token("");
+                    c.set_token("x");
+                }
+                done.store(true, Relaxed);
+            });
+            let mut last = c.credential().unwrap();
+            while !done.load(Relaxed) {
+                let now = c.credential().unwrap();
+                if now.token_gen != last.token_gen {
+                    seen_a_change = true;
+                    assert_ne!(now.grant_epoch, last.grant_epoch,
+                        "the generation moved and the grant did not: {last:?} then {now:?}");
+                }
+                last = now;
+            }
+        });
+        assert!(seen_a_change, "the reader never saw the writer move anything");
     }
 }
 

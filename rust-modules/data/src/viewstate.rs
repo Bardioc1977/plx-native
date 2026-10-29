@@ -140,7 +140,7 @@
 use crate::stores::{StoreId, StoreJob};
 use plx_machine::job::{Job, Port};
 use plx_machine::machine::{Addr, MachineId, RequestId};
-use plx_plex::plex::{Client, ClientKey, ClientKeys, KeyedClients, ServerId};
+use plx_plex::plex::{Client, ClientKey, ClientKeys, HeldClient, KeyedClients, ServerId};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
@@ -417,7 +417,10 @@ struct Req {
     /// The client the step chose for `sid` when the write was queued, as the borrowed
     /// [`ClientKeys`] named it. [`ViewStateState::admit`] re-reads the slot from its own keys and
     /// drops the write when the client carries another key by then, whatever [`Req::profile`] says.
-    key: ClientKey,
+    held: HeldClient,
+    /// The whole snapshot the capture was made under: what the fan-out may still reach is
+    /// judged against it ([`ClientKeys::without_changed_hands`]).
+    seen: ClientKeys,
     /// The profile the press was made under (`Bridge::profile_scope`, the Session owner's scope
     /// counter), an input to the step like the keys. A write whose profile has moved by the time it
     /// is sent belongs to someone else's household: it is dropped and retired, never sent under the
@@ -667,7 +670,7 @@ impl ViewStateState {
     // sent to the wrong machine marks a DIFFERENT film watched there (both servers number their
     // items from 1). None is a slot the registry holds no client for — a view-state write is exactly
     // the operation to skip and log rather than take to the wrong machine.
-    let Some(key) = keys.key(sid) else {
+    let Some(held) = keys.held(sid) else {
         plx_base::eventlog::log(&format!(
             "viewstate: rk={rk} {} DROPPED — server {} is not registered",
             w.name(),
@@ -687,7 +690,8 @@ impl ViewStateState {
         id,
         seq,
         sid,
-        key,
+        held,
+        seen: keys.clone(),
         profile,
         rk: rk.to_string(),
         w,
@@ -761,7 +765,7 @@ impl ViewStateState {
     pub(crate) fn fan_out_origin_watched(&mut self, adapter: &Arc<ViewStateAdapter>, sid: ServerId, rk: &str,
         keys: &ClientKeys, profile: u32) -> bool {
         // One server has no other copy to reach: the request would only cost a second hub refetch.
-        let Some(key) = keys.key(sid) else { return false };
+        let Some(held) = keys.held(sid) else { return false };
         if plx_plex::plex::server_ids().nth(1).is_none()
             || self.queue.iter().chain(self.sent.iter()).any(|r| plx_plex::plex::same_item((r.sid, &r.rk), (sid, rk)))
         {
@@ -769,7 +773,7 @@ impl ViewStateState {
         }
         let id = self.mint_request_id();
         self.queue.push(Req {
-            id, seq: 0, sid, key, profile, rk: rk.to_string(), w: Write::Watched, scope: Scope::Leaf,
+            id, seq: 0, sid, held, seen: keys.clone(), profile, rk: rk.to_string(), w: Write::Watched, scope: Scope::Leaf,
             guid: String::new(), origin_done: true,
         });
         self.kick(adapter, keys, profile);
@@ -818,12 +822,12 @@ impl ViewStateState {
                     addr: view_write_addr(req.id),
                     req: ViewWriteReq {
                         sid: req.sid,
-                        key: req.key,
+                        key: req.held.key,
                         rk: req.rk.clone(),
                         w: req.w,
                         guid: req.guid.clone(),
                         origin_done: req.origin_done,
-                        keys: keys.clone(),
+                        keys: keys.without_changed_hands(&req.seen),
                     },
                 },
                 ViewWritePort::of(adapter),
@@ -852,11 +856,11 @@ impl ViewStateState {
             self.drop_queued(&req, "the profile changed while it was queued");
             return None;
         }
-        let Some(key) = keys.key(req.sid) else {
+        let Some(held) = keys.held(req.sid) else {
             self.drop_queued(&req, &format!("server {} left the registry while queued", req.sid.raw()));
             return None;
         };
-        if key != req.key {
+        if held.key != req.held.key {
             self.drop_queued(&req, &format!("server {} was re-tokened while it was queued", req.sid.raw()));
             return None;
         }
@@ -1045,7 +1049,7 @@ pub fn hold_inflight_for_test(&mut self, sid: ServerId, rk: &str) {
         self.sent = Some(Req {
             id,
             seq: 0,
-            sid, key: UNKEYED, profile: 0,
+            sid, held: UNKEYED, seen: ClientKeys::default(), profile: 0,
             rk: rk.into(),
             w: Write::Watched,
             scope: Scope::Leaf,
@@ -1065,7 +1069,7 @@ pub fn take_reread(&mut self) -> Vec<(ServerId, String)> {
 
 /// The key a hand-built [`Req`] of a fixture carries: no registry stands behind it.
 #[cfg(any(test, feature = "test-support"))]
-const UNKEYED: ClientKey = ClientKey { instance: 0, token: 0 };
+const UNKEYED: HeldClient = HeldClient { key: ClientKey { instance: 0, token: 0 }, grant: None };
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, PartialEq, Eq)]
@@ -1084,7 +1088,7 @@ impl ViewStateState {
         Req {
             id,
             seq: 0,
-            sid: ServerId::UNSET, key: UNKEYED, profile: 0,
+            sid: ServerId::UNSET, held: UNKEYED, seen: ClientKeys::default(), profile: 0,
             rk: rk.into(),
             w: Write::Watched,
             scope: Scope::Leaf,
@@ -1560,7 +1564,7 @@ mod tests {
         let mut state = ViewStateState::default();
         let adapter = Arc::new(ViewStateAdapter::default());
         let id = state.mint_request_id();
-        state.sent = Some(Req { id, seq: 0, sid: origin, key: UNKEYED, profile: 0, rk: "7".into(), w: Write::Watched,
+        state.sent = Some(Req { id, seq: 0, sid: origin, held: UNKEYED, seen: ClientKeys::default(), profile: 0, rk: "7".into(), w: Write::Watched,
             scope: Scope::Leaf, guid: "plex://movie/7".into(), origin_done: false });
         *adapter.mail.lock().unwrap_or_else(|e| e.into_inner()) = Some(Completion {
             id,
@@ -1668,7 +1672,7 @@ mod tests {
         Req {
             id,
             seq: 0,
-            sid: ServerId::UNSET, key: UNKEYED, profile: 0,
+            sid: ServerId::UNSET, held: UNKEYED, seen: ClientKeys::default(), profile: 0,
             rk: rk.into(),
             w,
             scope: Scope::Leaf,
@@ -1788,17 +1792,38 @@ mod tests {
         ClientKeys::from_keys(entries.iter().copied())
     }
 
-    /// Queue a write on `sid` as `request` would have: the key and the profile the press saw, and a
-    /// live ledger entry (`seq`) to retire or renumber.
-    fn press(state: &mut ViewStateState, sid: ServerId, k: ClientKey, rk: &str, w: Write) {
+    /// Queue a write on `sid` as `request` would have: the client the press held, the snapshot it
+    /// was made under, the profile, and a live ledger entry (`seq`) to retire or renumber.
+    fn queue_press(state: &mut ViewStateState, sid: ServerId, held: HeldClient, seen: ClientKeys, rk: &str, w: Write) {
         state.coalesce(sid, rk, w);
         let mut r = req(state, rk, w);
         let change = ViewChange { sid, rk: rk.into(), scope: Scope::Leaf, fact: w.fact() };
         r.seq = state.ledger.record(&change.at(), change.edit());
         r.sid = sid;
-        r.key = k;
+        r.held = held;
+        r.seen = seen;
         r.profile = PROFILE;
         state.queue.push(r);
+    }
+
+    /// A press that saw the client `sid` under key `k` (grant unproven) and nothing else: for the
+    /// tests that never read the job's snapshot, which would be empty here (see [`press_under`]).
+    fn press(state: &mut ViewStateState, sid: ServerId, k: ClientKey, rk: &str, w: Write) {
+        queue_press(state, sid, HeldClient { key: k, grant: None }, ClientKeys::default(), rk, w);
+    }
+
+    /// A press made under `keys`, exactly as `request` captures it: the held client of `sid` and the
+    /// whole snapshot. For every test that needs a proven grant or reads the job's snapshot.
+    fn press_under(state: &mut ViewStateState, keys: &ClientKeys, sid: ServerId, rk: &str, w: Write) {
+        queue_press(state, sid, keys.held(sid).expect("the press saw a client"), keys.clone(), rk, w);
+    }
+
+    /// Keys of hand-built clients with every grant PROVEN: `(slot, key, grant)`.
+    fn proven(entries: &[(ServerId, ClientKey, u32)]) -> ClientKeys {
+        entries.iter().fold(
+            ClientKeys::from_keys(entries.iter().map(|&(sid, k, _)| (sid, k))),
+            |keys, &(sid, _, grant)| keys.with_grant(sid, grant),
+        )
     }
 
     /// The jobs the step has sent, unwrapped.
@@ -1829,8 +1854,8 @@ mod tests {
         let mut state = ViewStateState::default();
         let adapter = Arc::new(ViewStateAdapter::default());
         let keys = keys_of(&[(SRV_A, key(1, 1)), (SRV_B, key(2, 1))]);
-        press(&mut state, SRV_A, key(1, 1), "5", Write::Watched);
-        press(&mut state, SRV_B, key(2, 1), "9", Write::Unwatched);
+        press_under(&mut state, &keys, SRV_A, "5", Write::Watched);
+        press_under(&mut state, &keys, SRV_B, "9", Write::Unwatched);
 
         state.kick(&adapter, &keys, PROFILE);
 
@@ -1897,7 +1922,7 @@ mod tests {
     /// before it publishes the new profile, so the two cannot be told apart. As the refusal was
     /// not the system's either, no ladder is armed.
     #[test]
-    fn a_refused_job_whose_client_was_retokened_while_the_profile_read_the_same_is_dropped_and_retired() {
+    fn a_refused_job_whose_client_was_retokened_with_an_unproven_grant_is_dropped_and_retired() {
         let mut state = ViewStateState::default();
         let adapter = Arc::new(ViewStateAdapter::default());
         press(&mut state, SRV_A, key(1, 1), "5", Write::Watched);
@@ -1958,13 +1983,242 @@ mod tests {
     /// profile look exactly like this, so the write is dropped and retired, never sent under the
     /// key the registry holds now.
     #[test]
-    fn a_queued_write_whose_client_was_retokened_while_the_profile_read_the_same_is_dropped_and_retired() {
+    fn a_queued_write_whose_client_was_retokened_with_an_unproven_grant_is_dropped_and_retired() {
         let mut state = ViewStateState::default();
         let adapter = Arc::new(ViewStateAdapter::default());
         press(&mut state, SRV_A, key(1, 1), "5", Write::Watched);
         state.kick(&adapter, &keys_of(&[(SRV_A, key(1, 2))]), PROFILE);
         assert!(!state.has_jobs() && state.sent.is_none() && !state.is_busy(), "nothing is sent");
         assert!(state.ledger.since(0).is_empty(), "and the optimistic edit is taken back");
+    }
+
+    // ---- a refreshed token is the same asker; a new asker is not ----------------------------------
+    //
+    // The hand-built keys above carry no proof of an identity (`from_keys`), so a moved key there is
+    // dropped. These carry the grant epoch of each client (`proven`), which is how a refresh (the
+    // token moved, the grant did not) is told from a switch (both moved).
+
+    /// A token refreshed while the write waited, the identity unchanged: the write is the same
+    /// household member's statement, so it goes out ONCE, under the key the registry holds now.
+    #[test]
+    fn a_queued_write_whose_token_was_refreshed_goes_out_under_the_new_key() {
+        let mut state = ViewStateState::default();
+        let adapter = Arc::new(ViewStateAdapter::default());
+        let then = proven(&[(SRV_A, key(1, 1), 7), (SRV_B, key(2, 1), 8)]);
+        let now = proven(&[(SRV_A, key(1, 2), 7), (SRV_B, key(2, 2), 8)]);
+        press_under(&mut state, &then, SRV_A, "5", Write::Watched);
+
+        state.kick(&adapter, &now, PROFILE);
+
+        let jobs = sent_jobs(&mut state);
+        assert_eq!(jobs.len(), 1, "a refresh does not drop the write");
+        assert_eq!(jobs[0].1.server(), (SRV_A, key(1, 2)), "it goes out under the key the registry holds now");
+        assert_eq!(jobs[0].1.keys, now, "and the worker's snapshot is the refreshed one");
+        assert_eq!(state.ledger.since(0).len(), 1, "the press stands in the ledger");
+        assert_eq!(state.sent.as_ref().map(|r| r.held), now.held(SRV_A),
+            "the re-keyed value is what the request now holds (after the kick it is `sent` and never judged again)");
+    }
+
+    /// The same key move, but the grant moved with it: someone else is asking now. The write is
+    /// dropped and retired, never sent under the new asker's token.
+    #[test]
+    fn a_queued_write_whose_grant_moved_is_dropped_and_retired() {
+        let mut state = ViewStateState::default();
+        let adapter = Arc::new(ViewStateAdapter::default());
+        press_under(&mut state, &proven(&[(SRV_A, key(1, 1), 7)]), SRV_A, "5", Write::Watched);
+
+        state.kick(&adapter, &proven(&[(SRV_A, key(1, 2), 8)]), PROFILE);
+
+        assert!(!state.has_jobs() && state.sent.is_none() && !state.is_busy(), "nothing is sent");
+        assert!(state.ledger.since(0).is_empty(), "and the optimistic edit is taken back");
+    }
+
+    /// Another client OBJECT with the same grant value is another asker: the slot was re-pointed
+    /// (a new `Client` draws a new epoch from the same sequence, so equal values mean a bug, not luck).
+    #[test]
+    fn a_write_whose_client_object_changed_is_dropped_even_when_the_grant_value_matches() {
+        let mut state = ViewStateState::default();
+        let adapter = Arc::new(ViewStateAdapter::default());
+        press_under(&mut state, &proven(&[(SRV_A, key(1, 1), 7)]), SRV_A, "5", Write::Watched);
+
+        state.kick(&adapter, &proven(&[(SRV_A, key(2, 1), 7)]), PROFILE);
+
+        assert!(!state.has_jobs() && !state.is_busy());
+        assert!(state.ledger.since(0).is_empty());
+    }
+
+    /// A grant nobody proved (a key built from values) is never taken for the same asker once the
+    /// token moved, on either side of the comparison: fail closed.
+    #[test]
+    fn a_write_with_an_unproven_grant_is_never_re_keyed() {
+        let proven_then = proven(&[(SRV_A, key(1, 1), 7)]);
+        let unproven = keys_of(&[(SRV_A, key(1, 1))]);
+        let moved_unproven = keys_of(&[(SRV_A, key(1, 2))]);
+        let moved_proven = proven(&[(SRV_A, key(1, 2), 7)]);
+        for (then, now, case) in [
+            (&unproven, &moved_unproven, "unproven on both sides"),
+            (&proven_then, &moved_unproven, "proven when pressed, unproven now"),
+            (&unproven, &moved_proven, "unproven when pressed, proven now"),
+        ] {
+            let mut state = ViewStateState::default();
+            let adapter = Arc::new(ViewStateAdapter::default());
+            press_under(&mut state, then, SRV_A, "5", Write::Watched);
+            state.kick(&adapter, now, PROFILE);
+            assert!(!state.has_jobs() && !state.is_busy(), "{case}: the write is dropped");
+            assert!(state.ledger.since(0).is_empty(), "{case}: and retired");
+        }
+    }
+
+    /// A refusal that landed after the token was refreshed was caused by the refresh (the runner
+    /// checks the full key), not by the system, so the re-keyed write goes out again AT ONCE: the
+    /// ladder is for a refusal nothing explains. The re-key and the job are in the same frame.
+    #[test]
+    fn a_refused_job_whose_token_was_refreshed_is_re_keyed_and_retried_at_once() {
+        let mut state = ViewStateState::default();
+        let adapter = Arc::new(ViewStateAdapter::default());
+        let then = proven(&[(SRV_A, key(1, 1), 7)]);
+        let now = proven(&[(SRV_A, key(1, 2), 7)]);
+        press_under(&mut state, &then, SRV_A, "5", Write::Watched);
+        state.kick(&adapter, &then, PROFILE);
+        let (addr, _, port) = sent_jobs(&mut state).remove(0);
+        let entries = state.ledger.since(0);
+
+        port.refused(addr);
+        let _ = frame(&mut state, &adapter, &now, PROFILE);
+
+        let again = sent_jobs(&mut state);
+        assert_eq!(again.len(), 1, "sent again in the frame the refusal was judged");
+        assert_eq!(again[0].1.server(), (SRV_A, key(1, 2)), "under the key the registry holds now");
+        assert_eq!(again[0].0.req.0, addr.req.0, "the same write");
+        assert_eq!(state.retry_cd, 0, "no ladder was armed");
+        assert_eq!(state.ledger.since(0), entries, "the press stands");
+    }
+
+    /// …and a refusal after a grant move is a new asker's: dropped and retired, no ladder.
+    #[test]
+    fn a_refused_job_whose_grant_moved_is_dropped_and_retired() {
+        let mut state = ViewStateState::default();
+        let adapter = Arc::new(ViewStateAdapter::default());
+        let then = proven(&[(SRV_A, key(1, 1), 7)]);
+        press_under(&mut state, &then, SRV_A, "5", Write::Watched);
+        state.kick(&adapter, &then, PROFILE);
+        let (addr, _, port) = sent_jobs(&mut state).remove(0);
+
+        port.refused(addr);
+        let _ = frame(&mut state, &adapter, &proven(&[(SRV_A, key(1, 2), 8)]), PROFILE);
+
+        assert!(!state.has_jobs() && !state.is_busy(), "dropped, not queued again");
+        assert_eq!(state.retry_cd, 0);
+        assert!(state.ledger.since(0).is_empty());
+    }
+
+    /// The re-key is stored: a write refused AGAIN with the keys unchanged since the re-key is not
+    /// re-keyed again, so it waits the ladder like any refusal the system caused. Without the stored
+    /// value it would re-key and retry every frame.
+    #[test]
+    fn a_refused_write_that_is_refused_again_without_a_further_token_move_waits_the_ladder() {
+        let mut state = ViewStateState::default();
+        let adapter = Arc::new(ViewStateAdapter::default());
+        let then = proven(&[(SRV_A, key(1, 1), 7)]);
+        let now = proven(&[(SRV_A, key(1, 2), 7)]);
+        press_under(&mut state, &then, SRV_A, "5", Write::Watched);
+        state.kick(&adapter, &then, PROFILE);
+        let (addr, _, port) = sent_jobs(&mut state).remove(0);
+        port.refused(addr);
+        let _ = frame(&mut state, &adapter, &now, PROFILE);
+        let (addr, job, port) = sent_jobs(&mut state).remove(0);
+        assert_eq!(job.server(), (SRV_A, key(1, 2)), "the re-keyed write is out");
+
+        port.refused(addr); // refused again, the keys unchanged since the re-key
+        let _ = frame(&mut state, &adapter, &now, PROFILE);
+
+        assert!(!state.has_jobs(), "nothing is re-keyed any more, so nothing goes out at once");
+        assert_eq!(state.retry_cd, RETRY_FRAMES);
+        for i in 1..RETRY_FRAMES {
+            let _ = frame(&mut state, &adapter, &now, PROFILE);
+            assert!(!state.has_jobs(), "frame {i} of the wait is not the due one");
+        }
+        let _ = frame(&mut state, &adapter, &now, PROFILE);
+        assert_eq!(sent_jobs(&mut state).len(), 1, "the ladder is spent after RETRY_FRAMES frames");
+    }
+
+    /// The snapshot the worker gets is the kick's keys minus every slot that changed hands since the
+    /// capture, or that the capture did not hold; the origin's own slot was judged by `admit`.
+    #[test]
+    fn a_kick_hands_the_worker_only_the_slots_that_are_still_the_same_asker() {
+        let mut state = ViewStateState::default();
+        let adapter = Arc::new(ViewStateAdapter::default());
+        let then = proven(&[(SRV_A, key(1, 1), 7), (SRV_B, key(2, 1), 8)]);
+        // A refreshed in place, B changed hands, C appeared after the press
+        let now = proven(&[(SRV_A, key(1, 2), 7), (SRV_B, key(2, 2), 80), (SRV_C, key(3, 1), 9)]);
+        press_under(&mut state, &then, SRV_A, "5", Write::Watched);
+
+        let log = plx_base::eventlog::with_private_log(|| {
+            state.kick(&adapter, &now, PROFILE);
+            std::fs::read_to_string(plx_base::eventlog::events_log()).unwrap_or_default()
+        });
+
+        let jobs = sent_jobs(&mut state);
+        assert_eq!(jobs.len(), 1);
+        let snapshot = &jobs[0].1.keys;
+        assert_eq!(snapshot.held(SRV_A), now.held(SRV_A), "refreshed in place: reachable under its NOW key");
+        assert_eq!(snapshot.held(SRV_B), None, "changed hands: neither lookup nor write");
+        assert_eq!(snapshot.held(SRV_C), None, "not held at the press: nothing proves it is the same asker");
+        assert!(log.contains("fan-out snapshot omits server 1"), "the omission is logged: {log:?}");
+        assert!(log.contains("fan-out snapshot omits server 2"), "…for each omitted slot: {log:?}");
+        assert!(!log.contains("omits server 0"), "…and only for those: {log:?}");
+    }
+
+    /// A re-key keeps the ORIGINAL capture: the snapshot a re-keyed retry carries is still judged
+    /// against what the press saw, so a target that changed hands in between stays out of it.
+    #[test]
+    fn a_refused_write_keeps_its_original_capture_when_it_is_re_keyed() {
+        let mut state = ViewStateState::default();
+        let adapter = Arc::new(ViewStateAdapter::default());
+        let then = proven(&[(SRV_A, key(1, 1), 7), (SRV_B, key(2, 1), 8)]);
+        press_under(&mut state, &then, SRV_A, "5", Write::Watched);
+        state.kick(&adapter, &then, PROFILE);
+        let (addr, first, port) = sent_jobs(&mut state).remove(0);
+        assert!(first.keys.held(SRV_B).is_some(), "premise: the first job reaches B");
+
+        // the origin is refreshed in place AND B changes hands before the retry
+        let now = proven(&[(SRV_A, key(1, 2), 7), (SRV_B, key(2, 2), 80)]);
+        port.refused(addr);
+        let _ = frame(&mut state, &adapter, &now, PROFILE);
+
+        let retry = sent_jobs(&mut state);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].1.server(), (SRV_A, key(1, 2)));
+        assert_eq!(retry[0].1.keys.held(SRV_B), None, "B changed hands since the press and stays out");
+        assert_eq!(retry[0].1.keys.held(SRV_A), now.held(SRV_A));
+    }
+
+    /// An end-of-stream fan-out is queued behind a write in flight; its "capture" is the enqueue.
+    /// A target that changed hands alone before the kick gets neither lookup nor write.
+    #[test]
+    fn an_end_of_stream_entry_omits_a_target_that_changed_hands_alone() {
+        let _g = plx_base::testlock::serial();
+        plx_plex::plex::reset_servers_for_test();
+        let a = plx_plex::plex::register_for_test("viewstate-eos-a", "127.0.0.1", 9, "token", "eos-a");
+        let b = plx_plex::plex::register_for_test("viewstate-eos-b", "127.0.0.1", 9, "token", "eos-b");
+        let mut state = ViewStateState::default();
+        let adapter = Arc::new(ViewStateAdapter::default());
+        state.hold_inflight_for_test(a, "held"); // the fan-out must queue behind it
+        assert!(state.fan_out_origin_watched(&adapter, a, "7", &crate::pms::registry_keys_for_test(), 0));
+        let client_b = plx_plex::plex::client_for(b).expect("registered");
+        client_b.set_token("");
+        client_b.set_token("b-under-another-asker");
+        let land_held = state.late_completion(&adapter);
+        land_held();
+
+        let _ = frame(&mut state, &adapter, &crate::pms::registry_keys_for_test(), 0);
+
+        let jobs = sent_jobs(&mut state);
+        assert_eq!(jobs.len(), 1, "the fan-out entry is sent: the origin is the same asker");
+        assert!(jobs[0].1.origin_done, "and it is the fan-out-only entry");
+        assert!(jobs[0].1.keys.held(a).is_some());
+        assert_eq!(jobs[0].1.keys.held(b), None, "the target changed hands alone: it is not reached");
+        plx_plex::plex::reset_servers_for_test();
     }
 
     /// A reset drops the queue and what is in flight, not the outbox: a job already sent answers
@@ -2087,7 +2341,7 @@ mod tests {
         let mut state = ViewStateState::default();
         let adapter = Arc::new(ViewStateAdapter::default());
         let id = state.mint_request_id();
-        state.sent = Some(Req { id, seq: 0, sid: ServerId::from_raw(0), key: UNKEYED, profile: 0, rk: "7".into(), w: Write::Watched,
+        state.sent = Some(Req { id, seq: 0, sid: ServerId::from_raw(0), held: UNKEYED, seen: ClientKeys::default(), profile: 0, rk: "7".into(), w: Write::Watched,
             scope: Scope::Leaf, guid: String::new(), origin_done: true });
         *adapter.mail.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(Completion { id, outcome: Outcome::Written(Done { ok: true, also }) });
@@ -2344,7 +2598,7 @@ mod tests {
         state.sent = Some(Req {
             id,
             seq: 0,
-            sid: SRV_A, key: UNKEYED, profile: 0,
+            sid: SRV_A, held: UNKEYED, seen: ClientKeys::default(), profile: 0,
             rk: "4".into(),
             w: Write::Watched,
             scope: Scope::Leaf,
@@ -2387,7 +2641,7 @@ mod tests {
         let read_stamp = state.ledger.stamp();
         let id = state.mint_request_id();
         state.sent = Some(Req {
-            id, seq, sid: SRV_A, key: UNKEYED, profile: 0, rk: "4".into(), w: Write::Watched, scope: Scope::Leaf,
+            id, seq, sid: SRV_A, held: UNKEYED, seen: ClientKeys::default(), profile: 0, rk: "4".into(), w: Write::Watched, scope: Scope::Leaf,
             guid: String::new(),
             origin_done: false,
         });
@@ -2443,7 +2697,7 @@ mod tests {
         let stamp = state.ledger.stamp();
         let id = state.mint_request_id();
         state.sent = Some(Req {
-            id, seq: first, sid: SRV_A, key: UNKEYED, profile: 0, rk: "4".into(), w: Write::Watched, scope: Scope::Leaf,
+            id, seq: first, sid: SRV_A, held: UNKEYED, seen: ClientKeys::default(), profile: 0, rk: "4".into(), w: Write::Watched, scope: Scope::Leaf,
             guid: String::new(),
             origin_done: false,
         });

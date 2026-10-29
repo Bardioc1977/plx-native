@@ -84,10 +84,13 @@ use crate::app::bootstrap::HomeIo;
 /// every frame allocates nothing for it). The only loop over `client_for` that feeds a step: an
 /// active slot can still hold no client, so the walk asks each slot for its client and keeps the
 /// ones that answer, which makes `keys.key(sid)` equal `client_for(sid).map(ClientKey::of)` for
-/// every `sid`, a retired or unregistered one included.
+/// every `sid`, a retired or unregistered one included. Each slot also carries the grant epoch of
+/// the client it holds (`keys.held(sid)`), read from the client this loop already holds, together
+/// with its token generation under the client's token lock (`Client::credential`): no new global
+/// read, one uncontended read lock per server.
 pub(crate) fn refill_client_keys(keys: &mut ClientKeys) {
-    keys.refill(plx_plex::plex::server_ids().filter_map(|sid| {
-        plx_plex::plex::client_for(sid).map(|client| (sid, ClientKey::of(client)))
+    keys.refill_of(plx_plex::plex::server_ids().filter_map(|sid| {
+        plx_plex::plex::client_for(sid).map(|client| (sid, client))
     }));
 }
 
@@ -2221,12 +2224,42 @@ mod tests {
         assert!(stores.take_jobs_of(plx_data::stores::StoreId::ViewState).is_empty(), "and no write is sent again");
     }
 
-    /// The registry moved on between the step and the launch (a retoken here): the runner does not
-    /// start a write through a credential the step never decided on, and nothing leaves the device.
-    /// The refusal is the write's answer, and the next pump drops the write rather than sending it
-    /// under the credential the registry holds now (it cannot tell a switch from a refresh).
+    /// What a profile switch does to the server this lane registered, between the step and the
+    /// launch: every token is blanked and the next profile's is installed in place, so the client
+    /// object stays and its grant epoch moves (`RosterCommit::Switch`).
+    fn switch_the_registered_server(sink: &Sink) {
+        plx_plex::plex::revoke_for_profile_switch();
+        plx_plex::plex::register_for_test("runner", "127.0.0.1", sink.port, "the-next-profiles-token", "cid");
+    }
+
+    /// The registry moved on between the step and the launch (a profile switch here): the runner does
+    /// not start a write through a credential the step never decided on, and nothing leaves the
+    /// device. The refusal is the write's answer, and the next pump drops the write rather than
+    /// sending it under the credential the registry holds now: the grant epoch moved, so it is
+    /// another asker's.
     #[test]
-    fn a_view_write_whose_origin_key_moved_is_not_started() {
+    fn a_view_write_whose_origin_changed_hands_is_not_started() {
+        let _serial = plx_base::testlock::serial();
+        let _rig = CollectionRig;
+        let sink = Sink::new();
+        let (_, mut stores, job) = view_write_request(&sink);
+        switch_the_registered_server(&sink);
+
+        StoreRunner::live().start(job);
+        plx_base::task::drain_workers_for_test();
+
+        assert_eq!(sink.settled_hits(), 0, "nothing was sent through the credential the step never asked with");
+        assert!(!view_idle(&stores), "the refusal is the next pump's to take");
+        view_pump(&mut stores, VIEW_PROFILE);
+        assert_dropped_not_sent_again(&mut stores);
+    }
+
+    /// The same refusal after a token REFRESH (a live token replaced by another in place): the runner
+    /// still starts nothing through the key the step never asked with, but the refusal was caused by
+    /// the refresh, so the pump that takes it re-keys the write and sends it again at once, under the
+    /// credential the registry holds now, and it goes out exactly once.
+    #[test]
+    fn a_view_write_whose_origin_token_was_refreshed_is_not_started_and_sent_again_at_once() {
         let _serial = plx_base::testlock::serial();
         let _rig = CollectionRig;
         let sink = Sink::new();
@@ -2239,7 +2272,16 @@ mod tests {
         assert_eq!(sink.settled_hits(), 0, "nothing was sent through the credential the step never asked with");
         assert!(!view_idle(&stores), "the refusal is the next pump's to take");
         view_pump(&mut stores, VIEW_PROFILE);
-        assert_dropped_not_sent_again(&mut stores);
+        let mut again = stores.take_jobs_of(plx_data::stores::StoreId::ViewState);
+        assert_eq!(again.len(), 1, "the refused write was re-keyed and emitted by the pump that took the refusal");
+
+        StoreRunner::live().start(again.remove(0));
+        plx_base::task::drain_workers_for_test();
+
+        assert_eq!(sink.wait_for_a_hit(), 1, "and it left the device once");
+        view_pump(&mut stores, VIEW_PROFILE);
+        assert!(view_idle(&stores), "the one answer settled the write");
+        assert!(stores.take_jobs_of(plx_data::stores::StoreId::ViewState).is_empty(), "and no write is sent again");
     }
 
     /// `Held` parks the write without running it, and a newer DETAIL request retires only the
@@ -2286,10 +2328,29 @@ mod tests {
         assert!(stores.take_jobs_of(plx_data::stores::StoreId::ViewState).is_empty(), "and sends no write again");
     }
 
-    /// A parked write runs later, and the registry may have moved on by then: the held runner
+    /// A parked write runs later, and the registry may have changed hands by then: the held runner
     /// refuses it as the launch would have, so nothing is sent and the next pump drops the write.
     #[test]
-    fn a_parked_view_write_whose_origin_key_moved_before_it_runs_is_refused() {
+    fn a_parked_view_write_whose_origin_changed_hands_before_it_runs_is_refused() {
+        let _serial = plx_base::testlock::serial();
+        let _rig = CollectionRig;
+        let sink = Sink::new();
+        let (_, mut stores, job) = view_write_request(&sink);
+        let mut runner = StoreRunner::held();
+
+        runner.start(job);
+        switch_the_registered_server(&sink);
+        assert_eq!(runner.run_held(), 1);
+
+        assert_eq!(sink.settled_hits(), 0, "the parked write was not sent through the moved credential");
+        view_pump(&mut stores, VIEW_PROFILE);
+        assert_dropped_not_sent_again(&mut stores);
+    }
+
+    /// …and when it was only the token that was refreshed meanwhile, the refusal is the refresh's:
+    /// the next pump re-keys the write and emits it again at once.
+    #[test]
+    fn a_parked_view_write_whose_origin_token_was_refreshed_before_it_runs_is_refused_and_re_keyed() {
         let _serial = plx_base::testlock::serial();
         let _rig = CollectionRig;
         let sink = Sink::new();
@@ -2302,7 +2363,8 @@ mod tests {
 
         assert_eq!(sink.settled_hits(), 0, "the parked write was not sent through the moved credential");
         view_pump(&mut stores, VIEW_PROFILE);
-        assert_dropped_not_sent_again(&mut stores);
+        assert_eq!(stores.take_jobs_of(plx_data::stores::StoreId::ViewState).len(), 1,
+            "the refused write was re-keyed and emitted again by the pump that took the refusal");
     }
 
     // ---- the Bridge's drain, which feeds the runner ----
