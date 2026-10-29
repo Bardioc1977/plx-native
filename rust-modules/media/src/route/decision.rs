@@ -5720,8 +5720,9 @@ pub fn stream_achannels(ps: &PlaybackSession) -> i64 {
     }
 }
 /// What the pipeline was fed, for the failed-open ladder ([`crate::player::recovery::OpenFacts`]):
-/// the stream's audio codec and the carried track's channel count ([`stream_achannels`]: 0 when
-/// that track is not the declared codec). `None` while no audio codec is declared. Beside
+/// the stream's audio codec and the channel count the Load declares for it ([`stream_achannels`]: the
+/// carried track's, 0 when that track is not the declared codec, except that an Opus lane the server
+/// converted declares the width it was asked for, [`opus_lane`]). `None` while no audio codec is declared. Beside
 /// [`stream_achannels`] so the session keeps its fields private.
 pub fn stream_audio(ps: &PlaybackSession) -> Option<crate::player::recovery::StreamAudio> {
     let codec = stream_acodec(ps);

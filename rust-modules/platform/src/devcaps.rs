@@ -71,8 +71,9 @@ const PIPELINE_ONLY_AUDIO: &[&str] = &["opus"];
 
 /// Auto's channel ceiling for Opus, whatever a table row claims: stereo plays cleanly on every set
 /// measured, while 5.1 stalls on a C1 (webOS 6) once packets pass ~1500 bytes, with nothing in the
-/// log (#917, #918). Wider tracks stay with the server; Force Direct Play applies no ceiling, as for
-/// every codec. A 5.1 Opus film did play through on a C5 (webOS 10.3), so this can loosen per model.
+/// log (#917, #918). Wider tracks stay with the server; Force Direct Play applies no table ceiling and not
+/// this one, only the Load's own limit (a stated width of `1..=`[`OPUS_LOAD_CHANNELS`], [`audio_track_fits`]).
+/// A 5.1 Opus film did play through on a C5 (webOS 10.3), so this can loosen per model.
 const OPUS_AUTO_MAX_CHANNELS: u32 = 2;
 
 /// The channel count of an Opus Load whose source width is not known: stereo, the layout every set
@@ -559,7 +560,8 @@ pub struct Caps {
     /// intersected with the table's audio rows, in `DP_AUDIO_CODECS`'s own URL form/order.
     /// Normal routing reads this, the channel ceilings and the rate ceiling ([`audio_track_fits`])
     /// through `plex::is_dp_audio_track_with`, as does its PMS profile. Forced mode starts from the
-    /// pipeline's feed set with no channel ceiling and admits DTS only with a DTS row in
+    /// pipeline's feed set with no table channel ceiling (the Load's own limits, [`audio_track_fits`], still
+    /// hold) and admits DTS only with a DTS row in
     /// `audio_channels` (`Caps::forced_feeds_audio`).
     pub audio: String,
     /// Nonzero, per-codec channel ceilings from the device table, duplicate rows MIN-merged.
