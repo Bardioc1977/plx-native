@@ -6124,6 +6124,19 @@ mod pcm_format_tests {
         }
     }
 
+    /// **The converted-lane width is Opus's alone.** Any other declared codec on a server transcode whose
+    /// carried track is another codec keeps today's 0: the Load of AC-3, DTS or AAC declares no channel
+    /// count, and the ladder's facet for them is unchanged.
+    #[test]
+    fn a_converted_lane_of_another_codec_keeps_its_zero_width() {
+        for (declared, carried) in [("ac3", "dca"), ("aac", "eac3"), ("dts", "aac"), ("eac3", "opus")] {
+            let mut ps = opus_session(Some(2), Some((carried, 6)), true);
+            set_stream_codecs(&mut ps, "h264", declared);
+            assert_eq!(stream_achannels(&ps), 0, "{declared} converted from {carried}");
+            assert_eq!(stream_audio(&ps).unwrap().channels, 0, "{declared} from {carried}: the ladder's fact");
+        }
+    }
+
     /// **Only a server conversion earns the declared stereo.** A direct play (or Force) whose carried
     /// track is another codec than the declared one is a native track switch, which moves the declared
     /// codec alone (`flight::stage_native_audio`): the packets are the new track's, so a stereo header over

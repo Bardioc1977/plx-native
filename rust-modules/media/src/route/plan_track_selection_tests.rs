@@ -785,6 +785,8 @@ fn an_opus_track_of_unknown_width_is_not_direct_playable_in_either_mode() {
     };
     for mode in [DirectPlayMode::Auto, DirectPlayMode::Forced] {
         assert!(!audio_direct_plays_with(&caps, mode, "opus", 0, 48_000), "{mode:?}: unknown width");
+        // The Media-level stand-in of an item with no track list (`acodec`, width and rate unstated).
+        assert!(!audio_direct_plays_with(&caps, mode, "opus", 0, 0), "{mode:?}: Media-level Opus, no track list");
         assert!(audio_direct_plays_with(&caps, mode, "opus", 2, 48_000), "{mode:?}: stereo");
         assert!(audio_direct_plays_with(&caps, mode, "opus", 1, 48_000), "{mode:?}: mono");
     }

@@ -1253,7 +1253,8 @@ fn opus_head(channels: i64) -> Option<Vec<u8>> {
     if ch <= 2 {
         head.push(0);
     } else {
-        let (streams, coupled, mapping) = FAMILY1[usize::from(ch) - 3];
+        // A width the constant admits but the table has no row for is refused, never indexed past it.
+        let (streams, coupled, mapping) = *FAMILY1.get(usize::from(ch) - 3)?;
         head.extend_from_slice(&[1, streams, coupled]);
         head.extend_from_slice(mapping);
     }
