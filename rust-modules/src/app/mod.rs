@@ -520,6 +520,8 @@ fn pre_boot_diagnostics() -> plx_telemetry::telemetry::native::Guard {
 /// the THREE real phases (pre-boot diagnostics, `boot`, this), never the steps inside any one of them.
 unsafe fn run_and_shutdown(app: &mut App) -> ! {
     run::run(app);
+    // The crash record's phase (`src/crashtrace.c`): from here a fault is in the teardown.
+    plx_base::task::watchdog::set_crash_phase(plx_base::task::watchdog::CrashPhase::Shutdown);
     // Quit: the last screen's visit has not been reported, and no route change will.
     run::end_route_visit(app, false);
     let failed = finish_recording(&mut app.rec, app.bridge.landgate())
