@@ -140,10 +140,30 @@ impl ClientKeys {
         self.held(sid).map(|held| held.key)
     }
 
-    /// The slots of `self` that `seen` held too and whose client is the same asker now ([`HeldClient::same_asker`]),
-    /// each with `self`'s reading (the NOW keys, never `seen`'s). (Commit-1 stub: all of `self`.)
-    pub fn without_changed_hands(&self, _seen: &ClientKeys) -> ClientKeys {
-        self.clone()
+    /// The slots of `self` that `seen` held TOO and whose client is still the same asker
+    /// ([`HeldClient::same_asker`]), each with `self`'s reading: the NOW keys, never `seen`'s, so a
+    /// slot refreshed in place passes the full-key check a worker makes against this value.
+    /// For the fan-out of a write queued under `seen`: another server is reached only while it is
+    /// the asker the press saw.
+    ///
+    /// **A slot `seen` did not hold is omitted (fail closed).** A roster listed under another
+    /// account's token allocates a NEW slot and client carrying the foreign token with no
+    /// revocation edge to compare, and a slot admitted blank to live after the capture moved its
+    /// grant; neither can be proven to speak for the asker that pressed. Duplicate slot entries
+    /// answer with their first (the [`ClientKeys::held`] rule): each DISTINCT slot is judged by
+    /// `self.held(sid)`, so an omitted first entry is not resurrected by a later duplicate.
+    pub fn without_changed_hands(&self, seen: &ClientKeys) -> ClientKeys {
+        let mut kept = Vec::new();
+        for (i, &(sid, _)) in self.0.iter().enumerate() {
+            if self.0[..i].iter().any(|&(earlier, _)| earlier == sid) {
+                continue; // judged with its first entry
+            }
+            let Some(now) = self.held(sid) else { continue };
+            if seen.held(sid).is_some_and(|then| now.same_asker(then)) {
+                kept.push((sid, now));
+            }
+        }
+        ClientKeys(kept)
     }
 }
 

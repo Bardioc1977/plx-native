@@ -817,6 +817,19 @@ impl ViewStateState {
                 what,
                 req.sid.raw()
             ));
+            // The worker reaches another server only while it is still the asker the press saw. A
+            // slot left out answers "no answer" there, the same words as an unreachable server, so
+            // the omission is said here (slot numbers only, never a credential).
+            let snapshot = keys.without_changed_hands(&req.seen);
+            let fan_out = req.w.propagates();
+            for omitted in keys.slots().filter(|&slot| fan_out && snapshot.held(slot).is_none()) {
+                plx_base::eventlog::log(&format!(
+                    "viewstate: rk={} {} fan-out snapshot omits server {}: changed hands, or not held at the press",
+                    req.rk,
+                    what,
+                    omitted.raw()
+                ));
+            }
             self.jobs.push(StoreJob::ViewWrite(
                 Job {
                     addr: view_write_addr(req.id),
@@ -827,7 +840,7 @@ impl ViewStateState {
                         w: req.w,
                         guid: req.guid.clone(),
                         origin_done: req.origin_done,
-                        keys: keys.without_changed_hands(&req.seen),
+                        keys: snapshot,
                     },
                 },
                 ViewWritePort::of(adapter),
@@ -838,31 +851,44 @@ impl ViewStateState {
     }
 
     /// May `req` still go out, judged from the step's inputs? `None`: it was dropped, its ledger
-    /// entry retired (it never left, so nothing will ever confirm it), and the log says why.
+    /// entry retired (it never left, so nothing will ever confirm it), and the log says why. `Some`
+    /// carries the write under the client reading of NOW (re-keyed when the token was refreshed).
     ///
     /// - A profile other than the one it was pressed under: DROPPED. A profile switch re-tokens the
     ///   registry's clients in place, so the slot still answers, under the NEW profile's credential;
     ///   a write is a statement about one household member's viewing record and is never sent as
     ///   another's.
     /// - A server that holds no client now: DROPPED, with a line, so no PMS write goes unrecorded.
-    /// - A client that carries another key than the press named (re-tokened since): DROPPED, with a
-    ///   line, even when `profile` still reads as the press's. A switch swaps the tokens in the
-    ///   frame the session adopts them and publishes the new profile's identity by a LATER commit,
-    ///   so in between it is indistinguishable from a same-profile refresh, and sending then would
-    ///   write one household member's press into the next one's record. The cost is a press dropped
-    ///   on a genuine refresh; the read-back restores what the server holds.
-    fn admit(&mut self, req: Req, keys: &ClientKeys, profile: u32) -> Option<Req> {
+    /// - A client that is not the same ASKER as the press named (another client object, or a
+    ///   credential whose grant epoch moved: [`HeldClient::same_asker`]): DROPPED, with a line, even
+    ///   when `profile` still reads as the press's. A switch swaps the tokens in the frame the
+    ///   session adopts them and publishes the new profile's identity by a LATER commit, so in
+    ///   between the profile cannot tell it from a refresh; the grant epoch moves with the swap
+    ///   (the registry blanks every live token first) and can. An epoch nobody proved never matches.
+    /// - A client that is the same asker but carries another token generation (a refresh in place,
+    ///   no revocation edge between): RE-KEYED, with a line. The write goes out under the key the
+    ///   registry holds now, and the runner starts it only if that very key still holds.
+    fn admit(&mut self, mut req: Req, keys: &ClientKeys, profile: u32) -> Option<Req> {
         if req.profile != profile {
             self.drop_queued(&req, "the profile changed while it was queued");
             return None;
         }
-        let Some(held) = keys.held(req.sid) else {
+        let Some(now) = keys.held(req.sid) else {
             self.drop_queued(&req, &format!("server {} left the registry while queued", req.sid.raw()));
             return None;
         };
-        if held.key != req.held.key {
-            self.drop_queued(&req, &format!("server {} was re-tokened while it was queued", req.sid.raw()));
+        if !req.held.same_asker(now) {
+            self.drop_queued(&req, &format!("server {} changed hands while it was queued", req.sid.raw()));
             return None;
+        }
+        if now != req.held {
+            req.held = now;
+            plx_base::eventlog::log(&format!(
+                "viewstate: rk={} {} re-keyed — server {}'s token was refreshed",
+                req.rk,
+                req.w.name(),
+                req.sid.raw()
+            ));
         }
         Some(req)
     }
@@ -877,18 +903,25 @@ impl ViewStateState {
     /// A write the runner never started ([`Outcome::NotStarted`]): nothing left the device. It goes
     /// back to the HEAD of the queue — dropping it would silently lose a press the user has already
     /// seen take effect on screen — after the same judgment [`Self::admit`] makes of any queued
-    /// write: a moved profile, a vanished server or a re-tokened client drops it. A write that
-    /// survives it met a client that did not move, so the refusal was the system's (the thread
-    /// ceiling) and the retry waits out the ladder, exactly as `search.rs`/`browse.rs` do.
+    /// write: a moved profile, a vanished server or a client that changed hands drops it.
+    ///
+    /// A write that survives it and was RE-KEYED met a refreshed token: the runner's full-key check
+    /// is what refused it, so the refusal was the refresh's and not the system's, and it retries at
+    /// once (`retry_cd = 0`; the same precedent as a retokened browse source,
+    /// `BrowseStore::sync_roster`, and `kick` runs in this same frame's pump). A write that
+    /// survives with nothing moved met the system's refusal (the thread ceiling), and the retry waits
+    /// out the ladder, exactly as `search.rs`/`browse.rs` do. If the retry is refused again nothing
+    /// is re-keyed any more, so there is no per-frame loop.
     fn restart_refused(&mut self, req: Req, keys: &ClientKeys, profile: u32) {
         plx_base::eventlog::log(&format!(
             "viewstate: rk={} {} not started by the runner",
             req.rk,
             req.w.name()
         ));
+        let before = req.held;
         let Some(req) = self.admit(req, keys, profile) else { return };
+        self.retry_cd = if req.held != before { 0 } else { RETRY_FRAMES };
         self.queue.insert(0, req);
-        self.retry_cd = RETRY_FRAMES;
     }
 
     /// Take the writes the step has sent since the last take, in order. The caller OWES each one to
