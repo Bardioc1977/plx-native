@@ -6007,6 +6007,75 @@ mod pcm_format_tests {
         }
     }
 
+    /// A session whose attempt announces Opus at `bound` channels (`None`: no stated bound), declaring
+    /// `opus`, carrying `carried` (`None`: no track), on a server transcode or not.
+    fn opus_session(bound: Option<u32>, carried: Option<(&str, i64)>, transcoding: bool) -> PlaybackSession {
+        use plx_platform::devcaps::Caps;
+        let caps = Caps {
+            audio: "aac,ac3,eac3,opus".into(),
+            audio_channels: bound.map(|b| [("opus".to_string(), b)].into()).unwrap_or_default(),
+            ..Caps::assumed()
+        };
+        let mut ps = PlaybackSession::IDLE;
+        ps.begin_attempt(std::sync::Arc::new(caps));
+        set_stream_codecs(&mut ps, "h264", "opus");
+        if let Some((codec, channels)) = carried {
+            set_carried_audio_for_test(&mut ps, CarriedAudio { codec: codec.into(), ..flac(channels, 48_000, 0) });
+        }
+        if transcoding {
+            install_transcode_for_test(&mut ps, true, false);
+        }
+        ps
+    }
+
+    /// **A server-converted Opus lane declares the width the server was asked for.** The plan carries the
+    /// SOURCE track while the stream declares the `/decision` OUTPUT codec, so the declared codec differs
+    /// from the carried one and the carried width is the source's, which the converted stream need not
+    /// have (#1096: a 0 refused the Load with "no Opus layout for 0 channel(s)"). The profile asks the
+    /// server for at most the attempt's Opus bound; the PMS output width itself is not measured.
+    #[test]
+    fn a_server_converted_opus_lane_declares_the_width_the_server_was_asked_for() {
+        // (carried, bound, width)
+        let rows: [(Option<(&str, i64)>, Option<u32>, i64); 10] = [
+            (Some(("aac", 6)), Some(2), 2),
+            (Some(("aac", 1)), Some(2), 1),
+            (Some(("aac", 2)), Some(2), 2),
+            (Some(("aac", 0)), Some(2), 2),
+            (None, Some(2), 2),
+            (Some(("eac3", 8)), Some(2), 2),
+            (Some(("aac", 6)), Some(6), 6),
+            (Some(("aac", 10)), Some(8), 8),
+            (Some(("aac", 6)), None, 2),
+            (Some(("dca", 6)), Some(2), 2),
+        ];
+        for (carried, bound, width) in rows {
+            let ps = opus_session(bound, carried, true);
+            let what = format!("carried {carried:?}, bound {bound:?}");
+            assert_eq!(stream_achannels(&ps), width, "{what}");
+            assert_eq!(i64::from(stream_audio(&ps).unwrap().channels), width, "{what}: the ladder's fact");
+        }
+        // A copy of an Opus track (the carried codec is the declared one) keeps its own width, converted
+        // session or not.
+        for transcoding in [false, true] {
+            let ps = opus_session(Some(2), Some(("opus", 6)), transcoding);
+            assert_eq!(stream_achannels(&ps), 6, "copy, transcoding={transcoding}");
+        }
+    }
+
+    /// **Only a server conversion earns the declared stereo.** A direct play (or Force) whose carried
+    /// track is another codec than the declared one is a native track switch, which moves the declared
+    /// codec alone (`flight::stage_native_audio`): the packets are the new track's, so a stereo header over
+    /// 5.1 packets (#917, #918) must not be declared. The width stays 0, and the Load stays refused.
+    #[test]
+    fn a_mismatched_track_in_direct_play_keeps_a_zero_width() {
+        let ps = opus_session(Some(2), Some(("aac", 6)), false);
+        assert_eq!(stream_achannels(&ps), 0, "direct play");
+        let mut forced = opus_session(Some(2), Some(("aac", 2)), false);
+        forced.direct_play_mode = DirectPlayMode::Forced;
+        assert_eq!(stream_achannels(&forced), 0, "Force Direct Play after a native switch to an Opus track");
+        assert_eq!(stream_audio(&forced).unwrap().channels, 0);
+    }
+
     /// **MP3 and Vorbis in force** (S4-4) declare the same one shape as DTS, only on an attempt
     /// that turned the lossy decode on, and are the ladder's "app decoded" fact then.
     #[test]

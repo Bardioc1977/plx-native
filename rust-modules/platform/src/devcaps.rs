@@ -75,6 +75,12 @@ const PIPELINE_ONLY_AUDIO: &[&str] = &["opus"];
 /// every codec. A 5.1 Opus film did play through on a C5 (webOS 10.3), so this can loosen per model.
 const OPUS_AUTO_MAX_CHANNELS: u32 = 2;
 
+/// STUB (fails-first commit): the widest Opus layout the Load can describe.
+pub const OPUS_LOAD_CHANNELS: u32 = 8;
+
+/// STUB (fails-first commit): the codecs no `gstcool.conf` may switch off.
+pub const BASELINE_AUDIO: &[&str] = &["aac", "ac3", "eac3"];
+
 /// Audio the app DECODES ITSELF and feeds as PCM, so no row of the device table is needed: the
 /// pipeline's PCM input (`libpf`'s `audio/x-raw` caps and the `contents.pcmInfo` node) is what
 /// carries it. FLAC is the case, and ALAC and LPCM ride the same path ([`APP_DECODED`]) — libpf has no FLAC input of its own (its Load vocabulary is
@@ -576,6 +582,11 @@ impl Caps {
             app_lossy: AppLossy::Off,
             app_lossy_in_force: Default::default(),
         }
+    }
+
+    /// STUB (fails-first commit): the Opus Load width of a converted lane.
+    pub fn opus_lane_width(&self, _source_channels: i64) -> u32 {
+        0
     }
 
     /// Whether `codec` is a lossy [`APP_DECODED`] row this value's policy admits ([`lossy_row_enabled`]).
@@ -1828,7 +1839,7 @@ mod tests {
         // gstcool.conf drops DTS; the C1 row bounds Opus to stereo; a learned refusal then removes
         // the codec the row left (stereo Opus).
         let mut c = native_set();
-        assert_eq!(apply_gst_decoders(&mut c, &GST_C1.replace("dts_audiodec=290\n", "")).0, ["dts"]);
+        assert_eq!(apply_gst_decoders(&mut c, &GST_C1.replace("dts_audiodec=290", "dts_audiodec=0")).0, ["dts"]);
         assert_eq!(apply_exclusions(&mut c, "kisscurl-koli", false, EXCLUSIONS), ["opus<=2"]);
         let c = c.minus(&[refusal("opus", 2)], "");
         assert_eq!(c.audio, "aac,ac3,eac3,flac,alac,pcm");
@@ -1951,21 +1962,32 @@ mod tests {
     }
 
     #[test]
-    fn a_set_with_no_dts_decoder_loses_dts_and_its_forced_evidence() {
-        // The C5 shape (#899): the table lists DTS, gstcool.conf has no hardware dts_audiodec and
-        // switches avdec_dca off.
-        let conf = GST_C1.replace("dts_audiodec=290\n", "");
+    fn a_set_whose_dts_decoder_is_ranked_off_loses_dts_and_its_forced_evidence() {
+        // The hardware element is LISTED at rank 0 and the software one is off too: positive evidence.
+        let conf = GST_C1.replace("dts_audiodec=290", "dts_audiodec=0");
         let mut c = native_set();
         let (dropped, _) = apply_gst_decoders(&mut c, &conf);
         assert_eq!(dropped, ["dts"]);
         assert!(!c.audio_has("dts") && !c.audio_supports("dts", 6));
         // The table row goes with it, so a rule that asks for a DTS row (Force Direct Play) agrees.
         assert!(!c.audio_channels.contains_key("dts"));
+        assert!(!c.forced_admits_dts());
         assert_eq!(c.audio, "aac,ac3,eac3,opus,flac,alac,pcm");
-        // A hardware element listed at rank 0 is the same evidence.
-        let mut d = native_set();
-        let off = GST_C1.replace("dts_audiodec=290", "dts_audiodec=0");
-        assert_eq!(apply_gst_decoders(&mut d, &off).0, ["dts"]);
+    }
+
+    /// A conf that merely lacks the hardware `dts_audiodec` line (the shape an earlier revision of this
+    /// layer invented for a C5) is NO evidence: no line means the default rank, and no real conf read
+    /// has the shape (the C1, a dts_restore-patched C2 and a G5 all list the line at 290).
+    #[test]
+    fn an_absent_hardware_dts_line_is_no_evidence() {
+        let conf = GST_C1.replace("dts_audiodec=290\n", "");
+        assert!(!conf.contains("dts_audiodec"), "the fixture must lack the line");
+        let mut c = native_set();
+        let before = c.clone();
+        let (dropped, _) = apply_gst_decoders(&mut c, &conf);
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert_eq!(c, before);
+        assert!(c.audio_has("dts") && c.forced_admits_dts());
     }
 
     #[test]
@@ -1977,6 +1999,182 @@ mod tests {
         let (dropped, _) = apply_gst_decoders(&mut c, &conf);
         assert!(dropped.is_empty());
         assert_eq!(c, before);
+    }
+
+    /// The patched set whose hardware line is ranked off but whose software decoder has a rank again:
+    /// "every listed element is off" is false, so DTS stays.
+    #[test]
+    fn a_dts_restore_patched_set_with_the_hardware_line_off_keeps_dts() {
+        let conf = GST_C1.replace("dts_audiodec=290", "dts_audiodec=0").replace("avdec_dca=0", "avdec_dca=290");
+        let mut c = native_set();
+        let before = c.clone();
+        let (dropped, _) = apply_gst_decoders(&mut c, &conf);
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert_eq!(c, before);
+        assert!(c.forced_admits_dts());
+    }
+
+    /// SYNTHETIC closed-alphabet conf, not any particular set's file: one shape that produces the log
+    /// line `dropped=["aac","ac3","eac3","dts"]` under the rule before #1096. It has software decoders
+    /// at rank 0 and no hardware `*_audiodec` line at all.
+    const GST_SOFTWARE_ONLY: &str = "[rank]\ndecproxy=300\nalsasink=0\nomxlpcmdec=300\n\n[sw_decoder]\navdec_mp3=0\navdec_aac=0\navdec_ac3=0\navdec_dca=0\navdec_eac3=0\nfaad=0\nvorbisdec=0\n";
+
+    /// SYNTHETIC closed-alphabet conf, not any particular set's file: a second shape that produces the
+    /// same `dropped=["aac","ac3","eac3","dts"]` line under the rule before #1096. Its hardware
+    /// `aac_audiodec`, `ac3_audiodec` and `dts_audiodec` are LISTED at rank 0.
+    const GST_HARDWARE_OFF: &str = "[rank]\naac_audiodec=0\nac3_audiodec=0\ndts_audiodec=0\n\n[sw_decoder]\navdec_aac=0\navdec_ac3=0\navdec_eac3=0\navdec_dca=0\nfaad=0\n";
+
+    /// The `gstcool.conf` of a dts_restore-patched LG C2 (firmware 33.31.68, discussion #695), read
+    /// 2026-10-25 by another user; `[buffering]`, `[debug]` and the license sections are trimmed.
+    const GST_C2_PATCHED: &str = "[rank]\nmpegpsdemux=310\naudio_sink=0\ndecproxy=300\naudiodec=0\naudio_dec=0\nac4_dec=0\nomx_lxvideosink=256\nomx_lxdumpsink=0\nomx_lxvideodec=290\nalsasink=0\npulsesink=0\nmediainfo=64\nosssink=0\noss4sink=0\naac_audiodec=290\nac3_audiodec=290\nac4_audiodec=290\nadpcm_audiodec=290\namr_audiodec=290\ndts_audiodec=290\nflac_audiodec=290\nmpegh_audiodec=290\npcm_audiodec=290\nvorbis_audiodec=290\nwma_audiodec=290\navenc_ac3=0\navenc_eac3=0\n\n[sw_decoder]\navdec_truehd=310\navdec_mlp=310\navdec_mp3=0\navdec_aac=0\navdec_ac3=0\navdec_dca=0\navdec_alac=0\navdec_amrnb=0\navdec_amrwb=0\navdec_eac3=0\nwavpackdec=0\navdec_wmapro=0\navdec_wmav1=0\navdec_wmav2=0\navdec_wmavoice=0\nalawdec=0\nmulawdec=0\navdec_flac=0\nadpcmdec=0\nfaad=0\ndvdlpcmdec=0\nvorbisdec=0\n\n[sw_video_decoder]\navdec_h264=0\navdec_vp8=0\navdec_vp9=0\n\n[default_sink]\nvideo=omx_lxvideosink\naudio=audiosink\n";
+
+    /// The `gstcool.conf` of an LG G5 (firmware 11.2.0-3706, patched, discussion #695), read
+    /// 2026-10-24 by another user; the same trimming. It has no `avdec_dca` line at all.
+    const GST_G5_O24: &str = "[rank]\nmpegpsdemux=310\ndecproxy=300\nomx_lxvideosink=256\nomx_lxvideodec=290\nalsasink=0\nmediainfo=64\naac_audiodec=290\nac3_audiodec=290\nac4_audiodec=290\nadpcm_audiodec=290\namr_audiodec=290\ndts_audiodec=290\nflac_audiodec=290\nmpegh_audiodec=290\npcm_audiodec=290\nvorbis_audiodec=290\nwma_audiodec=290\navenc_ac3=0\navenc_eac3=0\n\n[sw_decoder]\navdec_truehd=310\navdec_mlp=310\navdec_mp3=0\navdec_aac=0\navdec_ac3=0\navdec_alac=0\navdec_amrnb=0\navdec_amrwb=0\navdec_eac3=0\nwavpackdec=0\navdec_wmapro=0\navdec_wmav1=0\navdec_wmav2=0\navdec_wmavoice=0\nalawdec=0\nmulawdec=0\navdec_flac=0\nadpcmdec=0\ndvdlpcmdec=0\nvorbisdec=0\n\n[sw_video_decoder]\navdec_h264=0\navdec_vp8=0\navdec_vp9=0\n\n[default_sink]\nvideo=omx_lxvideosink\naudio=audiosink\n";
+
+    #[test]
+    fn real_confs_of_other_models_drop_nothing_and_keep_opus_unlisted() {
+        for (name, conf) in [("patched C2", GST_C2_PATCHED), ("G5", GST_G5_O24)] {
+            let mut c = native_set();
+            let before = c.clone();
+            let (dropped, unlisted) = apply_gst_decoders(&mut c, conf);
+            assert!(dropped.is_empty(), "{name}: {dropped:?}");
+            assert_eq!(unlisted, ["opus"], "{name}");
+            assert_eq!(c, before, "{name}");
+        }
+    }
+
+    /// The codecs a conf with no hardware decoder LINE at all is silent about. Software elements at
+    /// rank 0 are what every real conf says (the pipeline uses LG's hardware elements, not these), so
+    /// they are not evidence that nothing decodes the codec.
+    #[test]
+    fn a_conf_with_only_software_audio_decoders_keeps_the_baseline() {
+        let mut c = native_set();
+        let before = c.clone();
+        let (dropped, _) = apply_gst_decoders(&mut c, GST_SOFTWARE_ONLY);
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert_eq!(c, before);
+        assert_eq!(c.audio, "aac,ac3,eac3,dts,opus,flac,alac,pcm");
+        assert!(c.forced_admits_dts());
+    }
+
+    /// A conf that names OTHER codecs' hardware decoders (a Realtek-style list) says nothing about this
+    /// codec's: the sibling lines are no evidence either.
+    #[test]
+    fn a_conf_naming_other_audio_decoders_but_not_this_codecs_drops_nothing() {
+        let conf = GST_SOFTWARE_ONLY.replace("[rank]\n", "[rank]\npcm_audiodec=290\nwma_audiodec=290\n");
+        assert!(conf.contains("pcm_audiodec=290") && !conf.contains("dts_audiodec"));
+        let mut c = native_set();
+        let before = c.clone();
+        let (dropped, _) = apply_gst_decoders(&mut c, &conf);
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert_eq!(c, before);
+    }
+
+    /// **The floor.** Even where a hardware element IS listed at rank 0 (and the software one too),
+    /// the codecs every webOS TV decodes stay: a conf is never the authority on them. DTS, which is
+    /// not in the baseline, goes on the same evidence. `eac3` shares `ac3_audiodec` with `ac3`, so it
+    /// is dropped through `ac3_audiodec=0` alone: a floor that forgot it is caught by its own assert.
+    #[test]
+    fn the_baseline_codecs_survive_an_explicit_hardware_zero() {
+        let mut c = native_set();
+        let (dropped, _) = apply_gst_decoders(&mut c, GST_HARDWARE_OFF);
+        assert!(c.audio_has("aac"), "aac");
+        assert!(c.audio_has("ac3"), "ac3");
+        assert!(c.audio_has("eac3"), "eac3");
+        for codec in BASELINE_AUDIO {
+            assert!(c.audio_has(codec), "{codec}");
+        }
+        assert_eq!(dropped, ["dts"]);
+        assert!(!c.audio_has("dts") && !c.forced_admits_dts());
+    }
+
+    /// Only the opus hardware element (`opus_audiodec`, which no conf read lists) can drop Opus; a
+    /// software `opusdec=0` alone cannot.
+    #[test]
+    fn a_ranked_off_software_opus_decoder_alone_does_not_drop_opus() {
+        let mut c = native_set();
+        let (dropped, unlisted) = apply_gst_decoders(&mut c, "[sw_decoder]\nopusdec=0\n");
+        assert!(dropped.is_empty() && c.audio_has("opus"), "{dropped:?}");
+        assert!(!unlisted.contains(&"opus"), "the software element is listed");
+        let mut c = native_set();
+        let (dropped, _) = apply_gst_decoders(&mut c, "[rank]\nopus_audiodec=0\n[sw_decoder]\nopusdec=0\n");
+        assert_eq!(dropped, ["opus"], "the hardware element listed off is evidence");
+    }
+
+    /// **No conf shape removes the baseline**, alone or followed by the static exclusion rows of the
+    /// families that have them.
+    #[test]
+    fn no_conf_shape_removes_the_baseline() {
+        let no_hw_dts = GST_C1.replace("dts_audiodec=290\n", "");
+        let beside_other_decoders = GST_SOFTWARE_ONLY.replace("[rank]\n", "[rank]\npcm_audiodec=290\nwma_audiodec=290\n");
+        let both_off_no_dts = "[rank]\naac_audiodec=0\nac3_audiodec=0\n[sw_decoder]\navdec_aac=0\navdec_ac3=0\navdec_eac3=0\nfaad=0\n";
+        let all_off = GST_C1.replace("=290", "=0");
+        for (name, conf) in [
+            ("C1", GST_C1), ("patched C2", GST_C2_PATCHED), ("G5", GST_G5_O24),
+            ("software only", GST_SOFTWARE_ONLY), ("hardware off", GST_HARDWARE_OFF),
+            ("no hardware dts", &no_hw_dts), ("beside other decoders", &beside_other_decoders),
+            ("aac and ac3 off", both_off_no_dts), ("every hardware element off", &all_off), ("empty", ""),
+        ] {
+            for codename in ["", "kisscurl-koli", "ombre-okapi"] {
+                let mut c = native_set();
+                apply_gst_decoders(&mut c, conf);
+                apply_exclusions(&mut c, codename, false, EXCLUSIONS);
+                for codec in BASELINE_AUDIO {
+                    assert!(c.audio_has(codec), "{name} on {codename:?}: {codec} was removed");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn baseline_audio_is_the_one_list() {
+        assert_eq!(Caps::assumed().audio, BASELINE_AUDIO.join(","));
+    }
+
+    /// An Opus Load describes at most [`OPUS_LOAD_CHANNELS`] channels, and the planner asks the same
+    /// of a track, so no route Loads a width it cannot describe.
+    #[test]
+    fn audio_track_fits_holds_an_opus_load_to_the_layouts_it_can_describe() {
+        for codec in ["opus", "OPUS"] {
+            assert!(!audio_track_fits(codec, 0, 48_000), "{codec}: an unstated width cannot be described");
+            assert!(!audio_track_fits(codec, 9, 48_000), "{codec}: wider than the layouts");
+            assert!(!audio_track_fits(codec, -1, 48_000), "{codec}");
+            for channels in 1..=8 {
+                assert!(audio_track_fits(codec, channels, 48_000), "{codec} {channels}");
+            }
+        }
+        assert_eq!(OPUS_LOAD_CHANNELS, 8);
+        let c = native_set();
+        for forced in [false, true] {
+            assert!(!c.native_audio_track("opus", 0, 0, forced), "forced={forced}: width 0 passes no gate");
+            assert!(!c.native_audio_track("opus", 9, 0, forced), "forced={forced}");
+            assert!(c.native_audio_track("opus", 2, 0, forced), "forced={forced}");
+        }
+        assert!(c.native_audio_track("opus", 6, 0, true), "Force has no table ceiling, only the Load's");
+        assert!(!c.native_audio_track("opus", 6, 0, false), "Auto holds the stereo bound");
+    }
+
+    /// The width a server-converted Opus lane declares: the source's, held to the bound the profile
+    /// asked the server for, stereo when the source is unknown, and always a layout the Load describes.
+    #[test]
+    fn opus_lane_width_follows_the_asked_bound_and_never_widens() {
+        let with_bound = |bound: Option<u32>| {
+            let mut c = native_set();
+            match bound {
+                Some(b) => c.audio_channels.insert("opus".to_string(), b),
+                None => c.audio_channels.remove("opus"),
+            };
+            c
+        };
+        // (source, bound, width)
+        for (source, bound, width) in [
+            (6, Some(2), 2), (1, Some(2), 1), (2, Some(2), 2), (0, Some(2), 2), (-1, Some(2), 2),
+            (6, Some(6), 6), (10, Some(8), 8), (10, Some(12), 8), (6, None, 2), (1, None, 1), (0, None, 2),
+            (6, Some(0), 2), (0, Some(1), 1), (6, Some(1), 1),
+        ] {
+            assert_eq!(with_bound(bound).opus_lane_width(source), width, "source {source}, bound {bound:?}");
+        }
     }
 
     #[test]
@@ -2004,8 +2202,8 @@ mod tests {
         let conf = "[rank]\naac_audiodec=0\n[sw_decoder]\navdec_aac=250\nopusdec=0\n";
         let mut c = native_set();
         let (dropped, unlisted) = apply_gst_decoders(&mut c, conf);
-        assert_eq!(dropped, ["opus"]);
-        assert!(c.audio_has("aac") && !c.audio_has("opus"));
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert!(c.audio_has("aac") && c.audio_has("opus"), "a software opusdec at 0 is no evidence");
         assert!(unlisted.contains(&"dts"));
     }
 
