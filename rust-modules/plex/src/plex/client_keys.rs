@@ -174,7 +174,9 @@ impl ClientKeys {
 /// request under the NEW profile's credential, to a server the old profile's step chose.
 ///
 /// [`KeyedClients::client`] answers a slot only while the registry's client still carries the key
-/// the snapshot holds. The check covers the moment a request is BUILT; a swap while a request is
+/// the snapshot holds. (The snapshot a view-state write carries is already filtered by its step:
+/// [`ClientKeys::without_changed_hands`] leaves out every slot that changed hands since the press
+/// or that the press did not see, so such a slot answers `None` here too.) The check covers the moment a request is BUILT; a swap while a request is
 /// already on the wire is not covered, the same limit as the runner's own launch check.
 ///
 /// The registry read itself is the `lookup` the host passes in (the application passes

@@ -42,9 +42,11 @@
 //! * **A refused launch is a retry, never a panic and never a fallback to blocking.** The runner
 //!   declines a write when the OS is out of threads or the origin's client no longer carries the
 //!   job's key; that is the job's `refused` answer, and the pump judges it again
-//!   ([`ViewStateState::restart_refused`]): a moved profile, a vanished server or a re-tokened client
-//!   drops it, and a write that survives that keeps its head and [`pump`] tries again after
-//!   [`RETRY_FRAMES`], the same degradation `search.rs` and `browse.rs` apply to a refused fetch.
+//!   ([`ViewStateState::restart_refused`]): a moved profile, a vanished server or a client that
+//!   changed hands drops it. A write that survives that because its token was only REFRESHED was
+//!   refused by that refresh, so it is re-keyed and tried again at once; one that survives with
+//!   nothing moved keeps its head and [`pump`] tries again after [`RETRY_FRAMES`], the same
+//!   degradation `search.rs` and `browse.rs` apply to a refused fetch.
 //!
 //! ## The job lane
 //!
@@ -57,19 +59,25 @@
 //! very client (and credential) the job names, and the job's [`ViewWritePort`] takes its one
 //! answer, [`finish_view_write_job`]'s write result or a refusal.
 //!
-//! * **The profile and the key are inputs.** [`Req`] captures both at the press. A profile switch
+//! * **The profile and the client are inputs.** [`Req`] captures both at the press, the client as a
+//!   [`HeldClient`]: its key and the grant epoch its credential spoke for. A profile switch
 //!   re-tokens the registry's clients IN PLACE, so a queued write's slot still answers, under the
 //!   next profile's credential; a write is one household member's statement, so at the kick and
-//!   when a refusal lands ([`ViewStateState::admit`]) a write whose profile moved, or whose client
-//!   carries another key than the press named, is dropped and its ledger entry retired. The key
-//!   compare is what covers the frames in which a switch has swapped the tokens and the new
-//!   profile's identity is not published yet: there the profile still reads as the press's, and a
-//!   switch looks like a refresh. So a genuine same-profile token refresh drops a press too (the
-//!   read-back restores what the server holds); sending it on would need an identity that moves
-//!   with the token swap, which is a Session owner change.
-//! * **The fan-out reaches other servers through the snapshot.** The job carries the whole
-//!   [`ClientKeys`] the step decided under, and the worker builds [`KeyedClients`] from it: a source
-//!   whose client no longer carries the key is neither asked for its copy nor written to.
+//!   when a refusal lands ([`ViewStateState::admit`]) a write is dropped and its ledger entry
+//!   retired when its profile moved (S), or when its client is another object or its credential's
+//!   grant epoch moved (C: [`HeldClient::same_asker`]). The grant epoch is what covers the frames in
+//!   which a switch has swapped the tokens and the new profile's identity is not published yet:
+//!   there the profile still reads as the press's, but the registry blanked every live token first,
+//!   which moved the epoch. A token merely REFRESHED in place (a roster refresh re-registering the
+//!   stored server under plex.tv's current grant) moves the key and not the epoch: the write is
+//!   re-keyed and goes out once, under the key the registry holds now. S and C cover disjoint
+//!   windows (the seat can move while the registry still holds the previous profile's tokens), so
+//!   both are kept. An epoch nobody proved never matches a moved token.
+//! * **The fan-out reaches other servers through a filtered snapshot.** The job carries the keys
+//!   the step decided under MINUS every slot whose client is not the same asker as the press saw
+//!   (or that the press did not see at all: [`ClientKeys::without_changed_hands`]), and the worker
+//!   builds [`KeyedClients`] from it: a source that left the snapshot, or whose client no longer
+//!   carries the key in it, is neither asked for its copy nor written to.
 //! * **A refusal is not a failure.** [`Outcome::NotStarted`] changes no ledger entry and owes no
 //!   read-back or hub refresh ([`ViewStateState::restart_refused`]); a worker that panics answers a
 //!   failed write instead, never `NotStarted`, because the origin write may already be on the
@@ -415,16 +423,19 @@ struct Req {
     seq: crate::viewledger::Stamp,
     sid: ServerId,
     /// The client the step chose for `sid` when the write was queued, as the borrowed
-    /// [`ClientKeys`] named it. [`ViewStateState::admit`] re-reads the slot from its own keys and
-    /// drops the write when the client carries another key by then, whatever [`Req::profile`] says.
+    /// [`ClientKeys`] named it, with the grant epoch its credential spoke for.
+    /// [`ViewStateState::admit`] re-reads the slot from its own keys: another client object or a
+    /// moved grant epoch drops the write, whatever [`Req::profile`] says; a refreshed token
+    /// re-keys it (this field then holds the reading it was last judged against).
     held: HeldClient,
-    /// The whole snapshot the capture was made under: what the fan-out may still reach is
-    /// judged against it ([`ClientKeys::without_changed_hands`]).
+    /// The whole snapshot the capture was made under (for an end-of-stream fan-out, the enqueue:
+    /// the stop's own identity is recorded nowhere). It is NEVER overwritten by a re-key: what the
+    /// fan-out may still reach is judged against it ([`ClientKeys::without_changed_hands`]).
     seen: ClientKeys,
-    /// The profile the press was made under (`Bridge::profile_scope`, the Session owner's scope
-    /// counter), an input to the step like the keys. A write whose profile has moved by the time it
-    /// is sent belongs to someone else's household: it is dropped and retired, never sent under the
-    /// new profile's credential.
+    /// The profile the press was made under (`Bridge::profile_scope`, the seat counter the Session
+    /// owner publishes), an input to the step like the keys. A write whose profile has moved by the
+    /// time it is sent belongs to someone else's household: it is dropped and retired, never sent
+    /// under the new profile's credential.
     profile: u32,
     rk: String,
     w: Write,
@@ -474,8 +485,9 @@ struct Completion {
 
 /// The one write a [`StoreJob::ViewWrite`] carries: everything the worker needs, captured by the
 /// step. `key` is the origin's client as the step decided it; the runner starts the write only if
-/// the registry still holds that client at the launch. `keys` is the WHOLE snapshot the step decided
-/// under: the fan-out reaches the other copies only through [`KeyedClients`] built from it.
+/// the registry still holds that client at the launch. `keys` is the snapshot the step decided
+/// under, minus every slot that changed hands since the press ([`ClientKeys::without_changed_hands`]):
+/// the fan-out reaches the other copies only through [`KeyedClients`] built from it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewWriteReq {
     sid: ServerId,
@@ -800,8 +812,9 @@ impl ViewStateState {
     /// The decision is made from the step's inputs: `keys` is the registry's answer as of this
     /// call and `profile` the profile the Session owner has seated now ([`Self::admit`]). A write
     /// goes out as a [`StoreJob::ViewWrite`] the Bridge hands to the runner in the same call; the
-    /// runner starts it only through the client its key names. This reads no registry and starts
-    /// no thread.
+    /// runner starts it only through the client its key names. The job's snapshot is `keys` minus
+    /// the slots that changed hands since the press ([`ClientKeys::without_changed_hands`]), and each
+    /// omitted slot is logged (slot numbers only). This reads no registry and starts no thread.
     fn kick(&mut self, adapter: &Arc<ViewStateAdapter>, keys: &ClientKeys, profile: u32) {
         if self.sent.is_some() || self.retry_cd > 0 {
             return;
@@ -1950,10 +1963,11 @@ mod tests {
         assert_eq!(again[0].1.rk, "5");
     }
 
-    /// A refusal is judged again like any queued write. A client re-tokened meanwhile is dropped
-    /// and retired even though the profile still reads as the press's: a switch swaps the tokens
-    /// before it publishes the new profile, so the two cannot be told apart. As the refusal was
-    /// not the system's either, no ladder is armed.
+    /// A refusal is judged again like any queued write. A client re-tokened meanwhile whose grant
+    /// nobody proved (keys built from values, as a poisoned token lock would give) is dropped and
+    /// retired even though the profile still reads as the press's: a switch swaps the tokens before
+    /// it publishes the new profile, and without a proven epoch it cannot be told from a refresh.
+    /// As the refusal was not the system's either, no ladder is armed.
     #[test]
     fn a_refused_job_whose_client_was_retokened_with_an_unproven_grant_is_dropped_and_retired() {
         let mut state = ViewStateState::default();
@@ -1973,7 +1987,7 @@ mod tests {
 
     /// A write is one household member's statement. A profile that moved drops the write and
     /// retires its ledger entry (queued, refused and about to be sent alike) on the profile alone:
-    /// the keys here are the ones the press saw, so the key compare cannot be what drops it.
+    /// the keys here are the ones the press saw, so the client compare cannot be what drops it.
     #[test]
     fn a_write_whose_profile_moved_is_dropped_and_retired_wherever_it_is_judged() {
         let keys = keys_of(&[(SRV_A, key(1, 1))]);
@@ -2011,10 +2025,12 @@ mod tests {
         assert!(state.ledger.since(0).is_empty());
     }
 
-    /// A client re-tokened while the write waited, the profile still reading as the press's: the
+    /// A client re-tokened while the write waited, the profile still reading as the press's, and no
+    /// proof that the credential still speaks for the same asker (keys built from values): the
     /// frames in which a profile switch has swapped the tokens and not yet published the new
     /// profile look exactly like this, so the write is dropped and retired, never sent under the
-    /// key the registry holds now.
+    /// key the registry holds now. (With a proven grant epoch the registry tells the two apart:
+    /// `a_queued_write_whose_token_was_refreshed_goes_out_under_the_new_key`.)
     #[test]
     fn a_queued_write_whose_client_was_retokened_with_an_unproven_grant_is_dropped_and_retired() {
         let mut state = ViewStateState::default();

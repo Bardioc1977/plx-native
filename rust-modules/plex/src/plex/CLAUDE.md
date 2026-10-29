@@ -335,7 +335,10 @@ Three design choices carry the weight, and each is a prevented bug rather than a
   servers whose generations happened to agree would mean that the moment `client()` started
   answering with B, the memo said nothing had changed and served B its cards from **A's memoised,
   token-bearing paths**. Uniqueness makes "did this number move" also answer "is this even the same
-  server".
+  server". (The generation is also half of `ClientKey`, and it is stored with `grant_epoch`, the
+  identity the token speaks for, inside the token's write lock; `Client::credential()` reads the
+  two as one value under the read lock. A step that must tell a refreshed token from a change of
+  asker compares the epoch (`HeldClient::same_asker`), never the generation alone.)
 
 ## Granted, pinned, reachable — three states, and never the same question
 

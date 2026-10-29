@@ -751,7 +751,8 @@ impl StoreRunner {
     /// run refuses every write before it reaches the store, `viewstate_controlled_tests`). A launch
     /// that did not happen is refused, and the refusal is the write's answer: nothing left the
     /// device, so the pump that takes it judges the write again from its own inputs (a moved profile,
-    /// a vanished server or a re-tokened client drops it) and puts it back at the head of the queue.
+    /// a vanished server or a client that changed hands drops it; a token only refreshed re-keys it
+    /// and retries at once) and puts it back at the head of the queue.
     fn start_view_write(&mut self, job: Job<ViewWriteReq>, port: ViewWritePort) {
         let addr = job.addr;
         let refusal = port.clone();
