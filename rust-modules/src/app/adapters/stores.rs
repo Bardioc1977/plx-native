@@ -2195,7 +2195,7 @@ mod tests {
     fn assert_dropped_not_sent_again(stores: &mut plx_data::stores::Stores) {
         assert!(
             stores.take_jobs_of(plx_data::stores::StoreId::ViewState).is_empty(),
-            "a key that moved is never sent again under the new one"
+            "a write whose asker changed is never sent again under the new credential"
         );
         assert!(view_idle(stores), "nothing is queued or in flight");
         assert!(stores.view_ledger.since(0).is_empty(), "the press is retired");

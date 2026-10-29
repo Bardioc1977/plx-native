@@ -399,7 +399,7 @@ worker start and the `client_for` read inside that worker are gone too. The hous
   request or a supersede has replaced) frees nothing and records nothing. A store whose claim is a mailbox of landings
   (the view-state read-back and the view-state write) has its port post a store-local `NotStarted`
   landing, and the next pump puts the flight's items back and waits (a write is judged again first,
-  and dropped when its profile, its server or its client's key moved). A refusal never goes into a recorded mailbox (a recorded
+  and dropped when its profile, its server or its client's asker changed; a token refreshed in place re-keys it instead). A refusal never goes into a recorded mailbox (a recorded
   take would write it as an async result and change the bytes). It reaches the step one pump after
   the launch; no fixture holds a refused start, so no recorded byte moves.
 - **Subtitle search and the view-state read-back** are the fifth and sixth stores on the lane. The
