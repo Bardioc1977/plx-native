@@ -282,7 +282,7 @@ fn search_default_lang(ps: &plx_media::route::PlaybackSession, meta: plx_data::m
 /// Subtitles, Audio and `…` discs, and the failure read-out's quality entry that has no disc at
 /// all) gets that row's rect: the panels settle where the fixed constants put them.
 fn menu_anchor() -> Rect {
-    plx_appkit::player_hud::ctrl_row_hit_rect()
+    plx_appkit::player_hud::classic::frame_geometry().row
 }
 
 impl PlayerOverlayScreen {

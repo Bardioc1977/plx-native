@@ -717,7 +717,7 @@ impl TrackMenuState {
             search: offer_search.then(|| plx_data::subsearch::SubSearchSnapshot::idle(0)),
             search_watching: false,
             item_sidecars: Vec::new(),
-            anchor: crate::player_hud::ctrl_row_hit_rect(),
+            anchor: crate::player_hud::classic::frame_geometry().row,
             side: std::cell::Cell::new(plx_ui::popover::Side::Above),
         };
         s.form.table.min_panel_w = theme::layout::PLAYER_MENU_MIN_W;
@@ -2665,7 +2665,7 @@ fn table_form(
 pub fn overscan_rects(out: &mut Vec<(&'static str, Rect)>) {
     let pw = plx_ui::table::MENU_MAX_W;
     let placed = plx_ui::popover::anchor_panel(
-        crate::player_hud::ctrl_row_hit_rect(),
+        crate::player_hud::classic::frame_geometry().row,
         (pw, plx_ui::consts::SCR_H),
         NEED_H,
         theme::layout::PLAYER_MENU_GAP,
@@ -5511,7 +5511,7 @@ mod focus_tests {
             search: None,
             search_watching: false,
             item_sidecars: Vec::new(),
-            anchor: crate::player_hud::ctrl_row_hit_rect(),
+            anchor: crate::player_hud::classic::frame_geometry().row,
             side: std::cell::Cell::new(plx_ui::popover::Side::Above),
         }
     }
@@ -7376,10 +7376,10 @@ mod classic_placement_tests {
     /// a panel at `CTRL_RIGHT - pw`, bottom 764.
     #[test]
     fn the_classic_anchor_is_the_row_ending_at_the_segment_edge_above_the_gap() {
-        let a = crate::player_hud::ctrl_row_hit_rect();
-        assert_eq!(a.x + a.w, crate::player_hud::CTRL_RIGHT, "the segment's outer edge");
+        let a = crate::player_hud::classic::frame_geometry().row;
+        assert_eq!(a.x + a.w, crate::player_hud::classic::CTRL_RIGHT, "the segment's outer edge");
         assert_eq!(a.y - theme::layout::PLAYER_MENU_GAP, 764.0, "PLAYER_MENU_GAP above the row is classic's bottom edge");
-        assert_eq!((a.y, a.h), (crate::player_hud::CTRL_Y, crate::player_hud::CTRL_H), "the discs' own band");
+        assert_eq!((a.y, a.h), (crate::player_hud::classic::CTRL_Y, crate::player_hud::classic::CTRL_H), "the discs' own band");
     }
 
     fn menu_at(anchor: Rect, tab: c_int) -> (TrackMenuState, plx_data::stores::metadata::MetadataStore) {

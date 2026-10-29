@@ -56,7 +56,7 @@ pub(crate) fn playpos() -> i64 {
 /// so anything that snapshots "where are we?" inside that window snapshots the position the user
 /// just left. The rule — an in-flight seek target wins, else the published position — was open-coded
 /// at each reader that remembered it (the scrub seed below; the HUD's frozen playhead in
-/// `appkit/player_hud.rs`) and simply MISSING at the one that did not: the OS-background save took a bare
+/// `appkit/player_hud/state.rs`) and simply MISSING at the one that did not: the OS-background save took a bare
 /// `playpos()`, so backgrounding right after a seek stored the pre-seek spot and the foreground
 /// restore replayed from there — and teardown clears the pending target, so nothing self-corrected.
 /// Use this at every reader that means "where the user is"; keep the raw `playpos()` only where the
@@ -625,8 +625,9 @@ pub(crate) fn player_requests(
             }
             PlayerReq::FocusTabs => {
                 if let Some(player) = super::bridge::player_mut(pages) {
-                    player.hud.nav.focus = 2;
+                    player.hud.nav.focus = plx_appkit::player_hud::geometry::GROUP_TABS;
                 }
+                super::bridge::reseat_player_focus(pages);
             }
             // The fall-through a surface cannot perform (`screens::player::overlay`'s module doc):
             // the same toggle the bare transport reaches, with the panel left untouched.
@@ -1165,7 +1166,7 @@ fn apply_info_action(
 }
 
 // (`key_player_updown` stood here — UP/DOWN walking the HUD's ring, or spending the press on
-// REVEALING a hidden transport. Ported to `PlayerScreen::key_updown` in phase 9 and DELETED with
+// REVEALING a hidden transport. Ported to the page in phase 9 (now `Screen::links`, the groups' edge rules and `answer_edge`) and DELETED with
 // its caller in phase 12 (PX-PLAYER): the loop kept calling this on the screen's own `hud`/`scrub`
 // while the screen answered the same key through the dispatcher.)
 
