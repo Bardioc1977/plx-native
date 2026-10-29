@@ -2102,7 +2102,7 @@ mod tests {
         assert!(c.forced_admits_dts());
     }
 
-    /// A conf that names OTHER codecs' hardware decoders (a conf that lists other codecs' hardware decoders) says nothing about this
+    /// A conf that names OTHER codecs' hardware decoders says nothing about this
     /// codec's: the sibling lines are no evidence either.
     #[test]
     fn a_conf_naming_other_audio_decoders_but_not_this_codecs_drops_nothing() {
