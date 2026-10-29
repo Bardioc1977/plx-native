@@ -703,8 +703,8 @@ fn turning_a_filter_off_brings_the_unfiltered_rail_back_without_a_read() {
 }
 
 /// A list counted under Unwatched is never the one kept: whether a title belongs to that listing
-/// changes with every watch, and a watch while Unwatched is OFF flags nothing
-/// (`membership_depends_on_viewing`), so a kept list would come back wrong.
+/// changes with every watch, so it is the one least likely to be worth showing again (the one
+/// that stays in the landed slot is the next test's).
 #[test]
 fn an_unwatched_list_is_not_kept_across_the_switch() {
     let _g = plx_base::testlock::serial();
@@ -715,11 +715,84 @@ fn an_unwatched_list_is_not_kept_across_the_switch() {
     land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
     assert_eq!(shown_letters(&browse), [("A".to_owned(), 3), ("B".to_owned(), 4)]);
 
-    // A title is watched here, with Unwatched off: no flag, no generation moves.
+    assert!(browse.state.set_unwatched(true));
+    assert!(shown_letters(&browse).is_empty(), "the Unwatched counts of an earlier visit: {:?}", shown_letters(&browse));
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert_eq!(browse.jobs.len(), 1, "asked afresh");
+}
+
+/// The order the first fix missed (#869 review, finding 1): unfiltered, then Unwatched on and off, so
+/// the Unwatched list stays in the landed slot behind the unfiltered one, which is shown again with
+/// no read. A title watched NOW, with the switch off, moves no term and no membership generation,
+/// yet every Unwatched count after it is one late: the stale list must not come back when Unwatched
+/// is turned on again. The unfiltered counts do not depend on viewing and are left alone.
+#[test]
+fn a_watch_made_while_unwatched_is_off_stales_the_unwatched_list_behind_the_kept_one() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    let plain: Vec<(String, i64)> = vec![("A".into(), 3), ("B".into(), 4)];
+    land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+    assert!(browse.state.set_unwatched(true));
+    land_letters(&mut browse, sid, client, &[("A", 2), ("B", 4)]);
+    assert!(browse.state.set_unwatched(false));
+    assert_eq!(shown_letters(&browse), plain, "premise: the kept unfiltered list is shown again");
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert!(browse.jobs.is_empty(), "premise: nothing is owed");
+
+    // A title of this server is finished (a read-back, its card in no loaded page). Unwatched is off:
+    // the grid on screen is unaffected, and so are the unfiltered counts.
+    browse.state.apply_view_local(&ViewAt::leaf(sid, "7"), WATCHED_FACTS);
+    assert_eq!(shown_letters(&browse), plain, "the unfiltered counts do not move with a watch");
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert!(browse.jobs.is_empty(), "and nothing is asked while Unwatched is off: {:?}", browse.jobs);
+
     assert!(browse.state.set_unwatched(true));
     assert!(shown_letters(&browse).is_empty(), "the Unwatched counts of before the watch: {:?}", shown_letters(&browse));
     tick_directory(&mut browse, sid, LibraryWork::Letters);
     assert_eq!(browse.jobs.len(), 1, "asked afresh");
+    answer_letters(&mut browse, client, &[("A", 1), ("B", 4)]);
+    assert_eq!(shown_letters(&browse), [("A".to_owned(), 1), ("B".to_owned(), 4)]);
+}
+
+/// Finding 2: with Unwatched applied, finishing a title whose card is in no loaded page covers no
+/// row, so nothing flags the grid, yet the Unwatched counts no longer include it. They are asked
+/// again, whether the list had landed or was still out when the read-back came; a title of another
+/// server is none of this section's business, and neither is a press (the read-back after it is).
+#[test]
+fn a_watch_of_a_title_in_no_loaded_page_owes_the_unwatched_letters() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, client) = loopback_page_source();
+    assert!(browse.state.set_unwatched(true));
+    land_letters(&mut browse, sid, client, &[("A", 3), ("B", 4)]);
+    {
+        let state = browse.state.state_mut(0).unwrap();
+        state.fetch = SecFetch::Ready;
+        state.total = 7;
+        state.items = SecItems::from_vec(vec![Some(PmsMovie { sid, rk: "1".into(), unwatched: true, ..Default::default() })]);
+    }
+
+    let elsewhere = plx_plex::plex::ServerId::from_raw(sid.raw().wrapping_add(7));
+    assert!(!browse.state.apply_view_local(&ViewAt::leaf(elsewhere, "99"), WATCHED_FACTS), "another server's title");
+    assert!(!browse.state.apply_view_local(&ViewAt::leaf(sid, "99"), ViewEdit::Watched(true)),
+        "a press is not the server's word: the read-back that follows it is");
+    assert_eq!(shown_letters(&browse).len(), 2, "the list stands");
+
+    assert!(browse.state.apply_view_local(&ViewAt::leaf(sid, "99"), WATCHED_FACTS), "the rail lost its list: a change to publish");
+    assert!(shown_letters(&browse).is_empty(), "the old counts include the title: {:?}", shown_letters(&browse));
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    assert_eq!(browse.jobs.len(), 1, "owed again");
+    let (job, port) = the_directory_job(&mut browse);
+
+    // The same read-back while that read is out: its answer was asked before it.
+    assert!(!browse.state.apply_view_local(&ViewAt::leaf(sid, "98"), WATCHED_FACTS), "nothing shown, nothing lost");
+    let container = letter_container(&[("A", 3), ("B", 3)]);
+    finish_directory_with(&port, job.addr, client, job.req, move || Some(container));
+    let _ = browse.pump();
+    browse.jobs.clear();
+    assert!(shown_letters(&browse).is_empty(), "asked before the read-back: {:?}", shown_letters(&browse));
+    tick_directory(&mut browse, sid, LibraryWork::Letters);
+    answer_letters(&mut browse, client, &[("A", 3), ("B", 2)]);
+    assert_eq!(shown_letters(&browse), [("A".to_owned(), 3), ("B".to_owned(), 2)]);
 }
 
 /// What moves the key without a term (a scan, a membership change) forgets the kept list as it

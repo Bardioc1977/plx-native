@@ -562,8 +562,9 @@ worker start and the `client_for` read inside that worker are gone too. The hous
     120 steps (`SecState::letters_backoff`), an edit asking at once. The seams `finish_page_with` and
     `finish_directory_with` take the read as a closure so a test can swap in one that panics.
   - **The letters carry the grid's terms.** The Letters job is asked with `SecState::query_filters`,
-    the terms of the page read, and a `LettersKey` (applied Unwatched, applied genre, a membership
-    generation; `data/src/browse/letters.rs`) that the answer returns. A list is current, and
+    the terms of the page read, and a `LettersKey` (applied Unwatched, applied genre, a generation
+    that a membership change moves and, for an Unwatched key only, a watched state read back from
+    the server; `data/src/browse/letters.rs`) that the answer returns. A list is current, and
     shown, only while its key is the section's present one, checked where it is read. The landed
     list and the one it replaced are both held (`SecState::letters_kept`: an unfiltered list
     survives a genre or Unwatched switched on and off; an Unwatched list is never the kept one),

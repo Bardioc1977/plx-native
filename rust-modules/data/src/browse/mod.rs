@@ -609,6 +609,10 @@ struct SecState {
     letters_kept: Option<(LettersKey, Arc<Vec<(String, i64)>>)>,
     /// Moves when the server's membership changed under the section ([`SecState::membership_changed`]).
     letters_gen: u32,
+    /// Moves when a title of the section's server had its watched state read back
+    /// ([`SecState::viewing_changed`]), whether or not Unwatched is applied: only a key counted
+    /// under Unwatched carries it ([`SecState::key_gen`]).
+    viewing_gen: u32,
     /// A failed letters read of this key, and the steps left before it is asked again.
     letters_backoff: Option<(LettersKey, u32)>,
     /// The grid's own view (sort, genre, menus), set aside while the section is on the Collections
@@ -824,6 +828,7 @@ impl Default for SecState {
             letters_for: None,
             letters_kept: None,
             letters_gen: 0,
+            viewing_gen: 0,
             letters_backoff: None,
             loaned: None,
             hubs: Default::default(),
@@ -1434,7 +1439,10 @@ impl BrowseState {
     /// whether or not it changes the row: the server's answer is what marks staleness, and a
     /// read-back that agrees with the optimistic row is exactly that answer. The row is patched
     /// where it stands, but the server would now list it elsewhere or not at all.
-    /// Returns true when a row changed or a section was newly marked stale or reset.
+    /// A [`ViewEdit::Facts`] also stales every first-letter list counted under Unwatched in every
+    /// section of the item's server ([`SecState::viewing_changed`]), covered row or not.
+    /// Returns true when a row changed, a section was newly marked stale or reset, or the rail on
+    /// screen lost its counts.
     /// The current section waits for a page to be pushed over the Library page
     /// ([`BrowseState::requery_stale`]); any other section simply forgets its pages AND its
     /// cursor (`reset_listing`), which is what a first visit looks like: switching back to it
@@ -1454,6 +1462,18 @@ impl BrowseState {
                 } else {
                     state.membership_changed();
                     hit = true;
+                }
+            }
+        }
+        // The rail's counts under Unwatched are the server's word too, whether or not Unwatched is
+        // applied and whether or not the title is in a loaded page: the covered-row path above
+        // cannot see either, and a `ViewAt` names no section, so every section of the server hears.
+        if matches!(edit, crate::viewstate::ViewEdit::Facts { .. }) {
+            for i in 0..self.states.len() {
+                if self.section_sid(i) == Some(at.sid) {
+                    if let Some(state) = self.states.get_mut(i) {
+                        hit |= state.viewing_changed();
+                    }
                 }
             }
         }

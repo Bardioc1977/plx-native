@@ -12,8 +12,11 @@
 //! (`pump_owned_with_gate`), and nothing there has to remember to forget them. Two things move the
 //! key without a term changing and both bump [`LettersKey::gen`]: the server's membership changed
 //! under the section ([`SecState::membership_changed`] and the stale flag spent by
-//! [`SecState::reset_listing`]), and, by construction, nothing else. A library TYPE change forgets
-//! the list outright ([`SecState::forget_letters`]); the Collections page's loan does not carry it.
+//! [`SecState::reset_listing`]), which every key carries; and a title of the section's server had
+//! its watched state read back ([`SecState::viewing_changed`]), which only a key counted under
+//! Unwatched carries ([`SecState::key_gen`]), because only those counts move with a watch. Nothing
+//! else does. A library TYPE change forgets the list outright ([`SecState::forget_letters`]); the
+//! Collections page's loan does not carry it.
 //!
 //! A read that FAILED leaves the list as it was (not current, so hidden: never shown over a grid it
 //! does not describe) and holds the same key back for [`LETTERS_RETRY_STEPS`] steps, as the page
@@ -32,8 +35,8 @@ pub(super) struct LettersKey {
     pub(super) unwatched: bool,
     /// The genre tag id AS APPLIED.
     pub(super) genre: Option<String>,
-    /// [`SecState::letters_gen`] when asked: moves when the server's membership changed under the
-    /// section, which no term shows.
+    /// [`SecState::key_gen`] when asked: moves when the server's membership changed under the
+    /// section, or (Unwatched only) a title's watched state was read back, which no term shows.
     pub(super) gen: u32,
 }
 
@@ -56,10 +59,17 @@ impl SecState {
         (self.unwatched, self.genre.as_ref().map(|genre| genre.id.as_str()))
     }
 
+    /// The generation a key counted with `unwatched` carries: the membership's, and for an
+    /// Unwatched key the viewing one as well. Both only count up, so the sum moves whenever either
+    /// does, and an unfiltered or genre-only list is left alone by a watch.
+    fn key_gen(&self, unwatched: bool) -> u32 {
+        if unwatched { self.letters_gen.wrapping_add(self.viewing_gen) } else { self.letters_gen }
+    }
+
     /// The key a letters read asked NOW would carry.
     pub(super) fn letters_key(&self) -> LettersKey {
         let (unwatched, genre) = self.applied_terms();
-        LettersKey { unwatched, genre: genre.map(str::to_owned), gen: self.letters_gen }
+        LettersKey { unwatched, genre: genre.map(str::to_owned), gen: self.key_gen(unwatched) }
     }
 
     /// The list that describes the listing the grid shows now, if one is on hand: the landed one,
@@ -68,12 +78,13 @@ impl SecState {
     /// through it, so nothing has to remember to swap a list back.
     pub(super) fn shown_letters(&self) -> Option<&Arc<Vec<(String, i64)>>> {
         let (unwatched, genre) = self.applied_terms();
-        if self.letters_for.as_ref().is_some_and(|key| key.is(unwatched, genre, self.letters_gen)) {
+        let gen = self.key_gen(unwatched);
+        if self.letters_for.as_ref().is_some_and(|key| key.is(unwatched, genre, gen)) {
             return Some(&self.letters);
         }
         self.letters_kept
             .as_ref()
-            .filter(|(key, _)| key.is(unwatched, genre, self.letters_gen))
+            .filter(|(key, _)| key.is(unwatched, genre, gen))
             .map(|(_, list)| list)
     }
 
@@ -89,7 +100,8 @@ impl SecState {
             return false;
         }
         let (unwatched, genre) = self.applied_terms();
-        !self.letters_backoff.as_ref().is_some_and(|(key, steps)| *steps > 0 && key.is(unwatched, genre, self.letters_gen))
+        let gen = self.key_gen(unwatched);
+        !self.letters_backoff.as_ref().is_some_and(|(key, steps)| *steps > 0 && key.is(unwatched, genre, gen))
     }
 
     /// Is a back-off counting down? The store must be stepped while it is, as for `retry_cd`.
@@ -114,11 +126,13 @@ impl SecState {
     /// The list it replaces is KEPT, one slot (so the last two keys are held, never more), unless it
     /// was counted under Unwatched: turning a genre or Unwatched on and then off again finds the
     /// unfiltered counts where they were instead of reading them anew. An Unwatched list is the
-    /// exception because which titles it counts changes with every watch, and a watch made while the
-    /// switch is OFF flags nothing ([`SecState::membership_depends_on_viewing`]), so a kept one
-    /// could come back wrong; its key's `gen` is the only thing that would tell. A list a
-    /// membership change or a type change made unshowable ([`Self::membership_changed`],
-    /// [`Self::forget_letters`]) is never brought back: its key carries the old `gen`, or it is gone.
+    /// exception because which titles it counts changes with every watch
+    /// ([`Self::viewing_changed`]), so it is the one least likely to be worth showing again. The
+    /// landed slot is no safer a place for it: it stays there, hidden, while a kept list is shown,
+    /// and its key's `gen` is what keeps a watch made meanwhile from bringing it back. A list a
+    /// membership change, a watch or a type change made unshowable ([`Self::membership_changed`],
+    /// [`Self::viewing_changed`], [`Self::forget_letters`]) is never brought back: its key carries
+    /// the old `gen`, or it is gone.
     pub(super) fn land_letters(&mut self, key: LettersKey, list: Vec<(String, i64)>) {
         match self.letters_for.take() {
             Some(previous) if previous != key => {
@@ -154,12 +168,28 @@ impl SecState {
     /// row's membership) though no term did: every offset after the change is off by one until the
     /// counts are asked again, and the listing is forgotten as a query edit forgets it.
     ///
-    /// A change that covers no LOADED row of the current section (a title in a page not fetched, or
-    /// watched from Home) flags nothing, as for the grid's later pages; that blind spot is older than
-    /// the rail and unchanged.
+    /// This is the GRID's side of a change, reached only for a row a loaded page holds. A watched
+    /// state read back for a title in no loaded page (one in a page not fetched, or finished from
+    /// Home) comes here for nothing, and the grid's later pages keep the blind spot they always had;
+    /// the rail's counts do not: [`Self::viewing_changed`] stales every count made under Unwatched on
+    /// any such read-back.
     pub(super) fn membership_changed(&mut self) {
         self.letters_gen = self.letters_gen.wrapping_add(1);
         self.reset_listing();
+    }
+
+    /// The server's read-back gave the watched state of one of ITS titles, which may be in this
+    /// section and may be in a page the grid has not loaded: a [`crate::viewstate::ViewAt`] names a
+    /// server, not a section, and the counts are cheap to ask again, so every section of the server
+    /// answers. Every list counted under Unwatched is stale from here on, whether or not Unwatched
+    /// is applied now: the one behind a shown unfiltered list is brought back by the switch, and
+    /// the read that is out was asked before the title changed. Only Unwatched counts depend on
+    /// viewing, so an unfiltered or genre-only list stands ([`Self::key_gen`]). Returns true when the
+    /// rail on screen lost its list, so the store publishes a change.
+    pub(super) fn viewing_changed(&mut self) -> bool {
+        let shown = self.letters_current();
+        self.viewing_gen = self.viewing_gen.wrapping_add(1);
+        shown && !self.letters_current()
     }
 }
 
