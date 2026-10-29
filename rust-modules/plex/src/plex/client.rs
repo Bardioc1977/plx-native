@@ -1403,33 +1403,41 @@ mod tests {
     /// Every edit below is a blank edge (live to blank, blank to live), so every edit moves the
     /// grant AND the generation. A reader must therefore never see the generation differ between
     /// two readings while the grant stayed. A regression stress for the writers: it cannot flake on
-    /// a correct implementation. The writers are held to the single method that stores both
-    /// counters inside the guard BY STRUCTURE; this is the probabilistic net behind that.
+    /// a correct implementation, and the writer runs until the reader has SEEN thousands of edits,
+    /// so the reader cannot start after the writer is done. The writers are held to the single
+    /// method that stores both counters inside the guard BY STRUCTURE; this is the probabilistic
+    /// net behind that.
     #[test]
     fn a_blank_edge_is_never_observed_as_a_moved_key_with_the_same_grant() {
+        use std::sync::atomic::AtomicBool;
+        struct StopOnDrop<'a>(&'a AtomicBool);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) { self.0.store(true, Relaxed); }
+        }
         let c = a_client("m", "tok");
-        let done = std::sync::atomic::AtomicBool::new(false);
-        let mut seen_a_change = false;
+        let stop = AtomicBool::new(false);
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                for _ in 0..20_000 {
+                while !stop.load(Relaxed) {
                     c.set_token("");
                     c.set_token("x");
                 }
-                done.store(true, Relaxed);
             });
+            let _stop_the_writer = StopOnDrop(&stop); // also when an assertion below fails
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
             let mut last = c.credential().unwrap();
-            while !done.load(Relaxed) {
+            let mut changes = 0u32;
+            while changes < 5_000 && std::time::Instant::now() < deadline {
                 let now = c.credential().unwrap();
                 if now.token_gen != last.token_gen {
-                    seen_a_change = true;
+                    changes += 1;
                     assert_ne!(now.grant_epoch, last.grant_epoch,
                         "the generation moved and the grant did not: {last:?} then {now:?}");
                 }
                 last = now;
             }
+            assert_eq!(changes, 5_000, "the reader did not see the writer move the credential in time");
         });
-        assert!(seen_a_change, "the reader never saw the writer move anything");
     }
 }
 
