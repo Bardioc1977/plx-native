@@ -75,10 +75,22 @@ const PIPELINE_ONLY_AUDIO: &[&str] = &["opus"];
 /// every codec. A 5.1 Opus film did play through on a C5 (webOS 10.3), so this can loosen per model.
 const OPUS_AUTO_MAX_CHANNELS: u32 = 2;
 
-/// STUB (fails-first commit): the widest Opus layout the Load can describe.
+/// The channel count of an Opus Load whose source width is not known: stereo, the layout every set
+/// plays cleanly ([`OPUS_AUTO_MAX_CHANNELS`]). Read by [`Caps::opus_lane_width`] only.
+const OPUS_UNKNOWN_SOURCE_CHANNELS: u32 = 2;
+
+/// The widest Opus layout a Load can describe: `contents.opusInfo` carries the channel count and the
+/// identification header, and the header builder (`player::engine`'s `opus_head`) knows the libopus
+/// family-1 mappings for one to this many channels. A track outside `1..=OPUS_LOAD_CHANNELS` is not
+/// direct-playable ([`audio_track_fits`]), and the Load of a converted lane is declared inside it
+/// ([`Caps::opus_lane_width`]).
 pub const OPUS_LOAD_CHANNELS: u32 = 8;
 
-/// STUB (fails-first commit): the codecs no `gstcool.conf` may switch off.
+/// **The audio codecs every webOS TV decodes**, and so the ones no per-set evidence may take away:
+/// the assumed fallback states exactly them ([`Caps::assumed`]), the failed-open ladder never blames
+/// them (`player::recovery`'s `suspect_audio`), and no `gstcool.conf` can switch them off
+/// ([`apply_gst_decoders`]). Not [`DP_AUDIO_CODECS`], which is the pipeline's feed set. The device
+/// table stays the authority on a set without one of them: `parse` announces what its rows list.
 pub const BASELINE_AUDIO: &[&str] = &["aac", "ac3", "eac3"];
 
 /// Audio the app DECODES ITSELF and feeds as PCM, so no row of the device table is needed: the
@@ -261,13 +273,17 @@ pub fn is_pcm_codec(codec: &str) -> bool {
 /// route that decides without PMS's `/decision`, mirrored by the transcode profile's
 /// `audio.samplingRate` limitation. A PCM codec ([`PCM_AUDIO_CODECS`]) needs one or two channels at
 /// a rate the app can make a `pcmInfo` rate of ([`pcm_load_rate`]: a table rate, or any faster one,
-/// resampled); an unstated count or rate does not pass. Any
+/// resampled); an unstated count or rate does not pass. Opus needs a stated count the Load can
+/// describe, `1..=`[`OPUS_LOAD_CHANNELS`] (the `opusInfo` header: a track of unknown or wider layout is
+/// the server's, not a Load that dies on its own refusal). Any
 /// other codec passes at an unstated rate (`<= 0`, the planner's `0`) or at most
 /// [`AUDIO_RATE_CEILING`], DTS and TrueHD excepted ([`audio_rate_bounded`]). These are limits of the Load,
 /// not of a hardware decoder, so Force Direct Play applies them as well.
 pub fn audio_track_fits(codec: &str, channels: i64, sample_rate: i64) -> bool {
     if is_pcm_codec(codec) {
         (1..=i64::from(PCM_MAX_CHANNELS)).contains(&channels) && pcm_load_rate(sample_rate).is_some()
+    } else if audio_codec_id(codec) == "opus" && !(1..=i64::from(OPUS_LOAD_CHANNELS)).contains(&channels) {
+        false
     } else {
         sample_rate <= i64::from(AUDIO_RATE_CEILING) || !audio_rate_bounded(codec)
     }
@@ -398,8 +414,11 @@ fn refusal_ceiling(channels: u32) -> u32 {
 const GST_CONF: &str = "/etc/gst/gstcool.conf";
 
 /// For each audio codec the pipeline can be fed, the gst decoder elements that can decode it: LG's
-/// hardware `<codec>_audiodec` first, then the software decoders (`avdec_dca` is DTS's, which
-/// webosbrew's `dts_restore` re-ranks). Codec ids are [`audio_codec_id`]'s.
+/// hardware `<codec>_audiodec` FIRST (the one [`apply_gst_decoders`] needs listed off before it drops a
+/// codec), then the software decoders (`avdec_dca` is DTS's, which webosbrew's `dts_restore` re-ranks;
+/// every conf read lists them all at rank 0, which says nothing about the hardware). Codec ids are
+/// [`audio_codec_id`]'s. No conf read lists `opus_audiodec`, so the conf can never drop Opus
+/// (intended: Opus plays on a C1 whose conf names no Opus decoder).
 const DECODER_ELEMENTS: &[(&str, &[&str])] = &[
     ("aac", &["aac_audiodec", "avdec_aac", "faad"]),
     ("ac3", &["ac3_audiodec", "avdec_ac3"]),
@@ -429,17 +448,21 @@ pub fn parse_gst_ranks(text: &str) -> std::collections::BTreeMap<String, i64> {
     ranks
 }
 
-/// Drop from `caps` the audio codecs that `gstcool.conf` shows **nothing can decode**, and say what
-/// happened as `(dropped, kept because the file never names a decoder for them)`.
+/// Drop from `caps` the audio codecs that `gstcool.conf` **positively shows are switched off**, and
+/// say what happened as `(dropped, kept because the file never names a decoder for them)`.
 ///
 /// The device table says what the hardware block can do; this file says which gst decoder elements
-/// the firmware left switched on. A codec is dropped only on positive evidence: some decoder element
-/// of it is listed and every listed one is rank 0 (the C5 whose table lists DTS has `avdec_dca=0` and
-/// no hardware `dts_audiodec`; `dts_restore` gives `avdec_dca` a rank again). A codec the file does
-/// not mention at all (Opus on a C1: `opus_audiodec` keeps its default rank) stays: no line means the
-/// default rank, not unsupported. An empty or unreadable file therefore changes nothing. The channel
-/// ceiling goes with the codec, so Force Direct Play's "DTS needs a surviving table row" rule sees
-/// the same answer.
+/// the firmware left switched on. **Absence of a line is never evidence**: it means the default rank,
+/// and the software decoders it lists (`avdec_*`, `faad`) are at rank 0 in every conf read, beside
+/// hardware elements at 290, because the pipeline uses LG's hardware ones. A codec is dropped only
+/// when its OWN hardware element (`DECODER_ELEMENTS`' first, e.g. `dts_audiodec`) is LISTED at rank
+/// `<= 0` and every other listed element of it is `<= 0` too (so a dts_restore patch giving `avdec_dca`
+/// a rank saves DTS), and it is not in [`BASELINE_AUDIO`], which no conf can take away. In practice that
+/// is DTS on a set whose conf lists `dts_audiodec=0`. A rank above zero is no proof of a decoder either
+/// (it is listed for elements a set may not have), which is why the table row stays the other half of
+/// the answer. A conf naming other codecs' elements says nothing about this one's. An empty or unreadable
+/// file changes nothing. The channel ceiling goes with the codec, so Force Direct Play's "DTS needs a
+/// surviving table row" rule sees the same answer.
 pub fn apply_gst_decoders(caps: &mut Caps, conf: &str) -> (Vec<&'static str>, Vec<&'static str>) {
     let ranks = parse_gst_ranks(conf);
     let (mut dropped, mut unlisted) = (Vec::new(), Vec::new());
@@ -450,7 +473,10 @@ pub fn apply_gst_decoders(caps: &mut Caps, conf: &str) -> (Vec<&'static str>, Ve
         let listed: Vec<i64> = elements.iter().filter_map(|e| ranks.get(*e).copied()).collect();
         if listed.is_empty() {
             unlisted.push(*codec);
-        } else if listed.iter().all(|r| *r <= 0) {
+            continue;
+        }
+        let hardware_off = ranks.get(elements[0]).is_some_and(|r| *r <= 0);
+        if hardware_off && !BASELINE_AUDIO.contains(codec) && listed.iter().all(|r| *r <= 0) {
             caps.audio = caps.audio.split(',').filter(|c| *c != *codec).collect::<Vec<_>>().join(",");
             caps.audio_channels.remove(*codec);
             dropped.push(*codec);
@@ -563,7 +589,7 @@ impl Caps {
     /// The 49SM9000PLA values — the only set ever measured before this module. These reproduce the
     /// profile the app has always sent (the transcoder test pins that), plus the
     /// `audio.samplingRate` limits of #951, so an unreadable table changes nothing else for any
-    /// device that was working yesterday.
+    /// device that was working yesterday. Its audio is [`BASELINE_AUDIO`] and nothing more.
     pub fn assumed() -> Caps {
         Caps {
             hevc: true,
@@ -575,7 +601,7 @@ impl Caps {
             vp9_bit_depth: 8,
             av1: false,
             av1_row: (0, 0, 0),
-            audio: "aac,ac3,eac3".to_string(),
+            audio: BASELINE_AUDIO.join(","),
             audio_channels: Default::default(),
             native_ceiling: Default::default(),
             video_ceiling: Default::default(),
@@ -584,9 +610,25 @@ impl Caps {
         }
     }
 
-    /// STUB (fails-first commit): the Opus Load width of a converted lane.
-    pub fn opus_lane_width(&self, _source_channels: i64) -> u32 {
-        0
+    /// The most Opus channels the profile asks the server for: this value's Opus row, else Auto's
+    /// stereo ceiling ([`OPUS_AUTO_MAX_CHANNELS`], which [`parse`] applies to every row). The profile
+    /// states it as the `audio.channels` upper bound of the `opus` codec, built from the same value.
+    pub fn opus_lane_bound(&self) -> u32 {
+        self.audio_channels.get("opus").copied().filter(|b| *b > 0).unwrap_or(OPUS_AUTO_MAX_CHANNELS)
+    }
+
+    /// The channel count an Opus Load declares for a lane the SERVER converted to Opus, whose carried
+    /// source track is `source_channels` wide (`<= 0`: not known). The source's width, held to the bound
+    /// the profile asked the server for ([`Caps::opus_lane_bound`]; never widened beyond it), stereo
+    /// when the source is not known, and always inside `1..=`[`OPUS_LOAD_CHANNELS`] so the Load can
+    /// describe it. The server's output width is not measured: this is the width it was ASKED for.
+    pub fn opus_lane_width(&self, source_channels: i64) -> u32 {
+        let bound = self.opus_lane_bound();
+        let width = match u32::try_from(source_channels) {
+            Ok(n) if n > 0 => n.min(bound),
+            _ => OPUS_UNKNOWN_SOURCE_CHANNELS.min(bound),
+        };
+        width.clamp(1, OPUS_LOAD_CHANNELS)
     }
 
     /// Whether `codec` is a lossy [`APP_DECODED`] row this value's policy admits ([`lossy_row_enabled`]).
@@ -830,7 +872,7 @@ fn ignores_learned(wide: bool, learn: bool) -> bool {
 }
 
 /// This set's audio capability answer and what derives it. [`probe`] builds it once: the table,
-/// minus the codecs gstcool.conf shows nothing can decode, minus [`EXCLUSIONS`]. **Write-once**: no
+/// minus the codecs gstcool.conf positively lists as switched off ([`apply_gst_decoders`]), minus [`EXCLUSIONS`]. **Write-once**: no
 /// lock, no later writer. What the install later learns is NOT folded into it. The install preference
 /// `native_audio_refused` (`plex::session`) owns the list of refusals, and a play start derives its
 /// own value from this snapshot and that list ([`start_caps`]).
@@ -1352,7 +1394,7 @@ pub fn probe() {
                 let mut c = c;
                 plx_base::eventlog::log(&format!("devcaps: table audio rows: {}", table_audio_rows(&s)));
                 c.vp9_bit_depth = vp9_bit_depth_for(crate::tv::device::info().major);
-                // Before the exclusions: a codec nothing can decode is not a candidate to limit.
+                // Before the exclusions: a codec the conf lists as switched off is not a candidate to limit.
                 let (gst_dropped, gst_unlisted) = match std::fs::read_to_string(GST_CONF) {
                     Ok(conf) => apply_gst_decoders(&mut c, &conf),
                     Err(_) => (Vec::new(), Vec::new()),
@@ -1399,7 +1441,7 @@ pub fn probe() {
         plx_base::devtrig::flag("nativeaudiolearn"),
         plx_base::devtrig::flag("nativeaudioforget"),
     );
-    // The layers in order: the table, minus gstcool.conf's no-decoder codecs (above), minus
+    // The layers in order: the table, minus the codecs gstcool.conf lists as switched off (above), minus
     // [`EXCLUSIONS`]. That is the boot snapshot, and it is final. The refusals this install learned
     // come after, from the stored record alone, at each play's start ([`start_caps`]): named or
     // proved, a refusal reaches a play only once its queued write has landed. `nativeaudiowide` skips
