@@ -1249,7 +1249,10 @@ at the ITEM, through the `oneOf`, where the parser names the key). The schema is
   a sound over-approximation: duplicate keys and the compile invariants are lint's.
 - Draft 2020-12, emitted with keywords whose meaning has not changed since draft-07 (`type`, `properties`,
   `required`, `additionalProperties`, `enum`, `const`, `pattern`, `minimum`, `maximum`, single-schema `items`,
-  `oneOf`). No validator runs on the TV: it would be a second parser of attacker input and a new dependency.
+  `oneOf`), plus local `$ref` into `$defs` (the format is recursive: a `cell` holds a `vstack` or `rect` that holds
+  `cell`s, which a schema cannot say without a reference) and the annotations `description`, `default` and `title`,
+  which a validator ignores. No validator runs on the TV: it would be a second parser of attacker input and a new
+  dependency.
 
 2. Lint.
 - `plxnative-sim --hud-lint <file> [--format text|json] [--lang all|<tag>]`; exit 0 clean, 1 findings, 2 usage.
