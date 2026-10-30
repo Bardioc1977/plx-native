@@ -2288,6 +2288,28 @@ mod library_trigger_tests {
         assert_eq!(boot.step(1_364, &on), Wait);
     }
 
+    /// **The Other Videos trigger no longer plays a user who switches the library on**: the library
+    /// is On by default, so the trigger only waits for the section to land and enters it once it is
+    /// a favourite. A section the profile hid is never switched on by the trigger; the wait ends
+    /// with the give-up line after ten seconds, then the trigger is spent.
+    #[test]
+    fn the_video_boot_trigger_waits_for_a_favourite_and_never_switches_one_on() {
+        let mut boot = LibraryBoot::default();
+        boot.arm(SecKind::Video, 1_000);
+        assert_eq!(boot.step(1_100, &[MOVIES]), Wait, "the section has not landed yet");
+        let hidden = [MOVIES, (SecKind::Video, false)];
+        assert_eq!(boot.step(1_300, &hidden), Wait, "a hidden library is waited for, never switched on");
+        assert_eq!(boot.step(1_316, &hidden), Wait);
+        assert_eq!(boot.step(11_000, &hidden), Wait, "ten seconds are not over yet");
+        assert_eq!(boot.step(11_001, &hidden), LibraryBootStep::GiveUp);
+        assert_eq!(boot.step(11_017, &hidden), Wait, "spent");
+
+        let mut boot = LibraryBoot::default();
+        boot.arm(SecKind::Video, 0);
+        assert_eq!(boot.step(16, &[MOVIES, (SecKind::Video, true)]), Enter, "an On library is entered");
+        assert_eq!(boot.step(32, &[MOVIES, (SecKind::Video, true)]), Wait, "…once");
+    }
+
     /// A library that is already a favourite (the sole-library floor, or a recorded answer) is
     /// entered without a switch being sent.
     #[test]

@@ -2084,3 +2084,284 @@ fn an_unknown_remembered_kind_is_ignored() {
         vec![(SecKind::Video, "mac-mini".to_string(), 3), (SecKind::Movie, "mac-mini".to_string(), 1)],
     );
 }
+
+// ---- Other Videos is on by default and hideable (issue #599) -------------------------------------
+//
+// An Other Videos library follows the rule Movies and TV Shows follow (`pins::default_on`): the
+// household's own arrives On, a friend's arrives On only where the household has none of the kind.
+// The pill exists while at least one such library is a favourite, and the user hides it through
+// Favorite libraries, which records an explicit Off.
+
+/// **The household's own Other Videos library arrives On and draws its pill.** The label is read
+/// from the pill's own component (`tab_titles`), not from `TestBrowse::tab_title`, which is a
+/// fixed type-word table and so can never fail on a label rule.
+#[test]
+fn a_household_other_videos_library_defaults_on_and_draws_its_pill() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("house-video-on");
+    t.watching("u-owner");
+    let mut browse = TestBrowse::default();
+    seed_three_types(&mut browse);
+    assert_eq!(
+        (browse.pinned(0), browse.pinned(1), browse.pinned(2)),
+        (true, true, true),
+        "Movies, TV Shows and the household's own Other Videos library all arrive On"
+    );
+    assert_eq!(browse.tab_count(), 3, "…so the strip has the third type's pill");
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), Some(2));
+    assert_eq!(
+        browse.state.tab_titles[SecKind::Video.slot()].as_deref(),
+        Some("Other Videos"),
+        "the sole favourite library names the pill"
+    );
+    browse.state.refresh_tab_shape();
+    assert_eq!(browse.state.tab_shape, 0b111, "the mask has the third bit");
+}
+
+/// **A friend's Other Videos library follows the per-type default**: On where the household has no
+/// library of the kind (a type must not vanish from the strip, as a friend's TV shelf on a
+/// films-only install), Off where it has one of its own.
+#[test]
+fn a_friends_other_videos_library_follows_the_per_type_default() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("friend-video-per-type");
+    t.watching("u-owner");
+    let mut browse = TestBrowse::default();
+
+    // the household has no Other Videos library: the friend's arrives On and gets the pill
+    browse.seed_sources(vec![a_source("mac-mini", "", true), a_source("nas-home", "friend", true)]);
+    browse.append_sections(
+        0,
+        vec![(1, "Movies".into(), SecKind::Movie), (2, "TV Shows".into(), SecKind::Show)],
+    );
+    browse.append_sections(1, vec![(1, "Their Clips".into(), SecKind::Video)]);
+    assert_eq!(
+        (browse.pinned(0), browse.pinned(1), browse.pinned(2)),
+        (true, true, true),
+        "the household has none of the kind, so the friend's library is On like a friend's TV shelf"
+    );
+    assert_eq!(browse.tab_count(), 3);
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), Some(2));
+
+    // the household has one of its own: the friend's arrives Off, as a friend's films would
+    t.watching("u-owner-2");
+    browse.seed_sources(vec![a_source("mac-mini", "", true), a_source("nas-home", "friend", true)]);
+    browse.append_sections(
+        0,
+        vec![(1, "Movies".into(), SecKind::Movie), (3, "Our Clips".into(), SecKind::Video)],
+    );
+    browse.append_sections(1, vec![(1, "Their Clips".into(), SecKind::Video)]);
+    assert_eq!(
+        (browse.pinned(0), browse.pinned(1), browse.pinned(2)),
+        (true, true, false),
+        "the household's own On, the friend's Off"
+    );
+    assert_eq!(browse.state.tab_titles[SecKind::Video.slot()].as_deref(), Some("Our Clips"));
+}
+
+/// **What an install that upgrades sees, one row per situation.** The record is the profile's
+/// answer and is kind-free (a `(machine, key)` pair): a recorded answer wins, and everything the
+/// profile never answered about, an `asked`-only record and a saved list that lacks the library
+/// included, gets the default, which is On.
+#[test]
+fn an_upgraded_install_follows_its_record_and_otherwise_the_default() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("video-upgrade-default-on");
+    let mut browse = TestBrowse::default();
+
+    t.watching("u-unrecorded");
+    seed_three_types(&mut browse);
+    assert!(browse.pinned(2), "no record (the common case): the default, On");
+    assert_eq!(browse.tab_count(), 3);
+
+    t.watching("u-asked-only");
+    plant_answers(true, &[]);
+    seed_three_types(&mut browse);
+    assert!(browse.pinned(2), "a profile that was asked and answered nothing keeps the default");
+
+    t.watching("u-lacks-it");
+    plant_answers(true, &[(1, true), (2, true)]);
+    seed_three_types(&mut browse);
+    assert!(browse.pinned(2), "a saved list that lacks the library is no hide: absence is unanswered");
+
+    t.watching("u-on");
+    plant_answers(true, &[(3, true)]);
+    seed_three_types(&mut browse);
+    assert!(browse.pinned(2), "a recorded On stays On");
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), Some(2));
+
+    t.watching("u-off");
+    plant_answers(true, &[(3, false)]);
+    seed_three_types(&mut browse);
+    assert!(!browse.pinned(2), "a recorded Off stays Off: nothing overrules a decision");
+    assert_eq!(browse.tab_count(), 2);
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), None);
+
+    // a record written before provenance existed: every row is in one list or the other
+    t.watching("u-frozen");
+    plant_answers(true, &[(1, true), (2, true), (3, true)]);
+    seed_three_types(&mut browse);
+    assert_eq!((browse.pinned(0), browse.pinned(1), browse.pinned(2)), (true, true, true));
+
+    // …and a friend's row frozen Off stays Off, as a friend's Movies library does
+    t.watching("u-frozen-friend");
+    plant_answers(true, &[(1, true), (2, true), (3, true)]);
+    let user = plx_plex::plex::session::current_profile_key();
+    assert!(plx_plex::plex::session::update(|s| {
+        let mut next = s.clone();
+        let mut pins = next.pins_for(&user).cloned().expect("the planted record");
+        pins.off.push(plx_plex::plex::session::PinnedLib {
+            machine_id: "nas-home".into(),
+            key: 1,
+            extensions: Default::default(),
+        });
+        next.set_pins_for(&user, pins);
+        Some(next)
+    }));
+    browse.seed_sources(vec![a_source("mac-mini", "", true), a_source("nas-home", "friend", true)]);
+    browse.append_sections(
+        0,
+        vec![(1, "Movies".into(), SecKind::Movie), (2, "TV Shows".into(), SecKind::Show),
+            (3, "Other Videos".into(), SecKind::Video)],
+    );
+    browse.append_sections(1, vec![(1, "Their Clips".into(), SecKind::Video)]);
+    assert_eq!((browse.pinned(2), browse.pinned(3)), (true, false), "the frozen Off row stays Off");
+}
+
+/// **Hiding the library is a recorded decision that survives the next boot and touches nobody
+/// else.**
+#[test]
+fn hiding_then_a_new_boot_keeps_the_library_hidden_and_other_profiles_unaffected() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("video-hide-persists");
+    let mut browse = TestBrowse::default();
+
+    t.watching("u-dad");
+    seed_three_types(&mut browse);
+    assert!(browse.pinned(2), "it starts On");
+    assert!(browse.state.toggle_pin(2), "hiding it is the editor's toggle");
+    plx_base::storage_worker::drain_for_test();
+    assert!(!browse.pinned(2));
+    assert_eq!(browse.tab_count(), 2);
+
+    seed_three_types(&mut browse); // the next boot
+    assert!(!browse.pinned(2), "the decision is remembered");
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), None, "…and so is the missing pill");
+    browse.state.refresh_tab_shape();
+    assert_eq!(browse.state.tab_shape, 0b011);
+
+    t.watching("u-mum");
+    seed_three_types(&mut browse);
+    assert!(browse.pinned(2), "another profile never answered, so it still has the default");
+    assert_eq!(browse.tab_count(), 3);
+}
+
+/// **Each Home profile hides Other Videos for itself.**
+#[test]
+fn each_profile_hides_other_videos_for_itself() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("video-per-profile-hide");
+    let mut browse = TestBrowse::default();
+
+    t.watching("u-dad");
+    seed_three_types(&mut browse);
+    assert!(browse.state.toggle_pin(2));
+    plx_base::storage_worker::drain_for_test();
+    assert_eq!(browse.tab_count(), 2);
+
+    t.watching("u-kid");
+    seed_three_types(&mut browse);
+    assert!(browse.pinned(2), "a profile that has not answered gets the default, not dad's answer");
+    assert_eq!(browse.tab_count(), 3);
+
+    t.watching("u-dad");
+    seed_three_types(&mut browse);
+    assert!(!browse.pinned(2), "…and dad's Off is intact");
+}
+
+/// **Hiding Movies and TV Shows leaves Other Videos as the one favourite.** The floor is not
+/// involved: the unrecorded library resolves On, so the roster is not empty.
+#[test]
+fn hiding_movies_and_shows_leaves_other_videos_as_the_one_favourite() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("video-alone-after-hide");
+    t.watching("u-owner");
+    plant_answers(true, &[(1, false), (2, false)]);
+    let mut browse = TestBrowse::default();
+    seed_three_types(&mut browse);
+    assert_eq!(
+        (browse.pinned(0), browse.pinned(1), browse.pinned(2)),
+        (false, false, true),
+        "the unrecorded Other Videos library is On, so it stands alone and the floor never runs"
+    );
+    assert_eq!(browse.tab_count(), 1);
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), Some(0));
+}
+
+/// **The never-empty floor treats Other Videos like any other library.** Everything is recorded
+/// Off, so nothing is on and the floor raises the first machine's libraries, Other Videos included
+/// (no library is skipped any more).
+#[test]
+fn the_never_empty_floor_includes_the_other_videos_library() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("video-floor-includes");
+    t.watching("u-owner");
+    plant_answers(true, &[(1, false), (2, false), (3, false)]);
+    let mut browse = TestBrowse::default();
+    seed_three_types(&mut browse);
+    assert_eq!(
+        (browse.pinned(0), browse.pinned(1), browse.pinned(2)),
+        (true, true, true),
+        "the first source's libraries come back, all of them"
+    );
+}
+
+/// **A household whose only library is Other Videos has it On and cannot hide it.** Guard: the
+/// library arrives On by the default (no floor needed) and the editor's toggle refuses the last one.
+#[test]
+fn a_household_whose_only_library_is_other_videos_is_on_and_cannot_be_hidden() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("video-only-on");
+    t.watching("u-owner");
+    let mut browse = TestBrowse::default();
+    browse.seed_sources(vec![a_source("mac-mini", "", true)]);
+    browse.append_sections(0, vec![(3, "Other Videos".into(), SecKind::Video)]);
+    assert!(browse.pinned(0), "the app needs one library");
+    assert!(!browse.state.toggle_pin(0), "the last favourite cannot be switched off");
+    assert!(browse.pinned(0));
+    assert_eq!(browse.tab_count(), 1);
+}
+
+/// **A friend's Movies share is On when the household's only movie-typed libraries are Other
+/// Videos libraries**: the per-kind "a type must not vanish from the strip" rule counts Other Videos
+/// as its own kind, so the household has no films. A pin of the upgrade-table row.
+#[test]
+fn a_friends_movies_share_is_on_when_the_households_only_movie_typed_libraries_are_other_videos() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("friend-movies-video-household");
+    t.watching("u-owner");
+    let mut browse = TestBrowse::default();
+    browse.seed_sources(vec![a_source("mac-mini", "", true), a_source("nas-home", "friend", true)]);
+    browse.append_sections(0, vec![(3, "Home Clips".into(), SecKind::Video)]);
+    browse.append_sections(1, vec![(1, "Film Club".into(), SecKind::Movie)]);
+    // (the household's own Other Videos library being On is graded by
+    // `a_household_other_videos_library_defaults_on_and_draws_its_pill`)
+    assert!(browse.pinned(1), "the friend's films flip On: the household has none of its own");
+    assert_eq!(browse.state.tab_of_kind(SecKind::Movie), Some(0), "a Movies pill appears");
+}
+
+/// **A household whose only library is Other Videos wears the library's name**, with no Movies pill
+/// (the library is not a Movies library any more). Read from the pill's own component.
+#[test]
+fn a_household_whose_only_library_is_other_videos_wears_the_library_name() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("video-only-name");
+    t.watching("u-owner");
+    let mut browse = TestBrowse::default();
+    browse.seed_sources(vec![a_source("mac-mini", "", true)]);
+    browse.append_sections(0, vec![(3, "Home Clips".into(), SecKind::Video)]);
+    assert_eq!(browse.tab_count(), 1);
+    assert_eq!(browse.state.tab_titles[SecKind::Video.slot()].as_deref(), Some("Home Clips"));
+    assert_eq!(browse.state.tab_of_kind(SecKind::Movie), None, "no Movies pill");
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), Some(0));
+}

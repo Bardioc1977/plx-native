@@ -1994,6 +1994,35 @@ mod tests {
         }
     }
 
+    /// **The Other Videos row is On by default, shows its count line like any other row, and a press
+    /// hides it**, on both mountings (issue #599). The page answers nothing for the untouched row;
+    /// the press records the Off as an answer, and the row never carries a hint.
+    #[test]
+    fn an_other_videos_row_is_on_by_default_shows_its_count_line_and_a_press_hides_it() {
+        use plx_platform::i18n::{language_on_this_thread_for_test, Preference};
+        let _g = plx_base::testlock::serial();
+        let _en = language_on_this_thread_for_test(Preference::En);
+        let mut browse = BrowseFixture::new();
+        browse.seed_two_sources_with_other_videos();
+        for (mounting, make) in [
+            ("first run", OnboardScreen::first_run as fn(EntryId, DirectoryView<'_>) -> OnboardScreen),
+            ("settings", OnboardScreen::settings),
+        ] {
+            let mut s = make(EntryId(0), browse.capture());
+            let (count_line, toggle) = row_of(&s, "Family Clips");
+            assert_eq!(toggle, Some(true), "{mounting}: On by default");
+            assert_ne!(count_line, "Adds a tab when switched on", "{mounting}: no hint on any row");
+            assert!(s.answered().is_empty(), "{mounting}: an untouched row answers nothing");
+
+            let (handled, _) = step_ev(&mut s, &ScreenEvent::Activate(SrcTarget::Library(4).key().0), None, browse.capture());
+            assert_eq!(handled, Handled::Yes);
+            assert_eq!(s.answered(), vec![(4, false)], "{mounting}: the press records Off");
+            let (detail, toggle) = row_of(&s, "Family Clips");
+            assert_eq!(toggle, Some(false));
+            assert_eq!(detail, count_line, "{mounting}: hidden, the row still shows its count line");
+        }
+    }
+
     /// **The hint never outranks the last-library rule**: the Other Videos library as the only
     /// favourite says the app needs one library, and refuses to be unpinned.
     #[test]
