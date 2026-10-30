@@ -380,17 +380,19 @@ appkit/player_hud/       state.rs (F4 logic, unchanged), model.rs (HudModel), mo
                          render.rs (compiled draw list -> shared widgets), geometry.rs (HudGeometry),
                          command.rs (HudCommand, enabled predicates), builtin/classic.json (include_str)
 appkit/hud_format        schema descriptor table, strict parser, validator, SVG-subset checker, layout compiler
-data/hudpacks            HudStore machine (new [data] member): installed set, selection, index cache; pure; never parses
+data/hudpacks            HudStore machine (new [data] member): installed set, selection (the index cache joins in PR13); pure; never parses
 media/player/text_style  HudBand value type replaces the two constants as the caption ceiling input
 ui/popover               the shared anchored placer (D9), used by the player menus and the four existing callers
 ```
 
 - Layers (F30): `hud_format` is in appkit because the vocabulary (`ControlSlot`, the Up Next pair, the
   commands) is defined there and a ui copy would be a second definition. `data::hudpacks` is added to
-  `[data] members` with a `docs/module-layers.md` line. It never parses: the runner calls
-  `plx_appkit::hud_format::{parse, compile}` and returns `HudEvent::Validated(PackFacts { id, version,
-  format, sha256, bytes, verdict })`, with `Verdict { Loadable, FormatTooNew, FormatTooOld, AppOutOfRange,
-  Invalid(InvalidClass) }` data-owned. The supported format range is a value handed to `HudStore::new`.
+  `[data] members` with a `docs/module-layers.md` line. It never parses: it hashes the bytes itself and asks
+  for the verdict with a `HudEffect::Validate`; the runner calls `plx_appkit::hud_format::{parse, compile}`
+  and answers `HudEvent::Validated { tag, sha, verdict }`, with the data-owned `Verdict { Loadable(Meta),
+  Unloadable(Meta, Unloadable), Invalid }` (`Meta` is id, name, version, format; `Unloadable` is
+  `NewerFormat`, `OlderFormat` or `AppRange`). The supported format range stays with the runner, which owns the
+  validator: the store is handed no range.
 - Per frame the renderer walks a flat `Vec<DrawOp>` and reads `HudModel` fields: no parsing, allocation or
   hashing; all text goes through `measure` (`draw_tabs`' doc: "measures none" when not drawn,
   `player_hud.rs:2160-2162`).
@@ -1159,8 +1161,9 @@ jails by prefix (F39's table does not say); if so, the same order works.
   `https_get_public`: the same headerless, redirect-following request with `Some(max_body)` through
   `request`'s existing argument; no new curl option, but a curl-path change, so `fw-compat-reviewer`.
   UNVERIFIED: whether the TV's CA set accepts `objects.githubusercontent.com`, where release redirects land.
-- (b) CHOSEN, Dev Mode and rooted: copy the file into `<root>/drop/` over ssh; it is validated and installed
-  when HUD settings open. No network.
+- (b) CHOSEN, Dev Mode and rooted: copy the file into `<root>/drop/` over ssh; it is validated and listed when
+  HUD settings open, and installed only when the user confirms it on the TV (`InstallDrop`, which re-reads the
+  file and refuses it if it changed since the list). No network.
 - (c) QR to a web page: rejected; the site is static (F40) and cannot hand a file back.
 - (d) LAN page served by the app: rejected; a listening socket plus a worker (ledger growth, F31), and
   inbound reachability through the TV's firewall is UNVERIFIED.
@@ -1195,7 +1198,7 @@ this session, no network).
   redirect-following request may carry no headers (F40); the URL is pinned to the host that serves it, and a
   3xx is an error. It refreshes only when HUD settings open, at most once per 24 h, never at boot or during
   playback, with backoff. The 24 h rule lives in the HudStore machine, which reads no clock (F31): the runner
-  hands `now` in on `SettingsOpened`. A package is fetched by hash and checked with `plx_base::sha256` before
+  hands `now` in on the event that opens HUD settings (PR13 adds the field to `Refresh`). A package is fetched by hash and checked with `plx_base::sha256` before
   it is written. Offline, installed HUDs keep working; the gallery shows the cached index with its date.
 - Why: TVs reading GitHub directly hit API rate limits (UNVERIFIED figure: 60 unauthenticated requests per
   hour per IP) and need tree walks; a bespoke backend means hosting and moderation for no gain over static
@@ -1441,8 +1444,9 @@ PR9. The More fold.
 PR10. Store, local install, selection, drop folder.
 - Goal: refuse the id `builtin:classic` from every source that is not compiled in (the format accepts that one
   literal so the built-in's own file parses; a sideloaded or registry file claiming it must never collide with the
-  built-in's Settings entry or the fallback target). `data::hudpacks::HudStore` (pure; events `Scanned`, `Validated`, `Selected`, `Removed`; effects `ScanDir`,
-  `ReadFile`, `WriteFile`, `Delete`), runners in `app/adapters/huds.rs` on the storage worker, `paths::hud_candidates()`,
+  built-in's Settings entry or the fallback target). `data::hudpacks::HudStore` (pure; events `Refresh`, `Install`, `InstallDrop`, `Selected`, `Removed` in and
+  the answers `Scanned`, `Read`, `Validated`, `Written`; effects `ScanDir`, `ReadFile`, `WriteFile`, `Delete`,
+  `Validate`, `Selection`, `Notice`), runners in `app/adapters/huds.rs` on the storage worker, `paths::hud_candidates()`,
   a `Profile` `setting!` with the install fallback, and `SettingsPage::PlayerHud`, a FormTable keyed by package id
   (not a `PickerKind`, a static vocabulary, F32) with a `fit_report`; a compile failure in the current language falls
   back per language with the `hud: fallback` line and the Settings reason (`settings.hud.unfit_language`, ten catalogs,
