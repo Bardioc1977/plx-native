@@ -471,10 +471,10 @@ fn two_type_strip_faces() -> Vec<TabFace> {
 
 /// The shipped two-type track and the budget it is charged against, per UI language: MODEL
 /// numbers (the shipped bold face's whole-pixel advances, `ShippedMeasure`), not a television
-/// measurement. 621 px in English, 529-679 across the nine languages, against 672.3: Belarusian is
+/// measurement. 621 px in English, 529-679 across the ten languages, against 672.3: Belarusian is
 /// over the budget today, without any new pill.
-const TWO_TYPE_TRACK: [(&str, f32); 9] = [("en", 621.0), ("de", 529.0), ("es", 582.0), ("fr", 561.0),
-    ("it", 555.0), ("pt", 549.0), ("hu", 659.0), ("ru", 666.0), ("be", 679.0)];
+const TWO_TYPE_TRACK: [(&str, f32); 10] = [("en", 621.0), ("de", 529.0), ("es", 582.0), ("fr", 561.0),
+    ("it", 555.0), ("pt", 549.0), ("hu", 659.0), ("ru", 666.0), ("be", 679.0), ("pl", 573.0)];
 
 #[test]
 fn the_two_type_track_is_measured_per_language_against_the_budget() {
@@ -519,16 +519,16 @@ fn the_translated_other_videos_pill_is_flat_in_every_language() {
 
 /// **A library title keeps the glass only if it is short enough**, and how short depends on the UI
 /// language because the other pills' words do: at most 91 px of text in German, 71 Portuguese,
-/// 65 Italian, 59 French, 38 Spanish; never in English, Hungarian, Russian or Belarusian, whose
-/// two-type track leaves no room for a fourth label. `tab_glass_on` is a function of width, so a
-/// rename can flip the material in those five languages; that is a fact of the budget, not a
+/// 65 Italian, 59 French, 47 Polish, 38 Spanish; never in English, Hungarian, Russian or Belarusian,
+/// whose two-type track leaves no room for a fourth label. `tab_glass_on` is a function of width, so a
+/// rename can flip the material in those six languages; that is a fact of the budget, not a
 /// defect, and it is tested rather than prevented.
 #[test]
 fn a_library_title_keeps_the_glass_only_where_the_track_has_room() {
     use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
     let measure = plx_base::fontcov::advances::ShippedMeasure;
     let thresholds = [("de", Some(91.0)), ("pt", Some(71.0)), ("it", Some(65.0)), ("fr", Some(59.0)),
-        ("es", Some(38.0)), ("en", None), ("hu", None), ("ru", None), ("be", None)];
+        ("es", Some(38.0)), ("en", None), ("hu", None), ("ru", None), ("be", None), ("pl", Some(47.0))];
     for language in SHIPPED {
         let _guard = language_on_this_thread_for_test(language);
         let tag = language.tag();

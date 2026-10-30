@@ -68,7 +68,7 @@ fn the_room_a_title_may_take_is_derived_from_the_chip_room() {
 #[test]
 fn fit_title_face_budget_per_language() {
     let expected = [("en", 240.0), ("de", 240.0), ("es", 240.0), ("fr", 240.0), ("it", 240.0),
-        ("pt", 240.0), ("hu", 209.0), ("ru", 202.0), ("be", 189.0)];
+        ("pt", 240.0), ("hu", 209.0), ("ru", 202.0), ("be", 189.0), ("pl", 240.0)];
     for language in SHIPPED {
         let _guard = language_on_this_thread_for_test(language);
         let tag = language.tag();
