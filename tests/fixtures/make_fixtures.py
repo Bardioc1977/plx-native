@@ -3526,7 +3526,7 @@ def main(argv=None):
         else:
             print("\n   Next: add TWO Plex libraries with the 'Personal Media' agents —")
             print("   (keep the Movies one on the 'Plex Movie' scanner, not 'Plex Video Files':")
-            print("   the app files that scanner's library under Other Videos, off until switched on, unless it is the only library)")
+            print("   the app files that scanner's library under Other Videos, so it leaves the Movies pill)")
             print("     Movies    -> %s" % (root / "Movies"))
             print("     TV Shows  -> %s" % (root / "TV Shows"))
             print("   then map the keys from fixtures.json into tests/manifest.local.json.")

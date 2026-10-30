@@ -174,7 +174,7 @@ dots under the row show the position.
 
 **Above it**, the top tab strip: **Home**, then **one pill per library type that has a favourite
 library** (here *Movies* and *TV Shows*; a Plex "Other Videos" library has its own pill after them
-once you switch it on in Favorite libraries (it is off by default, except as the only library there is), named after the library when it is the only one you follow, else *Other Videos*), then the Watchlist bookmark and the **Search** pill — drawn as marks, not words.
+(on by default like the others, hidden in Favorite libraries; named after the library when it is the only one you follow, else *Other Videos*), then the Watchlist bookmark and the **Search** pill — drawn as marks, not words.
 The strip scrolls once it outgrows the bar. At the left margin, outside the group, sits the
 **profile chip** (§5.7).
 

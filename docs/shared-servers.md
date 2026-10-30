@@ -557,10 +557,9 @@ Step 1's registry now has its first real consumer, and deliverable A of the desi
   state; it performs no HTTP. A dead share becomes a recoverable failed source without parking SDL.
 - **Pinning** is the design's one control and, since 2026-09-05, governs the whole app rather than
   Home alone (above): your HOUSEHOLD's libraries start favourite, a friend's start favourite only
-  if the household has no library of that type, and an Other Videos library (the household's own
-  included) is Off until somebody switches it on, because personal media gets no tab, Home row or
-  place in Movies unasked (`SecKind::opt_in`); the last favourite cannot be turned off, and the
-  never-empty floor raises a library that is not opt-in first.
+  if the household has no library of that type, Other Videos libraries included (they follow the
+  same rule, with no kind-specific exception, and the user hides one in Favorite libraries); the
+  last favourite cannot be turned off, and the never-empty floor raises the first machine's libraries.
   `pinned_libraries()` is its read side. The household and not the account, because plex.tv grades
   a Plex Home managed profile's own family server `owned:false` — read on ownership, such a profile
   had nothing of its own, no type of its own, and therefore every library it could see starting
@@ -757,8 +756,7 @@ Four places, all recorded so the next reader does not "fix" them back:
    the shipped Sources panel draws nothing, on its own stated rule that an empty handle is *the
    absence of an owner rather than an anonymous one*. The route and the panel must agree, and they
    do — that rule is the one that stays.
-3. **An account with no server of its HOUSEHOLD'S gets every library On** (an opt-in kind, Other
-   Videos, excepted: it is Off for everybody until switched on). The canvas's "a friend's
+3. **An account with no server of its HOUSEHOLD'S gets every library On.** The canvas's "a friend's
    arrives Off" has no answer for such an account; taken literally it opens the app on nothing.
    With nothing of the household's to prefer, a borrowed library is simply a library. The
    household and not the account, and the distinction is the whole managed-profile fix: plex.tv

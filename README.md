@@ -176,8 +176,8 @@ A re-encode still burns the selected subtitle on the server; over a remux the ap
 I built this for how *I* watch, so it's narrower than Plex's:
 
 - **Movies, TV shows and Other Videos libraries.** No music, no photos, no live TV or DVR. An Other Videos
-  library is off until you switch it on, per profile, in Settings > Favorite libraries (unless it is the only library you have); then it gets its own tab,
-  named after the library when exactly one Other Videos library is a favourite.
+  library gets its own tab, named after the library when it is the only favourite one; hide it
+  in Settings > Favorite libraries, per profile. With no such library there is no tab.
 - **No typing in server addresses.** Servers come from your Plex account; set them up on a phone or
   PC and choose from what's there. Servers reached through Plex's relay, or that require an
   encrypted connection, are supported but haven't been watched end to end.

@@ -50,7 +50,7 @@ sits, so an icon pill inserted before it moves no other destination. Every key i
 `strip_keys!` list of `widgets.rs`, whose compile-time assert refuses two destinations on one key, and
 every page maps a pressed key to its destination through the one `HomeTab::from_strip_key` table
 (`screens::registry`). The row is
-`Home`, then one pill per type that has a FAVOURITE library (Movies, TV Shows, Other Videos; an Other Videos library is off by default, so that pill exists only after somebody switches one on in Favorite libraries, or when it is the only library there is), then the
+`Home`, then one pill per type that has a FAVOURITE library (Movies, TV Shows, Other Videos; there is an Other Videos pill only while the account has such a library and it is a favourite, and the user can hide it in Favorite libraries), then the
 bookmark, then Search: three to six stops, because
 `browse::tab_count()` now counts `tab_kinds()`, and a type whose last favourite is switched off
 draws no pill. The types are still type destinations whose concrete owned/shared section

@@ -185,22 +185,3 @@ library type "Other Videos".
 | `browse.kind.videos` | | Відэа |
 | `browse.library.videos` | one, few, many, other | {count} відэа |
 | `browse.library.no_videos` | | У бібліятэцы {library} няма відэа |
-
-The opt-in switch (Favorite libraries lists an Other Videos library off until it is switched on); the
-wording is pronoun-free on purpose, so it needs no agreement with the library's own title:
-
-`locales/be/widgets.json`:
-
-| Key | String |
-| --- | --- |
-| `widgets.source.opt_in_hint` | Дадае ўкладку пры ўключэнні |
-
-`locales/be/settings.json`:
-
-| Key | String |
-| --- | --- |
-| `settings.libraries.detail_opt_in` | Іншае відэа: выключана па змаўчанні. |
-
-For `settings.libraries.detail_opt_in` the reviewer is asked in particular about the agreement of
-**выключана** with the label "Іншае відэа" (a colon and a neutral predicate, so the sentence does not depend on the
-number or gender of the user's own library names).
