@@ -514,9 +514,9 @@ the header's Recommended control), `plxnative-framedrop` and `plxnative-focus`, 
 (`"landed": "library"`) is sized from the **seated section's**
 `libhubs: section N landed S shelves` line (index 0 for Movies; `plxnative-library` content `1`
 seats Shows, index 1, and `2` seats Other Videos, index 2 — which exists on a mock booted with
-`--other-videos N` or on a server with such a library, and and which the trigger waits
-for until the section has landed (a log line after 10 s when the server has no such library or the
-profile hid it); the last landing of that section, not the
+`--other-videos N` or on a server with such a library; the trigger waits for
+that section until it has landed, with a log line after 10 s when the server has no such library or the
+profile hid it — the last landing of that section, not the
 last such line in the log):
 **Down once per shelf, a second time for each linked shelf** (its heading is a stop of its own,
 then its row), and `extra_rows` more (0: the Recommended page seats its first shelf on arrival and

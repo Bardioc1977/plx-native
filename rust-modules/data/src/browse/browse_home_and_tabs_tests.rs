@@ -2031,6 +2031,49 @@ fn an_upgraded_install_follows_its_record_and_otherwise_the_default() {
     assert_eq!((browse.pinned(2), browse.pinned(3)), (true, false), "the frozen Off row stays Off");
 }
 
+/// **An account with no household server: a friend's Other Videos library follows the record, not
+/// the default.** With nothing of the household's every library defaults On (the shared rule), so a
+/// friend's Off here can only be a recorded answer; it must stay Off, and an unrecorded profile gets
+/// the default On. Without the record the two cases below could not tell a decision from a default.
+#[test]
+fn a_recorded_off_for_a_friends_other_videos_library_beats_the_no_household_default() {
+    let _g = plx_base::testlock::serial();
+    let t = TempPins::new("friend-video-no-household");
+    let mut browse = TestBrowse::default();
+    let seed = |browse: &mut TestBrowse| {
+        browse.seed_sources(vec![a_source("nas-home", "friend", true)]);
+        browse.append_sections(
+            0,
+            vec![(1, "Film Club".into(), SecKind::Movie), (2, "Their Clips".into(), SecKind::Video)],
+        );
+    };
+    t.watching("u-unrecorded");
+    seed(&mut browse);
+    assert_eq!((browse.pinned(0), browse.pinned(1)), (true, true), "no household server: every library defaults On");
+
+    t.watching("u-hid-it");
+    // the decision is a record on the friend's machine, as the editor would have written it
+    let user = plx_plex::plex::session::current_profile_key();
+    assert!(plx_plex::plex::session::update(|s| {
+        let mut next = s.clone();
+        next.set_pins_for(&user, plx_plex::plex::session::HomePins {
+            user: user.clone(),
+            asked: true,
+            on: vec![plx_plex::plex::session::PinnedLib {
+                machine_id: "nas-home".into(), key: 1, extensions: Default::default(),
+            }],
+            off: vec![plx_plex::plex::session::PinnedLib {
+                machine_id: "nas-home".into(), key: 2, extensions: Default::default(),
+            }],
+            extensions: Default::default(),
+        });
+        Some(next)
+    }));
+    seed(&mut browse);
+    assert_eq!((browse.pinned(0), browse.pinned(1)), (true, false), "the recorded Off stays Off");
+    assert_eq!(browse.state.tab_of_kind(SecKind::Video), None, "…and so does the missing pill");
+}
+
 /// **Hiding the library is a recorded decision that survives the next boot and touches nobody
 /// else.**
 #[test]
