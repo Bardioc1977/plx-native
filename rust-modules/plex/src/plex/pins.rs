@@ -9,8 +9,7 @@
 //! this file was written when the pin default was hard-wired to `true` because deliverable F (the
 //! first-run route) had nowhere to ask the question. It has one now, and these are its rules:
 //!
-//! * **Your HOUSEHOLD's libraries arrive On, a friend's arrive Off** — except an opt-in kind
-//!   (Other Videos, [`LibRef::opt_in`]), which arrives Off for everybody. The point of asking is not
+//! * **Your HOUSEHOLD's libraries arrive On, a friend's arrive Off.** The point of asking is not
 //!   to put a stranger's shelves on your front door unannounced (`Shared Sources.dc.html` §F).
 //!   The household and not the account, because plex.tv answers a Plex Home managed profile with
 //!   `owned:false` on the family's own server — so a rule written on raw ownership gave the
@@ -68,19 +67,13 @@ pub struct LibRef<'a> {
     /// library is — only whether the household already has one of its own. `browse::lib_refs`
     /// computes it, because the section table is the only thing that can.
     pub household_type: bool,
-    /// **This library's KIND is never favourite until somebody switches it on** (Other Videos).
-    ///
-    /// A fact about the kind, decided by `browse::SecKind::opt_in` and handed down as a bool, for
-    /// the same reason as the two above: `SecKind` lives above this layer. It does not depend on
-    /// who owns the server, so the household/friend distinction is irrelevant for an opt-in kind.
-    pub opt_in: bool,
 }
 
 /// What the first-run screen SHOWS for one library before anybody touches it.
 ///
 /// **Your household's, and anything of a type the household has none of.** With no server of the
-/// household's there is nothing to prefer, so every kind but an opt-in one comes On — which this
-/// still says, because a household that has nothing has nothing of every type.
+/// household's there is nothing to prefer, so everything comes On — which this still says, because
+/// a household that has nothing has nothing of every type.
 ///
 /// The per-type half arrived with the favourite switch on 2026-09-05, and it is a correctness fix
 /// rather than a nicety. The switch governs the tab strip now, so a library that is off draws no
@@ -92,13 +85,9 @@ pub struct LibRef<'a> {
 /// makes that true at the default rather than only after a visit to Settings.
 ///
 /// Your household's libraries are unaffected, and so is the case the rule was written for: a
-/// friend's films still default Off while the household has films of its own. One kind is the
-/// exception in the other direction: an **opt-in** kind (Other Videos, [`LibRef::opt_in`]) is Off
-/// for everybody until somebody switches it on, the household's own library included. It gets no
-/// tab, no Home row and no place in Movies unasked, and it is not a type the strip would "lose"
-/// (nobody expected it there), so the per-type argument above does not apply to it.
+/// friend's films still default Off while the household has films of its own.
 pub fn default_on(lib: LibRef<'_>) -> bool {
-    !lib.opt_in && (lib.household || !lib.household_type)
+    lib.household || !lib.household_type
 }
 
 /// Resolve the whole table for one profile: the recorded answer where there is one, the default
@@ -137,29 +126,19 @@ pub fn resolve(libs: &[LibRef<'_>], rec: Option<&HomePins>) -> Vec<bool> {
     // Absence here is not a preference anybody expressed; it is a selection that outlived the
     // server it named, and a front door with nothing on it is not a state this app has.
     //
-    // **The floor is drawn over the libraries that are not opt-in.** An opt-in kind (Other
-    // Videos) has no place on the front door unasked, so skipping it on the first machine alone
-    // would leave Home empty when that machine holds only such libraries and a later one holds
-    // Movies. Only a roster made of nothing else lets the opt-in libraries into the pool: a
-    // household whose single library is Other Videos still gets its front door.
-    //
     // **Keyed on the machine id, but ONLY when there is one.** `record` refuses to write down an
     // empty `machineIdentifier`, so a source nobody has learned one for yet carries `""` — and
     // `l.machine_id == first` is then `"" == ""`, true for every nameless library on every
     // registered server at once. Home would come up fed by an arbitrary mixture of your server
     // and a friend's, which is not "the FIRST source's libraries" and is not a state anyone
     // chose. With no id to group by, the honest floor is the first library itself.
-    let mut pool: Vec<usize> = (0..libs.len()).filter(|&i| !libs[i].opt_in).collect();
-    if pool.is_empty() {
-        pool = (0..libs.len()).collect();
-    }
-    match pool.first().map(|&i| libs[i].machine_id) {
+    match libs.first().map(|l| l.machine_id) {
         Some(first) if !first.is_empty() => {
-            for &i in &pool {
-                out[i] = libs[i].machine_id == first;
+            for (i, l) in libs.iter().enumerate() {
+                out[i] = l.machine_id == first;
             }
         }
-        Some(_) => out[pool[0]] = true,
+        Some(_) => out[0] = true,
         None => {}
     }
     out
@@ -323,13 +302,7 @@ mod tests {
             key,
             household,
             household_type: true,
-            opt_in: false,
         }
-    }
-    /// An opt-in library (Other Videos) as the rules see it: whoever owns the server, the kind is
-    /// Off until somebody switches it on, and the household always "has" the type.
-    fn opt_in_lib(mid: &str, key: i64, household: bool) -> LibRef<'_> {
-        LibRef { opt_in: true, ..lib(mid, key, household) }
     }
     /// A borrowed library of a type this household has NONE of — a friend's TV shelf on a
     /// films-only install. It defaults On, and the strip would otherwise lose the whole type.
@@ -339,7 +312,6 @@ mod tests {
             key,
             household: false,
             household_type: false,
-            opt_in: false,
         }
     }
     /// The measured pair: your household's two libraries and a friend's one, in registration
@@ -571,70 +543,6 @@ mod tests {
         let two_srcs = vec![lib("mine", 1, true), lib("theirs", 1, false)];
         let all_off = record("u-7", true, &two_srcs, &chosen(&[false, false]));
         assert_eq!(resolve(&two_srcs, Some(&all_off)), vec![true, false]);
-    }
-
-    /// **An opt-in kind is Off by default, whoever owns the server and whatever the household has.**
-    /// Other Videos is a personal collection: a tab, a Home row and a place in Movies are things
-    /// the user asks for in Favorite libraries, never defaults.
-    #[test]
-    fn an_opt_in_library_is_off_by_default_whoever_owns_it() {
-        assert!(!default_on(opt_in_lib("mine", 3, true)), "the household's own");
-        assert!(!default_on(opt_in_lib("theirs", 3, false)), "a friend's");
-        assert!(
-            !default_on(LibRef { opt_in: true, ..lib_of_new_type("theirs", 3) }),
-            "…also where the household has none of the type, which turns every other kind On"
-        );
-        assert!(default_on(lib("mine", 1, true)), "a library that is not opt-in is unchanged");
-        assert_eq!(
-            resolve(&[lib("mine", 1, true), opt_in_lib("mine", 3, true)], None),
-            vec![true, false],
-        );
-    }
-
-    /// An answer somebody gave beats the opt-in default in both directions: pressing On is the
-    /// activation, and an Off stays Off.
-    #[test]
-    fn a_recorded_answer_beats_the_opt_in_default() {
-        let libs = vec![lib("mine", 1, true), opt_in_lib("mine", 3, true)];
-        let on = record("u-7", true, &libs, &chosen(&[true, true]));
-        assert_eq!(resolve(&libs, Some(&on)), vec![true, true], "recorded On");
-        let off = record("u-7", true, &libs, &chosen(&[true, false]));
-        assert_eq!(resolve(&libs, Some(&off)), vec![true, false], "recorded Off");
-    }
-
-    /// **The floor draws its pool from the libraries that are not opt-in.** Home must not be
-    /// empty, and an opt-in library has no place on the front door unasked.
-    #[test]
-    fn the_floor_skips_an_opt_in_library_when_something_else_can_stand_in() {
-        // machine A holds only Other Videos, machine B Movies; everything recorded Off
-        let libs = vec![opt_in_lib("a", 3, true), lib("b", 1, false)];
-        let rec = record("u-7", true, &libs, &chosen(&[false, false]));
-        assert_eq!(resolve(&libs, Some(&rec)), vec![false, true], "B's Movies, not A's clips");
-
-        // machine A holds Movies and Other Videos: the Movies only
-        let libs = vec![opt_in_lib("a", 3, true), lib("a", 1, true), lib("a", 2, true)];
-        let rec = record("u-7", true, &libs, &chosen(&[false, false, false]));
-        assert_eq!(resolve(&libs, Some(&rec)), vec![false, true, true]);
-    }
-
-    /// A roster of nothing but opt-in libraries still gets its front door: the pool is the whole
-    /// roster only when it would otherwise be empty, and then the old rule applies unchanged.
-    #[test]
-    fn the_floor_falls_back_to_the_whole_roster_when_every_library_is_opt_in() {
-        let libs = vec![opt_in_lib("a", 3, true), opt_in_lib("a", 4, true), opt_in_lib("b", 3, false)];
-        assert_eq!(resolve(&libs, None), vec![true, true, false], "the first machine's libraries");
-        let single = vec![opt_in_lib("a", 3, true)];
-        assert_eq!(resolve(&single, None), vec![true], "a household whose only library is Other Videos");
-    }
-
-    /// With no machine id to group by the floor is one library, and it is the first that is not
-    /// opt-in (the empty-id branch, generalised over the pool).
-    #[test]
-    fn the_floor_on_nameless_machines_is_the_first_library_that_is_not_opt_in() {
-        // a friend's share on a machine nobody has named: its Movies default Off (the household has
-        // films of its own elsewhere), so nothing is on and the floor must choose
-        let libs = vec![opt_in_lib("", 3, false), lib("", 1, false), lib("", 2, false)];
-        assert_eq!(resolve(&libs, None), vec![false, true, false], "one library, and not the clips");
     }
 
     /// The floor never fires while anything is on — a user who turned their own libraries off in

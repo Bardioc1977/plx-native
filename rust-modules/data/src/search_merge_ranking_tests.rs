@@ -176,11 +176,11 @@ fn ranking_is_stable_so_each_servers_own_order_survives_the_pass() {
     );
 }
 
-/// **An Other Videos library that is off is still searched; its hits rank after the favourites'.**
-/// Search is grant-wide and the switch only orders it, so an opt-in kind that was never switched
-/// on stays findable (a clip the user knows is there must not become a false negative).
+/// **An Other Videos library the user hid is still searched; its hits rank after the favourites'.**
+/// Search is grant-wide and the switch only orders it, so a hidden library stays findable (a clip
+/// the user knows is there must not become a false negative).
 #[test]
-fn an_off_other_videos_library_is_still_searched_and_ranks_last() {
+fn a_hidden_other_videos_library_is_still_searched_and_ranks_last() {
     let mk = |title: &str, sec: i64| {
         Item::Media(PmsMovie { sid: ServerId::from_raw(0), sec, title: title.into(), ..Default::default() })
     };

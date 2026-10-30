@@ -880,7 +880,7 @@ mod tests {
         }
 
         /// The two-source table plus the household's Other Videos library, "Family Clips" (section
-        /// 4 of the table), which an opt-in kind leaves off.
+        /// 4 of the table), which arrives on like any other library.
         fn seed_two_sources_with_other_videos(&mut self) {
             self.stores.browse.borrow_mut().seed_two_source_table_with_other_videos_for_test();
         }
@@ -1928,11 +1928,11 @@ mod tests {
         let mut out = Vec::new();
         for language in SHIPPED {
             let _guard = language_on_this_thread_for_test(language);
-            // …and with an Other Videos row, which draws the opt-in hint while it is off, and, as
-            // the only favourite left, the "needs one library" line that outranks the hint
+            // …and with an Other Videos row, on by default, and, as the only favourite left, the
+            // "needs one library" line on this kind's row
             for (fixture, videos, only_videos) in [
                 ("two sources", false, false),
-                ("other videos off", true, false),
+                ("other videos on", true, false),
                 ("other videos last", true, true),
             ] {
                 let mut browse = BrowseFixture::new();
@@ -1965,35 +1965,6 @@ mod tests {
         (row.detail.clone(), row.toggle)
     }
 
-    /// **The Off Other Videos row says what switching it on does, on both mountings, and the page
-    /// answers nothing for it until a press.** The hint replaces the count line only while the
-    /// library is off; pressing it is the activation, recorded as an answer like any other row.
-    #[test]
-    fn an_off_other_videos_row_says_what_switching_it_on_adds_and_a_press_answers_it() {
-        use plx_platform::i18n::{language_on_this_thread_for_test, Preference};
-        let _g = plx_base::testlock::serial();
-        let _en = language_on_this_thread_for_test(Preference::En);
-        let hint = "Adds a tab when switched on";
-        let mut browse = BrowseFixture::new();
-        browse.seed_two_sources_with_other_videos();
-        for (mounting, make) in [
-            ("first run", OnboardScreen::first_run as fn(EntryId, DirectoryView<'_>) -> OnboardScreen),
-            ("settings", OnboardScreen::settings),
-        ] {
-            let mut s = make(EntryId(0), browse.capture());
-            assert_eq!(row_of(&s, "Family Clips"), (hint.to_owned(), Some(false)), "{mounting}: off, with the hint");
-            assert_ne!(row_of(&s, "Movies").0, hint, "{mounting}: another kind never says it");
-            assert!(s.answered().is_empty(), "{mounting}: an untouched row answers nothing");
-
-            let (handled, _) = step_ev(&mut s, &ScreenEvent::Activate(SrcTarget::Library(4).key().0), None, browse.capture());
-            assert_eq!(handled, Handled::Yes);
-            assert_eq!(s.answered(), vec![(4, true)], "{mounting}: the press records On");
-            let (detail, toggle) = row_of(&s, "Family Clips");
-            assert_eq!(toggle, Some(true));
-            assert_ne!(detail, hint, "{mounting}: on, the row shows its count line again");
-        }
-    }
-
     /// **The Other Videos row is On by default, shows its count line like any other row, and a press
     /// hides it**, on both mountings (issue #599). The page answers nothing for the untouched row;
     /// the press records the Off as an answer, and the row never carries a hint.
@@ -2011,7 +1982,8 @@ mod tests {
             let mut s = make(EntryId(0), browse.capture());
             let (count_line, toggle) = row_of(&s, "Family Clips");
             assert_eq!(toggle, Some(true), "{mounting}: On by default");
-            assert_ne!(count_line, "Adds a tab when switched on", "{mounting}: no hint on any row");
+            assert_ne!(count_line, "The app needs one library", "{mounting}: a plain count line, not the last-library rule");
+            assert!(!count_line.is_empty(), "{mounting}: the row shows its count line");
             assert!(s.answered().is_empty(), "{mounting}: an untouched row answers nothing");
 
             let (handled, _) = step_ev(&mut s, &ScreenEvent::Activate(SrcTarget::Library(4).key().0), None, browse.capture());
@@ -2023,7 +1995,7 @@ mod tests {
         }
     }
 
-    /// **The hint never outranks the last-library rule**: the Other Videos library as the only
+    /// **The last-library rule holds for this kind too**: the Other Videos library as the only
     /// favourite says the app needs one library, and refuses to be unpinned.
     #[test]
     fn the_last_favourite_other_videos_row_keeps_the_last_library_line_and_stays_on() {

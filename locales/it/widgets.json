@@ -27,7 +27,6 @@
   "widgets.source.remote": "Remoto",
   "widgets.source.relay": "Relay",
   "widgets.source.needs_library": "Serve almeno una libreria",
-  "widgets.source.opt_in_hint": "Aggiunge una scheda all’attivazione",
   "widgets.source.new_shares": "Controlla librerie condivise",
   "widgets.source.shared_with_you": "Condivise con te",
   "widgets.source.unauthorized": "Non autorizzato",

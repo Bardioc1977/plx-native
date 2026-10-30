@@ -135,10 +135,6 @@
     "value": "The app needs one library",
     "description": "Sub-line under the last remaining library row in the Library panel. One line, no wrap (about 400px at most in Spanish, 450px in Belarusian): keep it short."
   },
-  "widgets.source.opt_in_hint": {
-    "value": "Adds a tab when switched on",
-    "description": "Sub-line under an Other Videos library's row in Favorite libraries while it is switched off (it replaces the count line; the 'needs one library' line wins when it is the last favourite). Shown only while no library of that type is a favourite yet, i.e. while switching the library on really adds the tab. Says what the switch does. No pronoun and no argument: the row's title is the user's own name for the library, so it may be plural or of any gender. One line, no wrap (about 27 characters in English, the neighbouring 'The app needs one library' line is the ceiling): keep it short."
-  },
   "widgets.source.new_shares": {
     "value": "Check for shared libraries",
     "description": "Row in the Library panel that re-checks the account for newly shared libraries. A row label in a 527px column, no wrap: keep it short."

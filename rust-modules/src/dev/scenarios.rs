@@ -116,7 +116,7 @@ pub(crate) struct Scenarios {
     pub(crate) auto_tried: bool,
     pub(crate) replay_left: u32,
     pub(crate) grid_tried: bool,
-    /// `plxnative-library=2`'s wait for an off-by-default library (see [`LibraryBoot`]).
+    /// `plxnative-library=2`'s wait for the Other Videos section to land (see [`LibraryBoot`]).
     pub(crate) library_boot: LibraryBoot,
     pub(crate) settings_tried: bool,
     pub(crate) seek_tried: bool,
@@ -1186,9 +1186,8 @@ fn grid_library_search_heroidx_arm(app: &mut App, _fr: &mut Frame) {
         }
         if let Some(s) = plx_base::devtrig::read("library") {
             let kind = library_trigger_kind(s.parse::<usize>().unwrap_or(0));
-            if kind.opt_in() {
-                // Off until switched on: the user who plays this trigger switches the library on
-                // first, and the section may not have landed yet (`library_boot_arm`, each frame).
+            if library_trigger_waits(kind) {
+                // The section may not have landed yet: wait for it (`library_boot_arm`, each frame).
                 app.scenarios.library_boot.arm(kind, _fr.now);
             } else {
                 app.bridge.enter_library(kind);
@@ -1230,25 +1229,19 @@ fn grid_library_search_heroidx_arm(app: &mut App, _fr: &mut Frame) {
     }
 }
 
-/// `plxnative-library=2` (Other Videos): see [`LibraryBoot`]. Dev-only, like every arm here: it
-/// sends the command the Favorite libraries editor sends, so a `--guest` boot (no session to write
-/// to) keeps the switch for the run only.
+/// `plxnative-library=2` (Other Videos): see [`LibraryBoot`]. Dev-only, like every arm here.
 fn library_boot_arm(app: &mut App, fr: &mut Frame) {
     let Some(kind) = app.scenarios.library_boot.kind() else { return };
     let sections: Vec<(plx_data::stores::browse::SecKind, bool)> = app.bridge.browse_directory()
         .sections().iter().map(|section| (section.kind, section.row.pinned)).collect();
     match app.scenarios.library_boot.step(fr.now, &sections) {
         LibraryBootStep::Wait => {}
-        LibraryBootStep::SwitchOn(section) => {
-            plx_base::eventlog::log(&format!("library boot: switching section {section} on, as Favorite libraries does"));
-            app.bridge.browse_run(plx_data::stores::browse::BrowseCmd::ApplyPins(vec![(section, true)]));
-        }
         LibraryBootStep::Enter => {
             app.bridge.enter_library(kind);
             crate::app::bridge::nav_select_tab(&mut app.pages, AppArg::Library);
         }
         LibraryBootStep::GiveUp => plx_base::eventlog::log(
-            "BADTRIGGER library boot: no library of that kind after 10 s; nothing was opened"),
+            "BADTRIGGER library boot: no favourite library of that kind after 10 s (the server has none, or the profile hid it); nothing was opened"),
     }
 }
 
@@ -2177,28 +2170,23 @@ pub(crate) fn maybe_replay_after_eos(app: &mut App, handed_off_to_up_next: bool)
     }
 }
 
-/// `plxnative-library=<n>` for a kind that is OFF until switched on (Other Videos): the boot has to
-/// play the user who switched the library on, or there is no pill and no Library to enter.
+/// `plxnative-library=<n>` for Other Videos: the boot waits for the section to land, because the
+/// one-shot library trigger runs at 400 ms, usually before discovery has.
 ///
-/// The one-shot library trigger runs at 400 ms, usually before discovery has landed, so this waits
-/// for the section instead: each frame it is shown the directory's `(kind, favourite)` rows and
-/// answers what to do. It asks for the switch ONCE (`sent`; the editor's own `ApplyPins` takes a
-/// frame or two to reach the directory, and sending it again every frame would be the dev trigger
-/// fighting the store), enters once the kind has a favourite, and gives up after
-/// [`LibraryBoot::GIVE_UP_MS`] with a log line, so a mock without such a library is a message and
-/// not a silent no-op. Movies and TV Shows keep the one-shot path and their exact timing.
+/// Each frame it is shown the directory's `(kind, favourite)` rows and answers what to do: enter
+/// once the kind has a favourite, give up after [`LibraryBoot::GIVE_UP_MS`] with a log line, so a
+/// mock without such a library (or a profile that hid it) is a message and not a silent no-op. It
+/// never switches a library on: the library is on by default and the trigger plays no user.
+/// Movies and TV Shows keep the one-shot path and their exact timing.
 #[derive(Default)]
 pub(crate) struct LibraryBoot {
     armed: Option<(plx_data::stores::browse::SecKind, u32)>,
-    sent: bool,
 }
 
 /// What [`LibraryBoot::step`] asks the frame to do.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LibraryBootStep {
     Wait,
-    /// send `BrowseCmd::ApplyPins(vec![(section, true)])`, the command the editor sends
-    SwitchOn(usize),
     /// `enter_library` and select the Library tab
     Enter,
     GiveUp,
@@ -2208,7 +2196,6 @@ impl LibraryBoot {
     const GIVE_UP_MS: u32 = 10_000;
     pub(crate) fn arm(&mut self, kind: plx_data::stores::browse::SecKind, now: u32) {
         self.armed = Some((kind, now));
-        self.sent = false;
     }
     pub(crate) fn kind(&self) -> Option<plx_data::stores::browse::SecKind> {
         self.armed.map(|(kind, _)| kind)
@@ -2224,14 +2211,14 @@ impl LibraryBoot {
             self.armed = None;
             return LibraryBootStep::GiveUp;
         }
-        match sections.iter().position(|&(k, _)| k == kind) {
-            Some(index) if !self.sent => {
-                self.sent = true;
-                LibraryBootStep::SwitchOn(index)
-            }
-            _ => LibraryBootStep::Wait,
-        }
+        LibraryBootStep::Wait
     }
+}
+
+/// Whether the library trigger waits for the section of this kind to land (Other Videos, which a
+/// mock may serve only after the one-shot trigger has run) instead of entering at once.
+fn library_trigger_waits(kind: plx_data::stores::browse::SecKind) -> bool {
+    kind == plx_data::stores::browse::SecKind::Video
 }
 
 /// `plxnative-library=<n>`: which library type the boot opens, by the strip's type order (0 Movies,
@@ -2266,28 +2253,6 @@ mod library_trigger_tests {
 
     const MOVIES: (SecKind, bool) = (SecKind::Movie, true);
 
-    /// **The Other Videos trigger plays the user who switched the library on**, whenever discovery
-    /// lands the section: it asks for the switch ONCE, then enters, once.
-    #[test]
-    fn the_opt_in_boot_trigger_switches_the_library_on_once_then_enters_it() {
-        let mut boot = LibraryBoot::default();
-        boot.arm(SecKind::Video, 1_000);
-        assert_eq!(boot.kind(), Some(SecKind::Video));
-        // frames 1 and 2: the section has not landed yet
-        assert_eq!(boot.step(1_100, &[MOVIES]), Wait);
-        assert_eq!(boot.step(1_200, &[]), Wait);
-        // frame 3: it lands, off
-        let off = [MOVIES, (SecKind::Video, false)];
-        assert_eq!(boot.step(1_300, &off), SwitchOn(1));
-        // the switch takes a frame or two to reach the directory: it is not sent again
-        assert_eq!(boot.step(1_316, &off), Wait);
-        assert_eq!(boot.step(1_332, &off), Wait);
-        // on: enter, and only once
-        let on = [MOVIES, (SecKind::Video, true)];
-        assert_eq!(boot.step(1_348, &on), Enter);
-        assert_eq!(boot.step(1_364, &on), Wait);
-    }
-
     /// **The Other Videos trigger no longer plays a user who switches the library on**: the library
     /// is On by default, so the trigger only waits for the section to land and enters it once it is
     /// a favourite. A section the profile hid is never switched on by the trigger; the wait ends
@@ -2310,41 +2275,31 @@ mod library_trigger_tests {
         assert_eq!(boot.step(32, &[MOVIES, (SecKind::Video, true)]), Wait, "…once");
     }
 
-    /// A library that is already a favourite (the sole-library floor, or a recorded answer) is
-    /// entered without a switch being sent.
+    /// A section that is a favourite on the first frame that sees it is entered at once.
     #[test]
-    fn a_library_that_is_already_on_is_entered_without_a_switch() {
+    fn a_library_that_is_already_on_is_entered_at_once() {
         let mut boot = LibraryBoot::default();
         boot.arm(SecKind::Video, 0);
         assert_eq!(boot.step(16, &[(SecKind::Video, true)]), Enter);
     }
 
-    /// The first section of the kind is the one switched on, by its table index.
-    #[test]
-    fn the_first_section_of_the_kind_is_switched_on() {
-        let mut boot = LibraryBoot::default();
-        boot.arm(SecKind::Video, 0);
-        let rows = [MOVIES, (SecKind::Show, true), (SecKind::Video, false), (SecKind::Video, false)];
-        assert_eq!(boot.step(16, &rows), SwitchOn(2));
-    }
-
     /// A mock without such a library is a log line after ten seconds, not a trigger that waits for
     /// ever; after it the trigger is spent.
     #[test]
-    fn the_opt_in_boot_trigger_gives_up_after_ten_seconds() {
+    fn the_boot_trigger_gives_up_after_ten_seconds() {
         let mut boot = LibraryBoot::default();
         boot.arm(SecKind::Video, 2_000);
         assert_eq!(boot.step(11_999, &[MOVIES]), Wait);
         assert_eq!(boot.step(12_001, &[MOVIES]), LibraryBootStep::GiveUp);
-        assert_eq!(boot.step(12_017, &[MOVIES, (SecKind::Video, false)]), Wait, "spent");
+        assert_eq!(boot.step(12_017, &[MOVIES, (SecKind::Video, true)]), Wait, "spent");
     }
 
-    /// Only a kind that is off until switched on takes the waiting path; Movies and TV Shows keep
-    /// the one-shot trigger at its exact timing.
+    /// Only Other Videos takes the waiting path; Movies and TV Shows keep the one-shot trigger at
+    /// its exact timing.
     #[test]
-    fn only_an_opt_in_kind_waits_for_its_section() {
+    fn only_other_videos_waits_for_its_section() {
         for n in 0..3 {
-            assert_eq!(library_trigger_kind(n).opt_in(), n == 2, "plxnative-library={n}");
+            assert_eq!(super::library_trigger_waits(library_trigger_kind(n)), n == 2, "plxnative-library={n}");
         }
     }
 }

@@ -27,7 +27,6 @@
   "widgets.source.remote": "Remoto",
   "widgets.source.relay": "Retransmisión",
   "widgets.source.needs_library": "La app necesita una biblioteca",
-  "widgets.source.opt_in_hint": "Añade una pestaña si se activa",
   "widgets.source.new_shares": "Buscar bibliotecas compartidas",
   "widgets.source.shared_with_you": "Compartidas contigo",
   "widgets.source.unauthorized": "Sin autorización",

@@ -314,11 +314,9 @@ pub struct BrowseSection {
     /// favourite-library hits first.
     ///
     /// Your HOUSEHOLD's libraries start favourite and a friend's start favourite only where the
-    /// household has no library of that type ([`plx_plex::plex::pins::default_on`]); an Other
-    /// Videos library starts OFF for everybody, the household's own included, until somebody
-    /// switches it on here ([`SecKind::opt_in`]: personal media is never given a tab, a Home row
-    /// or a place in Movies on the user's behalf); the last favourite cannot be turned off, or the
-    /// app has nothing (the floor raises a library that is not opt-in first). The household and not the account
+    /// household has no library of that type ([`plx_plex::plex::pins::default_on`]), Other Videos
+    /// libraries included: they follow the same rule as Movies and TV Shows, and the user hides one
+    /// here; the last favourite cannot be turned off, or the app has nothing. The household and not the account
     /// — see [`BrowseSource::household`] and [`BrowseState::lib_refs`] for why plex.tv's raw
     /// `owned` cannot answer this for a Plex Home managed profile.
     pub pinned: bool,
@@ -964,31 +962,6 @@ pub struct BrowseState {
     view_memory: plx_plex::plex::session::LibraryViews,
     recorded: Option<plx_plex::plex::session::HomePins>,
     pending_pins: Option<(String, std::sync::Arc<std::sync::Mutex<PinWrite>>)>,
-}
-
-/// A [`LibRef`](plx_plex::plex::pins::LibRef) the queued session write can own: the worker runs
-/// after the section table has moved on, so it carries its own copy of the strings.
-struct OwnedLibRef {
-    machine_id: String,
-    key: i64,
-    household: bool,
-    household_type: bool,
-    opt_in: bool,
-}
-
-impl OwnedLibRef {
-    fn of(lib: &plx_plex::plex::pins::LibRef<'_>) -> Self {
-        Self {
-            machine_id: lib.machine_id.to_owned(), key: lib.key, household: lib.household,
-            household_type: lib.household_type, opt_in: lib.opt_in,
-        }
-    }
-    fn borrowed(&self) -> plx_plex::plex::pins::LibRef<'_> {
-        plx_plex::plex::pins::LibRef {
-            machine_id: &self.machine_id, key: self.key, household: self.household,
-            household_type: self.household_type, opt_in: self.opt_in,
-        }
-    }
 }
 
 /// Shared by a cloned Browse snapshot, so consuming a receipt never makes another clone
@@ -2116,13 +2089,11 @@ impl BrowseState {
     fn rows_where(&self, keep: impl Fn(&BrowseSection) -> bool) -> Vec<SrcRow> {
         let last = self.pinned_count() == 1;
         let current = self.cur();
-        let has_tab = TAB_KINDS.map(|kind| self.tab_has_favorite(kind));
         self.sections.iter().enumerate().filter(|(_, section)| keep(section))
             .map(|(index, section)| SrcRow {
                 src: section.src, section: index, title: section.title.clone(),
                 count_line: count_line(section.count, section.kind), pinned: section.pinned,
                 last_pinned: last && section.pinned, current: index == current,
-                adds_tab: section.kind.opt_in() && !has_tab[section.kind.slot()],
             }).collect()
     }
     fn all_source_rows(&self) -> Vec<SrcRow> {
@@ -2196,7 +2167,6 @@ impl BrowseState {
             plx_plex::plex::pins::LibRef {
                 machine_id, key: section.key, household,
                 household_type: household_type(section.kind),
-                opt_in: section.kind.opt_in(),
             }
         }).collect()
     }
@@ -2385,11 +2355,13 @@ impl BrowseState {
         let answers = plx_plex::plex::pins::answers(&libraries, &on, touched, previous);
         let fresh = plx_plex::plex::pins::record(&user, asked, &libraries, &answers);
         let record = plx_plex::plex::pins::carry_forward(fresh, previous, &libraries);
-        let owned: Vec<OwnedLibRef> = libraries.iter().map(OwnedLibRef::of).collect();
+        let owned: Vec<_> = libraries.iter().map(|lib|
+            (lib.machine_id.to_owned(), lib.key, lib.household, lib.household_type)).collect();
         let touched = touched.to_vec();
         let pending_user = user.clone();
         let ticket = plx_plex::plex::session::queue_update_ticket(move |session| {
-            let libraries: Vec<_> = owned.iter().map(OwnedLibRef::borrowed).collect();
+            let libraries: Vec<_> = owned.iter().map(|(machine_id, key, household, household_type)|
+                plx_plex::plex::pins::LibRef { machine_id, key: *key, household: *household, household_type: *household_type }).collect();
             let previous = session.pins_for(&user);
             let answers = plx_plex::plex::pins::answers(&libraries, &on, &touched, previous);
             let fresh = plx_plex::plex::pins::record(&user, asked, &libraries, &answers);
@@ -3598,17 +3570,6 @@ impl SecKind {
     pub const fn pill_wears_library_title(self) -> bool {
         matches!(self, SecKind::Video)
     }
-    /// Whether a library of this kind is OFF until somebody switches it on: Other Videos only.
-    /// Movies and TV Shows are what the app is for and arrive on (the household's own); a folder
-    /// of home clips is a personal collection that must not grow a tab, a Home row or a place in
-    /// Movies unasked. The single source of [`plx_plex::plex::pins::LibRef::opt_in`] and of the
-    /// Favorite libraries row's hint; the exhaustive `match` makes a new kind decide.
-    pub const fn opt_in(self) -> bool {
-        match self {
-            SecKind::Movie | SecKind::Show => false,
-            SecKind::Video => true,
-        }
-    }
     /// This kind's position in [`TAB_KINDS`] — the index of the per-kind arrays (`preferred`,
     /// `kind_fetch`). One definition instead of a `Movie => 0, Show => 1` copy per array.
     pub const fn slot(self) -> usize {
@@ -3711,8 +3672,8 @@ fn activate_source_of(_i: usize) {
 // Source rides inside the library pill's own label instead, so adding people never reshapes this strip.
 // The one exception to "a pill is a TYPE" is a lone Other Videos library: its pill wears that
 // library's own title (`sole_favorite_title`), and goes back to the type word the moment a second
-// favourite library of the type appears. That kind is also opt-in ([`SecKind::opt_in`]): it has no
-// pill at all until somebody switches a library of it on in Favorite libraries.
+// favourite library of the type appears. Like every type it has a pill only while one of its libraries is
+// a favourite, and a library of it arrives On by the same rule as Movies and TV Shows.
 //
 // **What DOES reshape it is the favourite switch, and that is the change of 2026-09-05.** Movies
 // and TV Shows were permanent destinations — `tab_count` was a constant 2 and `tabs_gen` a
@@ -3848,10 +3809,6 @@ pub struct SrcRow {
     pub last_pinned: bool,
     /// the library being browsed — the Browse level's single tick
     pub current: bool,
-    /// switching this row on would ADD a tab to the strip: its kind is off until switched on
-    /// ([`SecKind::opt_in`]) and no library of it is a favourite yet (a second library shares the
-    /// first one's pill) — the editor's sub-line says so while the row is off
-    pub adds_tab: bool,
 }
 
 fn count_line(count: i64, kind: SecKind) -> String {
@@ -4175,7 +4132,7 @@ pub fn seed_two_source_table_for_owner_test(state: &mut BrowseState) {
 }
 
 /// [`seed_two_source_table_for_owner_test`] plus the household's Other Videos library
-/// ("Family Clips", section key 3, the fifth row), which an opt-in kind leaves OFF.
+/// ("Family Clips", section key 3, the fifth row), which arrives On.
 #[cfg(any(test, feature = "test-support"))]
 pub fn seed_two_source_table_with_other_videos_for_owner_test(state: &mut BrowseState) {
     seed_two_source_table_for_owner_test(state);

@@ -3011,8 +3011,8 @@ pub(crate) fn item_pinned(pins: &[(ServerId, i64, bool)], m: &PmsMovie) -> bool 
 
 /// May this card appear on the SHELF it sits on? [`item_pinned`], plus one rule for a personal-video
 /// row ([`personal_video_hub`]): a card that names no library (`sec == 0`) cannot prove its library
-/// is a favourite, and unlike a movie row's the library behind it may well be one the user never
-/// switched on (Other Videos is opt-in). Every item list measured on a real server carries the
+/// is a favourite, and unlike a movie row's the library behind it may well be one the user hid
+/// (Other Videos libraries are hideable like any other). Every item list measured on a real server carries the
 /// section id, so this is insurance, not a known leak. The Continue Watching deck is not a
 /// personal-video hub and keeps [`item_pinned`] as it was.
 fn shelf_item_shown(pins: &[(ServerId, i64, bool)], hub_id: &str, m: &PmsMovie) -> bool {

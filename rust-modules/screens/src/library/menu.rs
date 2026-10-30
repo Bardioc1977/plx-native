@@ -1135,7 +1135,6 @@ mod tests {
                     pinned: true,
                     last_pinned: false,
                     current: true,
-                    adds_tab: false,
                 },
             },
             plx_data::browse::view::SectionView {
@@ -1150,7 +1149,6 @@ mod tests {
                     pinned: true,
                     last_pinned: false,
                     current: false,
-                    adds_tab: false,
                 },
             },
         ];
@@ -1305,7 +1303,6 @@ mod tests {
                     pinned: true,
                     last_pinned: false,
                     current: false,
-                    adds_tab: false,
                 },
             },
         );

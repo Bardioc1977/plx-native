@@ -308,6 +308,5 @@
   "settings.consent.placeholder.random_id": "losowy identyfikator",
   "settings.consent.placeholder.project_key": "klucz projektu",
   "settings.consent.placeholder.app_version": "wersja aplikacji",
-  "settings.consent.placeholder.webos_codename_short": "nazwa kodowa webOS",
-  "settings.libraries.detail_opt_in": "Inne wideo: domyślnie wyłączone."
+  "settings.consent.placeholder.webos_codename_short": "nazwa kodowa webOS"
 }

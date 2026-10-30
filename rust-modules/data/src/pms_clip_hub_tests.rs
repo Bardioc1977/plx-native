@@ -118,11 +118,11 @@ fn an_unpinned_library_keeps_its_clip_row_off_home() {
     assert!(items.iter().all(|m| item_pinned(&[(sid(0), 1, false)], m)), "another library's pin is not this one's");
 }
 
-/// **An Other Videos library that is off publishes no clip card, on the shelf the server filed it
+/// **An Other Videos library the user hid publishes no clip card, on the shelf the server filed it
 /// under.** The shelf survives in the build (it is the server's row); what Home publishes, and
 /// whether the shelf takes a place in the order at all, is decided by the library's switch.
 #[test]
-fn a_switched_off_other_videos_library_publishes_no_clip_row() {
+fn a_hidden_other_videos_library_publishes_no_clip_row() {
     let sh = shelf_in(0, 3, "", "home.videos.recent", &["901", "902"]);
     let srcs = [src(0, "", HubState::Ready, Some(built(0, &[], vec![sh.clone()])))];
     let off = [(sid(0), 3, false), (sid(0), 1, true)];
