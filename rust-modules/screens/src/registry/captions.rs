@@ -298,3 +298,37 @@ fn the_sort_value_switch_reads_the_same_thread_override_as_policy() {
     }
     TEST_UNDER_POSTERS.with(|cell| cell.set(None));
 }
+
+/// The test-only reader's isolation from the process-wide cell (its own module: it starts a thread).
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+
+    #[test]
+    fn an_unlocked_unpinned_reader_sees_the_default_while_a_locked_one_sees_the_live_setting() {
+        use plx_plex::plex::session::{UnderPosters, UnderPostersDetails};
+        let held = UnderPosters { title: true, details: UnderPostersDetails::None, sort_value: false };
+        let (ready_tx, ready) = std::sync::mpsc::channel::<bool>();
+        let (done_tx, done) = std::sync::mpsc::channel::<()>();
+        // Another test, as the Settings tests are: holds `serial()` and has the live cell off the default.
+        let other = std::thread::spawn(move || {
+            let _serial = plx_base::testlock::serial();
+            plx_media::route::restore_under_posters(held);
+            let locked_reader_sees_the_live_setting = policy() == crate::registry::caption_policy_of(held) && !sort_value();
+            ready_tx.send(locked_reader_sees_the_live_setting).unwrap();
+            done.recv().unwrap();
+            plx_media::route::restore_under_posters(UnderPosters::DEFAULT);
+        });
+        let locked_saw_live = ready.recv().unwrap();
+        // This thread holds neither the lock nor a pin, as a screen test that builds a page does not.
+        let unlocked = (policy(), sort_value());
+        done_tx.send(()).unwrap();
+        other.join().unwrap();
+        assert!(locked_saw_live, "a thread holding serial() reads the live cell its writers set");
+        assert_eq!(
+            unlocked,
+            (crate::registry::caption_policy_of(UnderPosters::DEFAULT), UnderPosters::DEFAULT.sort_value),
+            "an unlocked, unpinned thread must not see another test's setting"
+        );
+    }
+}
