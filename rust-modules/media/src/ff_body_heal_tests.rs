@@ -250,44 +250,37 @@ fn an_unsized_body_that_is_cut_is_not_reopened() {
     assert_eq!(srv.heads().len(), 1, "no reopen: {:?}", srv.heads());
 }
 
+/// A progressive transcode that is slow is not a cut: the server holds the unsized body silent for
+/// three times the silence a SIZED body is reopened after, then speaks, and the read must have
+/// waited for it. No duration is graded (a stopwatch started on this thread cannot be compared with
+/// a sleep that starts when another thread first runs): the bytes `EFGH` exist only after the
+/// release, so a read that carries them did not give up first, and one request is the proof that it
+/// did not reopen. The releaser starts its silence only once the request is in, so the read cannot
+/// begin after the release.
 #[test]
 fn an_unsized_body_is_not_given_the_silence_deadline() {
     let _serial = plx_base::testlock::serial();
     let srv = ShortBody::start(UNSIZED_HEAD, true, false);
     let release = srv.release.clone();
+    let heads = srv.heads.clone();
     // Well past the silence a sized body would be reopened after.
     let quiet = BODY_SILENCE * 3;
     let releaser = std::thread::spawn(move || {
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while heads.lock().unwrap().is_empty() && std::time::Instant::now() < give_up {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         std::thread::sleep(quiet);
         release.store(true, Ordering::Release);
     });
-    let began = std::time::Instant::now();
     let (got, end) = with_sized_source(srv.port, -1, read_to_end);
     let _ = releaser.join();
-    assert!(began.elapsed() >= quiet, "the read returned before the server spoke again");
-    assert_eq!((got.as_slice(), end), (&b"ABCDEFGH"[..], AVERROR_EOF));
+    assert_eq!(
+        (got.as_slice(), end),
+        (&b"ABCDEFGH"[..], AVERROR_EOF),
+        "the read must carry the bytes the server sent AFTER its silence (EFGH exists only after the release)"
+    );
     assert_eq!(srv.heads().len(), 1, "a transcode that is slow is not a cut: {:?}", srv.heads());
-}
-
-/// FORCING (fails-first, removed by the next commit): the body of the test above with the test
-/// thread descheduled for 20 ms between starting the releaser and taking `began`, as a loaded
-/// runner does for a few milliseconds. The read is correct; only the measuring is skewed.
-#[test]
-fn forced_the_duration_assertion_fails_when_the_test_thread_lags() {
-    let _serial = plx_base::testlock::serial();
-    let srv = ShortBody::start(UNSIZED_HEAD, true, false);
-    let release = srv.release.clone();
-    let quiet = BODY_SILENCE * 3;
-    let releaser = std::thread::spawn(move || {
-        std::thread::sleep(quiet);
-        release.store(true, Ordering::Release);
-    });
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let began = std::time::Instant::now();
-    let (got, end) = with_sized_source(srv.port, -1, read_to_end);
-    let _ = releaser.join();
-    assert!(began.elapsed() >= quiet, "the read returned before the server spoke again");
-    assert_eq!((got.as_slice(), end), (&b"ABCDEFGH"[..], AVERROR_EOF));
 }
 
 /// The reopen of a sized body must come back from the byte asked for. A server that ignores the
