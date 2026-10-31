@@ -3421,6 +3421,11 @@ mod tests {
         // Not a pure clear: besides PLAY_BUSY, the landing slot, the resume point and the verdict,
         // `cancel_play` bumps the play generation and retires a landing a leaker left unclaimed.
         // That is what a victim test wants, and `serial()` means no test is mid-play beside it.
+        // It also settles the PLAYER_CONTROL phase (a `Resolving` phase becomes Idle, Stable,
+        // Failed or OriginalTrial per `resolve_fallback`, with `pending_auto` and `resolve_fallback`
+        // cleared) and, for an unclaimed landing a leaker left, `retire_abandoned_plan` can start
+        // the abandon-stop worker, which calls `transcode_stop` at whatever server the global
+        // registry still holds. Neither is handed back.
         plx_media::route::cancel_play(&mut ps);
         let _queued = QueuedStart::set(false);
         let head = header(&ps, &plx_media::player::Diag::default(), 1_000);
@@ -3487,7 +3492,7 @@ mod tests {
     /// `Resolving` (the pending-resolve rank sits above `pb_state`). A header for "no session" must
     /// not depend on it.
     #[test]
-    fn a_leftover_queued_start_does_not_change_the_firmware_line() {
+    fn a_leftover_queued_start_does_not_turn_the_verdict_into_resolving() {
         let _g = plx_base::testlock::serial();
         let _queued = QueuedStart::set(true);
         let (head, inputs) = header_with_no_session();
