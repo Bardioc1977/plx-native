@@ -10,9 +10,14 @@ digits) for integer string conversion" on Python 3.11+ (CI run 40728922069, the 
 late-audio tests; passed on re-run). Host only: a synthetic file, no ffmpeg, no cargo.
 
 A second class of input: an integer field wider than EBML's 8-byte maximum (a TrackNumber, a
-TrackType, a Cluster timestamp). No muxer writes one, but the script reads those fields as plain
-integers, so one would reach the summary `print` as a huge integer or overflow the 4-byte timestamp
-the script writes back. The script refuses such a field with a message instead."""
+TrackType, a Cluster Timestamp). No muxer writes one, but the script reads those fields as plain
+integers, so one would reach the summary `print` as a huge integer. The script refuses such a field
+with a message instead (by width: zero padding up to 8 bytes is fine).
+
+A third: a Cluster timestamp whose VALUE cannot be written back. `emit` writes each new cluster's
+Timestamp (the earliest block of its group: a Timestamp plus a signed 16-bit block offset) in four
+unsigned bytes, so `ff ff ff ff` with a later block, or a small Timestamp with an earlier block,
+would overflow there. The script refuses such a value with a message naming it."""
 import contextlib
 import io
 import pathlib
@@ -103,8 +108,12 @@ class WideIntegerFields(unittest.TestCase):
         wide = m.elem(TRACK_ENTRY, m.elem(TRACK_NUMBER, uint(1)) + m.elem(TRACK_TYPE, b"\x01" * 2000))
         self.assertIn("TrackType", self.refused(entries=wide + track_entry(2, 2)))
 
-    def test_a_cluster_timestamp_wider_than_the_four_bytes_it_is_written_back_in_is_refused(self):
-        self.assertIn("Cluster Timestamp", self.refused(timestamp=b"\x01" + b"\x00" * 4))
+    def test_a_cluster_timestamp_wider_than_ebml_allows_is_refused(self):
+        self.assertIn("Cluster Timestamp", self.refused(timestamp=b"\x01" * 2000))
+
+    def test_a_cluster_timestamp_of_five_significant_bytes_is_refused_where_it_is_written_back(self):
+        # 2**32 reads fine as an EBML integer (five bytes) and cannot be written in four.
+        self.assertIn("does not fit", self.refused(timestamp=b"\x01" + b"\x00" * 4))
 
     def test_a_cluster_timestamp_that_fits_four_bytes_alone_but_not_with_a_block_offset_is_refused(self):
         # 0xFFFFFFFF is four bytes wide, but the audio block sits 5 ms after it and is written into a
