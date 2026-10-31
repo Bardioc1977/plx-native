@@ -458,6 +458,24 @@ mod tests {
         });
     }
 
+    /// `ClientKey::of` is the reader `KeyedClients::client` checks a snapshot against: it reads the
+    /// pair under the lock too, so a worker never compares a torn key.
+    #[test]
+    fn client_key_of_is_read_under_the_token_lock() {
+        let c = a_client(1, "tok");
+        let writer = c.token.write().unwrap();
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let c = &c;
+            scope.spawn(move || tx.send(ClientKey::of(c)).unwrap());
+            assert!(rx.recv_timeout(std::time::Duration::from_millis(100)).is_err(),
+                "the key was read while a writer held the token lock");
+            drop(writer);
+            let key = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the reading finishes once the writer is done");
+            assert_eq!(key, ClientKey::of(c));
+        });
+    }
+
     #[test]
     fn a_poisoned_token_lock_gives_a_key_with_no_proven_grant() {
         let c = a_client(1, "tok");
