@@ -27,6 +27,15 @@ def rd_size(b, p):
     unknown = v == (1 << (7 * n)) - 1
     return (None if unknown else v), p + n
 
+def rd_uint(b, p, e, what, max_bytes=8):
+    """The unsigned integer stored in b[p:e]. EBML integers are at most 8 bytes wide; `max_bytes`
+    narrows that for a field this script writes back in a fixed width. A wider field is refused
+    with a message: read as a plain integer it would reach the summary line as a huge number (a
+    ValueError past 4300 digits) or overflow the field it is written back into."""
+    if e - p > max_bytes:
+        sys.exit(f"mkv_audio_lead: {what} is {e - p} bytes wide, at most {max_bytes} are read")
+    return int.from_bytes(b[p:e], "big")
+
 def wr_size(n):  # 8-byte size vint
     return bytes([0x01]) + n.to_bytes(7, "big")
 
@@ -71,13 +80,14 @@ def main(src, dst, lead_s, skew=False):
                         if tid != TRACK_ENTRY: continue
                         num = typ = None
                         for fid, fp, fq, fe in children(b, tq, te):
-                            if fid == 0xD7: num = int.from_bytes(b[fq:fe], "big")
-                            if fid == 0x83: typ = int.from_bytes(b[fq:fe], "big")
+                            if fid == 0xD7: num = rd_uint(b, fq, fe, "TrackNumber")
+                            if fid == 0x83: typ = rd_uint(b, fq, fe, "TrackType")
                         tracks_types[num] = typ
             elif cid == CLUSTER:
                 cts = 0
                 for kid, kp, kq, ke in children(b, cq, ce):
-                    if kid == TIMESTAMP: cts = int.from_bytes(b[kq:ke], "big")
+                    # Written back below as four bytes, so a wider one is refused.
+                    if kid == TIMESTAMP: cts = rd_uint(b, kq, ke, "Cluster Timestamp", 4)
                     elif kid == SIMPLEBLOCK:
                         tr, r, rel = block_track_rel(b, kq)
                         blocks.append((cts + rel, tr, bytes(b[kp:ke]), r - kp))
