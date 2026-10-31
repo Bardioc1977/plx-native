@@ -2,8 +2,9 @@
 //! `episode.addedAt`) and the release date, counted by the production body over a MODEL of the server
 //! (`bands_job_tests::Server`) that holds generated dates, answers `>=` range reads and the
 //! `:asc:nullsLast` extent read the way the measured rules say, and records what it was asked. The
-//! screens draw none of these families yet (`BandFamily::rail_ready`), so the body, the key and the
-//! landing are driven directly with the family as a parameter.
+//! screens draw all of these families (`BandFamily::rail_ready`; `library/tests.rs` drives the rail over
+//! the bands this body lands), so the body, the key and the landing are driven directly here with the
+//! family as a parameter.
 //!
 //! Edges and expected starts are computed here from an independent calendar (a day counter, not
 //! `bands.rs`'s arithmetic), so an off-by-one edge, a wrong clock, one zone offset for every edge or a
@@ -330,6 +331,102 @@ fn a_rail(family: BandFamily) -> bands::BandRail {
     bands::BandRail::new(&ladder, &counts, 40).expect("a trusted rail")
 }
 
+/// The rail of `family` planned for `today`, 1 to n films in each band.
+fn a_rail_on(family: BandFamily, today: bands::Day) -> bands::BandRail {
+    let ladder = bands::plan(family, today, 2025);
+    let counts: Vec<u32> = (1..=ladder.len() as u32).collect();
+    bands::BandRail::new(&ladder, &counts, 400).expect("a trusted rail")
+}
+
+/// Midnight re-keys a calendar rail and asks it once more; until that read lands the rail on screen is
+/// the previous day's (a focus seated in it must not lose it to a second of nothing), and landing the new
+/// day's drops yesterday's instead of keeping it. Another family or other terms never get a stale rail.
+#[test]
+fn a_day_turn_keeps_the_previous_days_rail_on_screen_until_the_new_days_lands() {
+    use crate::browse::test_support::TestBrowse;
+    use std::sync::Arc;
+    let _g = plx_base::testlock::serial();
+    let kind = SecKind::Movie;
+    let (_cleanup, mut browse, _sid, _client) = banded_source(kind, &["rating", "addedAt"]);
+    assert!(browse.state.set_sort_by_key("addedAt", true));
+    let on = |browse: &mut TestBrowse, today| browse.state.state_mut(0).unwrap().today = Some(today);
+    on(&mut browse, TODAY);
+    let key = browse.state.states()[0].bands_key(BandFamily::DateAdded);
+    browse.state.state_mut(0).unwrap().land_bands(key, Some(a_rail_on(BandFamily::DateAdded, TODAY)));
+    let yesterday = browse.state.states()[0].shown_bands(kind).expect("the day's rail").clone();
+    assert!(!browse.state.states()[0].bands_owed(kind));
+
+    on(&mut browse, [2026, 11, 1]);
+    let state = &browse.state.states()[0];
+    assert!(state.bands_owed(kind) && state.bands_verdict_for(BandFamily::DateAdded).is_none(), "the new day's bands are asked for");
+    assert!(Arc::ptr_eq(state.shown_bands(kind).expect("the rail stays up while they are read"), &yesterday));
+    assert!(state.bands_current(kind), "…and it is on screen, so a watch that moves it is noticed");
+
+    // other terms are no rail of the day before: Unwatched, and then another sort
+    browse.state.state_mut(0).unwrap().unwatched = true;
+    assert!(browse.state.states()[0].shown_bands(kind).is_none(), "counted without Unwatched");
+    browse.state.state_mut(0).unwrap().unwatched = false;
+    assert!(browse.state.states()[0].shown_bands(kind).is_some());
+
+    // the new day's read lands: its rail is shown, yesterday's is gone and not kept
+    let key = browse.state.states()[0].bands_key(BandFamily::DateAdded);
+    browse.state.state_mut(0).unwrap().land_bands(key, Some(a_rail_on(BandFamily::DateAdded, [2026, 11, 1])));
+    let state = &browse.state.states()[0];
+    assert!(!state.bands_owed(kind));
+    assert!(!Arc::ptr_eq(state.shown_bands(kind).expect("today's rail"), &yesterday));
+    assert!(state.bands_kept.is_none(), "yesterday's list is not kept beside today's");
+
+    // a sort of another family has no use for it either
+    assert!(browse.state.set_sort_by_key("rating", true));
+    assert!(browse.state.states()[0].shown_bands(kind).is_none(), "the rating's bands are not read yet");
+
+    // A round trip through another sort moves the day's list to the kept slot, and the day turning while
+    // it stands there keeps it on screen just the same: sort by Rating (its read lands), back to Date
+    // added (nothing is asked, the kept list answers), midnight.
+    let key = browse.state.states()[0].bands_key(BandFamily::Rating);
+    browse.state.state_mut(0).unwrap().land_bands(key, Some(a_rail(BandFamily::Rating)));
+    assert!(browse.state.set_sort_by_key("addedAt", true));
+    let state = &browse.state.states()[0];
+    assert!(!state.bands_owed(kind), "the kept list answers, nothing is read");
+    assert!(state.bands.as_ref().is_some_and(|(key, _)| key.family == Some(BandFamily::Rating)), "the rating's list is the landed one");
+    let kept = state.shown_bands(kind).expect("the day's rail, from the kept slot").clone();
+    on(&mut browse, [2026, 11, 2]);
+    let state = &browse.state.states()[0];
+    assert!(state.bands_owed(kind) && state.bands_verdict_for(BandFamily::DateAdded).is_none(), "the new day's bands are asked for");
+    assert!(Arc::ptr_eq(state.shown_bands(kind).expect("the rail stays up from the kept slot"), &kept));
+    assert!(state.bands_current(kind), "…and it is on screen");
+
+    // the same through an Unwatched round trip: this day's list lands, Unwatched goes on (its list is
+    // another terms' and lands, the day's moves to the kept slot) and off again
+    let key = browse.state.states()[0].bands_key(BandFamily::DateAdded);
+    browse.state.state_mut(0).unwrap().land_bands(key, Some(a_rail_on(BandFamily::DateAdded, [2026, 11, 2])));
+    browse.state.state_mut(0).unwrap().unwatched = true;
+    let key = browse.state.states()[0].bands_key(BandFamily::DateAdded);
+    browse.state.state_mut(0).unwrap().land_bands(key, Some(a_rail_on(BandFamily::DateAdded, [2026, 11, 2])));
+    browse.state.state_mut(0).unwrap().unwatched = false;
+    let state = &browse.state.states()[0];
+    assert!(!state.bands_owed(kind), "the kept list answers, nothing is read");
+    let kept = state.shown_bands(kind).expect("the day's rail, from the kept slot").clone();
+    on(&mut browse, [2026, 11, 3]);
+    let state = &browse.state.states()[0];
+    assert!(state.bands_owed(kind));
+    assert!(Arc::ptr_eq(state.shown_bands(kind).expect("the rail stays up from the kept slot"), &kept));
+
+    // landing the new day's drops the previous day's list from the kept slot too: it stands beside no
+    // list of its own terms (here a stale one is planted next to nothing, which no landing leaves)
+    let key = browse.state.states()[0].bands_key(BandFamily::DateAdded);
+    let stale = {
+        let mut stale = key.clone();
+        stale.today = Some([2026, 11, 2]);
+        (stale, Some(Arc::new(a_rail_on(BandFamily::DateAdded, [2026, 11, 2]))))
+    };
+    let state = browse.state.state_mut(0).unwrap();
+    state.bands = None;
+    state.bands_kept = Some(stale);
+    state.land_bands(key, Some(a_rail_on(BandFamily::DateAdded, [2026, 11, 3])));
+    assert!(state.bands_kept.is_none(), "a previous day's list is not kept beside this day's");
+}
+
 /// The key: a calendar family's carries the day (a day turn asks once more), no other does; the
 /// direction is in none; a watch moves the date viewed and no other date.
 #[test]
@@ -370,21 +467,56 @@ fn a_calendar_key_carries_the_day_and_a_watch_moves_only_the_date_viewed() {
     assert_eq!((before[2], before[3]), (after[2], after[3]), "…and the last episode and the release date");
 }
 
-/// The day reaches the key from the Library's ask, and the calendar sorts still ask nothing and show
-/// nothing (`rail_ready`): the fixed ones are unaffected.
+/// The day reaches the key from the Library's ask. A calendar sort is asked for its bands only once the
+/// application has handed over the day (`rail_family`), and then its key carries it; a fixed family's
+/// key never does.
 #[test]
-fn the_ask_hands_the_day_to_the_state_and_the_calendar_families_stay_off() {
+fn the_ask_hands_the_day_to_the_state_and_a_calendar_sort_asks_for_its_bands_once_it_has_it() {
     let _g = plx_base::testlock::serial();
     for family in BandFamily::ALL {
-        assert_eq!(family.rail_ready(), family.basis().is_none(), "{family:?}");
+        assert!(family.rail_ready(), "{family:?}: the rail draws every family");
         assert_eq!(family.extent_read().is_some(), family.basis().is_some(), "{family:?}");
     }
     let (_cleanup, mut browse, sid, _client) = banded_source(SecKind::Movie, &["rating", "addedAt"]);
     assert!(browse.state.set_sort_by_key("addedAt", true));
+    tick_directory(&mut browse, sid, LibraryWork::Letters { today: None });
+    assert!(browse.jobs.is_empty(), "a calendar sort asks nothing without a day: {:?}", browse.jobs);
+    assert!(browse.state.states()[0].rail_family(SecKind::Movie).is_none());
     tick_directory(&mut browse, sid, LibraryWork::Letters { today: Some(TODAY) });
     assert_eq!(browse.state.states()[0].today, Some(TODAY));
-    assert!(browse.jobs.is_empty(), "a calendar sort asks nothing while the rail is off: {:?}", browse.jobs);
-    assert!(browse.state.states()[0].rail_family(SecKind::Movie).is_none());
+    assert_eq!(browse.state.states()[0].rail_family(SecKind::Movie), Some(BandFamily::DateAdded));
+    let (job, _port) = the_directory_job(&mut browse);
+    assert_eq!(job.req.letters.as_ref().map(|key| (key.family, key.today)), Some((Some(BandFamily::DateAdded), Some(TODAY))),
+        "a calendar family's key carries the day");
+}
+
+/// Last episode added counts the newest episode of a show, which only a DESCENDING sort orders by
+/// (`episode.addedAt:asc` orders by the oldest), so the rail's bands exist for a descending sort only:
+/// the screens draw whatever bands the data layer lands, and this is where an ascending one is kept off.
+#[test]
+fn last_episode_added_asks_for_its_bands_descending_with_the_day_and_never_ascending() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, _client) = banded_source(SecKind::Show, &["episode.addedAt"]);
+    assert!(browse.state.set_sort_by_key("episode.addedAt", true));
+    tick_directory(&mut browse, sid, LibraryWork::Letters { today: None });
+    assert!(browse.jobs.is_empty() && browse.state.states()[0].rail_family(SecKind::Show).is_none(), "no day, no bands");
+    tick_directory(&mut browse, sid, LibraryWork::Letters { today: Some(TODAY) });
+    assert_eq!(browse.state.states()[0].rail_family(SecKind::Show), Some(BandFamily::LastEpisodeAdded));
+    let (job, _port) = the_directory_job(&mut browse);
+    assert_eq!(job.req.letters.as_ref().map(|key| (key.family, key.today)), Some((Some(BandFamily::LastEpisodeAdded), Some(TODAY))));
+
+    let (_cleanup, mut browse, sid, _client) = banded_source(SecKind::Show, &["episode.addedAt"]);
+    assert!(browse.state.set_sort_by_key("episode.addedAt", false));
+    tick_directory(&mut browse, sid, LibraryWork::Letters { today: Some(TODAY) });
+    assert!(browse.state.states()[0].rail_family(SecKind::Show).is_none(), "ascending has no bands");
+    assert!(browse.jobs.is_empty(), "…and asks for none: {:?}", browse.jobs);
+}
+
+/// …and a fixed family's key does not carry it, whatever day the ask hands over.
+#[test]
+fn a_fixed_familys_key_does_not_carry_the_day_the_ask_hands_over() {
+    let _g = plx_base::testlock::serial();
+    let (_cleanup, mut browse, sid, _client) = banded_source(SecKind::Movie, &["rating", "addedAt"]);
     assert!(browse.state.set_sort_by_key("rating", true));
     tick_directory(&mut browse, sid, LibraryWork::Letters { today: Some([2026, 11, 1]) });
     let (job, _port) = the_directory_job(&mut browse);

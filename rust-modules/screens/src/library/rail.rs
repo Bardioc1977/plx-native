@@ -1,19 +1,20 @@
 //! The rail owned by MasterDetail: the A-Z letters of a title sort, or the BANDS of a value sort
-//! (`95% 90% ... <75%`, `Rating`, `Duration`, `Unplayed`, `Plays`). Only Input owns its focused or
-//! remembered element.
+//! (`95% 90% ... <75%`, `Rating`, `Duration`, `Unplayed`, `Plays`, and the calendar sorts `Today Oct
+//! ... Jan 2025 ...` and `2026 2020s ...`). Only Input owns its focused or remembered element.
 //!
 //! One part serves both because the logic is the same: an element is a place in the listing
 //! (`starts`, the index of its first item, with one trailing entry where the last one ends), an element
 //! no item starts is dimmed and focus steps over it, and a move inside the rail scrolls the grid to the
 //! element's first card at once (`LibraryScreen::follow`). What differs is only where the elements come
 //! from (`/firstCharacter` counts, or the data job's band offsets), their labels, their geometry
-//! ([`BandRows`]: a 40 px pitch, centred on 1834, in a column as wide as its widest label) and what
+//! ([`BandRows`]: a 40 px pitch, centred on 1834, one 8 px step where a calendar's scale changes, in a
+//! column as wide as its widest label) and what
 //! wears the focus (a disc behind a letter, a pill around a band's label). The items a value sort
 //! leaves out (no rating, never viewed) lie before the first band or after the last and belong to
 //! none, so a grid card among them marks no current band.
 use std::ffi::CString;
 use super::identity::{KeyRegistry, KeyRegion, region_of_elem};
-use super::layout::{band_track_w, rail_geom, rail_pitch, rail_scroll_target, BandRows, BAND_PILL_H, BAND_PILL_PAD, RAIL_TRACK_W};
+use super::layout::{band_pill_pad, band_track_w, rail_geom, rail_pitch, rail_scroll_target, BandRows, BAND_PILL_H, RAIL_TRACK_W};
 use super::rail_bands;
 use crate::registry::{LibraryIdentity, LibraryLike, LibrarySectionIdentity};
 use plx_ui::consts::K_SCROLL;
@@ -33,9 +34,10 @@ fn focus_fill(p: plx_ui::Painter, rect: Rect) {
 }
 
 /// The focused band's pill, centred on its row `slot`: the board's 38 high with 12 px each side of the
-/// label, built as the shared [`focus_pill`] around the plate it grows from.
+/// label, less for a label too wide for that (`band_pill_pad`), built as the shared [`focus_pill`]
+/// around the plate it grows from.
 fn band_pill(slot: Rect, label_w: f32) -> Rect {
-    let plate_w = label_w + 2.0 * (BAND_PILL_PAD - PILL_FOCUS_OUTSET);
+    let plate_w = label_w + 2.0 * (band_pill_pad(label_w) - PILL_FOCUS_OUTSET);
     let plate_h = BAND_PILL_H - 2.0 * PILL_FOCUS_OUTSET;
     focus_pill(Rect::new(slot.cx() - plate_w * 0.5, slot.cy() - plate_h * 0.5, plate_w, plate_h))
 }
@@ -177,7 +179,8 @@ impl RailPart {
     /// survives a language change and never collides with a letter of the same text.
     fn refresh_bands<H: LibraryLike>(&mut self, cx: &Cx<'_, H>, keys: &mut KeyRegistry, section: &LibrarySectionIdentity) {
         let Some(offsets) = H::listing(cx).bands() else { self.clear_projection(); return };
-        let mut widths = Vec::with_capacity(offsets.bands.len());
+        let marks: Vec<_> = offsets.bands.iter().map(|band| band.band.mark()).collect();
+        let mut widths = Vec::with_capacity(marks.len());
         for (index, band) in offsets.bands.iter().enumerate() {
             self.starts.push(band.start as usize);
             let identity = rail_bands::identity(band.band.mark());
@@ -187,7 +190,7 @@ impl RailPart {
             self.labels.push(label);
         }
         self.starts.push(offsets.bands.last().map_or(0, |last| (last.start + last.size) as usize));
-        let rows = BandRows::new(self.elems.len(), &[]);
+        let rows = BandRows::new(self.elems.len(), &rail_bands::steps(&marks));
         let (y, cx_rail, height, max) = rows.geom();
         let track_w = band_track_w(widths.iter().copied().fold(0.0, f32::max));
         self.rect = Rect::new(cx_rail - track_w * 0.5, y, track_w, height);
@@ -375,7 +378,9 @@ impl<H: LibraryLike> Focusable<H> for RailPart {
     }
     fn reconcile(&self, want: FocusKey<u32>, _: &Cx<'_, H>) -> FocusKey<u32> {
         if self.elems.contains(&want.elem) { want } else {
-            self.elems.first().map(|elem| FocusKey { entry: self.entry, elem: *elem }).unwrap_or(want)
+            // A key the rail no longer holds lands on the first element focus can stop on: on a calendar
+            // rail the first is `Today`, often an empty band `neighbour` never rests on.
+            self.elems.get(self.skip_empty(0)).map(|elem| FocusKey { entry: self.entry, elem: *elem }).unwrap_or(want)
         }
     }
     fn seat(&self, _: GroupId, from: Placed, _: &Cx<'_, H>) -> FocusKey<u32> {
@@ -742,6 +747,19 @@ mod tests {
         let lead = ascending.rail();
         let first = lead.seat(lead.group, placed(2), &ascending.cx(lead.entry, None));
         assert_eq!(first, FocusKey { entry: lead.entry, elem: lead.elems[0] }, "a leading unrated item seats on the first band");
+    }
+
+    #[test]
+    fn a_pill_around_a_wide_label_gives_air_back_and_stays_inside_the_track() {
+        let _guard = plx_base::testlock::serial();
+        for label_w in [60.0f32, 100.0, 111.0, 113.0, 116.0] {
+            let track = band_track_w(label_w);
+            let pill = band_pill(Rect::new(0.0, 0.0, track, 40.0), label_w);
+            assert!((pill.w - (label_w + 2.0 * band_pill_pad(label_w))).abs() < 0.01, "{label_w}: pill {} wide", pill.w);
+            assert!(pill.x >= -0.01 && pill.x + pill.w <= track + 0.01, "{label_w}: the pill {pill:?} leaves its {track} track");
+            assert!((pill.cx() - track * 0.5).abs() < 0.01 && pill.h == BAND_PILL_H, "{label_w}: centred and 38 high");
+        }
+        assert!((band_pill(Rect::new(0.0, 0.0, 84.0, 40.0), 60.0).w - 84.0).abs() < 0.01, "a label that fits keeps the board's 12 each side");
     }
 
     #[test]

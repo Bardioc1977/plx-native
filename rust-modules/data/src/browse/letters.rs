@@ -26,10 +26,14 @@
 //! ([`SecState::shown_bands`]) keyed by the same terms and the sort's [`BandFamily`], so [`LettersKey`]
 //! carries the family (`None` for the letters) and, for a calendar family, the day it was counted on
 //! (`today`, a field of the key and no `gen`: the bands are that day's, so a day turn is a new key and
-//! asks once more, and a fixed ladder's key never carries it). The direction is
-//! deliberately NOT in the key: the counts are of values, and a landed [`BandRail`] holds the layout
-//! of both directions, so a flip of the direction asks the server nothing. A family that a watch
-//! moves (`BandFamily::moves_with_viewing`) takes the viewing generation as an Unwatched key does.
+//! asks once more, and a fixed ladder's key never carries it). While that read is out the rail keeps
+//! showing the previous day's bands, when the day is all that differs ([`SecState::shown_bands`]),
+//! whichever of the two slots holds them (a round trip through another sort or the Unwatched switch
+//! leaves them in the kept one): a focus seated in the rail must not lose it to a second of nothing.
+//! The direction is deliberately NOT in the key: the counts are of values, and a landed [`BandRail`]
+//! holds the layout of both directions, so a flip of the direction asks the server nothing. A family
+//! that a watch moves (`BandFamily::moves_with_viewing`) takes the viewing generation as an Unwatched
+//! key does.
 //! A read whose counts were not trusted lands as a list with no rail, not as a failure
 //! ([`SecState::land_bands`]): over a listing that held still the answer would not change on a retry,
 //! so only a moved key asks again (a listing that moved under the reads is a failure, and is asked
@@ -75,6 +79,17 @@ impl LettersKey {
     /// values a watch changes.
     fn viewing_sensitive(&self) -> bool {
         sensitive(self.family, self.unwatched)
+    }
+
+    /// Is this the count [`Self::is`] describes, asked on ANOTHER day: the same family, terms and
+    /// generation, and a calendar family's `today` the only difference?
+    fn is_but_for_the_day(&self, family: Option<BandFamily>, today: Option<Day>, unwatched: bool, genre: Option<&str>, gen: u32) -> bool {
+        self.today.is_some() && today.is_some() && self.today != today && self.is(family, self.today, unwatched, genre, gen)
+    }
+
+    /// [`Self::is_but_for_the_day`] against another key.
+    fn of_another_day_than(&self, other: &LettersKey) -> bool {
+        self.is_but_for_the_day(other.family, other.today, other.unwatched, other.genre.as_deref(), other.gen)
     }
 }
 
@@ -259,20 +274,37 @@ impl SecState {
             .filter(|family| family.rail_ready() && (family.basis().is_none() || self.today.is_some()))
     }
 
-    /// The verdict of the band counts that describe the listing the grid shows now, if one is on
-    /// hand: `Some(Some(rail))` a rail, `Some(None)` counted and not trusted or empty (no rail).
-    fn bands_verdict(&self, kind: SecKind) -> Option<&Option<Arc<BandRail>>> {
-        self.bands_verdict_for(self.rail_family(kind)?)
+    /// What the rail shows: the verdict of the band counts that describe the listing the grid shows now
+    /// ([`Self::bands_verdict_for`]; `Some(Some(rail))` a rail, `Some(None)` counted and not trusted or
+    /// empty, no rail) or, while this day's read is out, the one the day before counted. A
+    /// calendar rail is re-asked when the day turns, and a rail that vanished for the length of a read
+    /// would take a focus seated in it away; the previous day's bands (same family, same terms, same
+    /// generation, only `today` differs) are a second off and stand until the new verdict lands
+    /// ([`Self::land_bands`] drops them then). They are looked for in both slots, as the verdict is: a
+    /// round trip through another sort or the Unwatched switch leaves them in the kept one.
+    fn bands_on_screen(&self, kind: SecKind) -> Option<&Option<Arc<BandRail>>> {
+        let family = self.rail_family(kind)?;
+        self.bands_verdict_for(family).or_else(|| {
+            let (unwatched, genre) = self.applied_terms();
+            let (gen, today) = (self.key_gen(sensitive(Some(family), unwatched)), self.key_today(family));
+            self.bands_slots()
+                .find(|(key, _)| key.is_but_for_the_day(Some(family), today, unwatched, genre, gen))
+                .map(|(_, verdict)| verdict)
+        })
     }
 
-    /// [`Self::bands_verdict`] for `family`, whether or not the rail is ready for it.
+    /// The two slots of landed band counts, the landed one first.
+    fn bands_slots(&self) -> impl Iterator<Item = &(LettersKey, Option<Arc<BandRail>>)> {
+        [self.bands.as_ref(), self.bands_kept.as_ref()].into_iter().flatten()
+    }
+
+    /// The verdict of the band counts of `family` asked under the terms and the day the grid has NOW, if
+    /// one is on hand, whether or not the rail is ready for the family.
     pub(super) fn bands_verdict_for(&self, family: BandFamily) -> Option<&Option<Arc<BandRail>>> {
         let (unwatched, genre) = self.applied_terms();
         let gen = self.key_gen(sensitive(Some(family), unwatched));
         let today = self.key_today(family);
-        [self.bands.as_ref(), self.bands_kept.as_ref()]
-            .into_iter()
-            .flatten()
+        self.bands_slots()
             .find(|(key, _)| key.is(Some(family), today, unwatched, genre, gen))
             .map(|(_, verdict)| verdict)
     }
@@ -280,12 +312,13 @@ impl SecState {
     /// The rail of the band counts that describe the listing the grid shows now; like
     /// [`Self::shown_letters`], the one place a bands list is picked, at the READ site.
     pub(super) fn shown_bands(&self, kind: SecKind) -> Option<&Arc<BandRail>> {
-        self.bands_verdict(kind)?.as_ref()
+        self.bands_on_screen(kind)?.as_ref()
     }
 
-    /// Does a bands list on hand describe the listing the grid shows now (a rail or a verdict)?
+    /// Is a bands list on screen for the listing the grid shows now (a rail or a verdict, the previous
+    /// day's included while this day's is out)?
     pub(super) fn bands_current(&self, kind: SecKind) -> bool {
-        self.bands_verdict(kind).is_some()
+        self.bands_on_screen(kind).is_some()
     }
 
     /// Is a bands read owed: the sort has a ladder, no list on hand describes the grid, and a failed
@@ -328,6 +361,9 @@ impl SecState {
     pub(super) fn land_bands(&mut self, key: LettersKey, rail: Option<BandRail>) {
         let landed = rail.map(Arc::new);
         match self.bands.take() {
+            // The previous day's list of the same terms is of no use once this day's is here: it is dropped
+            // and the kept slot (another set of terms) stays.
+            Some(previous) if previous.0.of_another_day_than(&key) => {}
             Some(previous) if previous.0 != key => {
                 self.bands_kept = (!previous.0.viewing_sensitive()).then_some(previous);
             }
@@ -336,6 +372,11 @@ impl SecState {
                     self.bands_kept = None;
                 }
             }
+        }
+        // …and so is a previous day's list the kept slot holds (the day's list a round trip through another
+        // sort or the Unwatched switch left there), which the on-screen fallback stands on until now.
+        if self.bands_kept.as_ref().is_some_and(|(kept, _)| kept.of_another_day_than(&key)) {
+            self.bands_kept = None;
         }
         self.bands = Some((key, landed));
         self.bands_backoff = None;
