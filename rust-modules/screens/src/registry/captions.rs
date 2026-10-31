@@ -11,7 +11,9 @@
 //!
 //! - [`policy`] is the stored setting as the ui's [`CaptionPolicy`], read through
 //!   `plx_media::route::under_posters()`. A test pins one setting for its thread with
-//!   [`TEST_UNDER_POSTERS`] instead of writing the process-wide cell.
+//!   [`TEST_UNDER_POSTERS`] instead of writing the process-wide cell; a test that holds neither the
+//!   pin nor `testlock::serial()` (the lock every writer of that cell holds) reads the default, so
+//!   it never sees the value of another thread's Settings test.
 //! - [`label`] words the focused block from `(policy, facts)`: the Title switch decides whether the
 //!   title line shows, the Details picker what the second line says. **A line the setting turns on
 //!   is never drawn empty, for any kind of tile** (`plx_ui::caption_policy::caption_lines`): the title
@@ -41,7 +43,7 @@ use plx_ui::cards::TileLabel;
 /// sort value under every card (the Under posters page's Sort value switch), with the same test override as policy().
 pub fn sort_value() -> bool {
     #[cfg(test)]
-    if let Some(setting) = TEST_UNDER_POSTERS.with(|cell| cell.get()) {
+    if let Some(setting) = test_setting() {
         return setting.sort_value;
     }
     plx_media::route::under_posters().sort_value
@@ -52,10 +54,22 @@ pub fn sort_value() -> bool {
 /// every card instead.
 pub fn policy() -> CaptionPolicy {
     #[cfg(test)]
-    if let Some(setting) = TEST_UNDER_POSTERS.with(|cell| cell.get()) {
+    if let Some(setting) = test_setting() {
         return crate::registry::caption_policy_of(setting);
     }
     crate::registry::caption_policy_of(plx_media::route::under_posters())
+}
+
+/// The setting a test reads: its thread's pin, else (when the thread holds neither the pin nor the
+/// `testlock::serial()` guard that every writer of the process-wide cell holds) the default, so an
+/// unlocked test cannot see a value another thread's test has put in the cell for the length of its
+/// own run. A thread that holds `serial()` has the live cell to itself and reads it (the Settings
+/// tests write it and read it back); a pin wins over both.
+#[cfg(test)]
+fn test_setting() -> Option<plx_plex::plex::session::UnderPosters> {
+    TEST_UNDER_POSTERS
+        .with(|cell| cell.get())
+        .or_else(|| (!plx_base::testlock::held()).then_some(plx_plex::plex::session::UnderPosters::DEFAULT))
 }
 
 #[cfg(test)]
