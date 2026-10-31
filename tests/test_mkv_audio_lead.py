@@ -16,6 +16,7 @@ the script writes back. The script refuses such a field with a message instead."
 import contextlib
 import io
 import pathlib
+import struct
 import sys
 import tempfile
 import unittest
@@ -37,19 +38,21 @@ def track_entry(number, kind):
 
 
 def simple_block(track, rel_ms):
-    return m.elem(m.SIMPLEBLOCK, bytes([0x80 | track]) + rel_ms.to_bytes(2, "big") + b"\x80" + b"\x55" * 16)
+    """A SimpleBlock; the offset from the Cluster's Timestamp is a SIGNED 16-bit field."""
+    return m.elem(m.SIMPLEBLOCK, bytes([0x80 | track]) + struct.pack(">h", rel_ms) + b"\x80" + b"\x55" * 16)
 
 
-def mkv(crc, entries=None, timestamp=None):
+def mkv(crc, entries=None, timestamp=None, audio_rel=5):
     """EBML header, then a Segment with Tracks (CRC-32 child first, as ffmpeg writes it; video = 1,
     audio = 2), a Void of non-zero bytes, and one Cluster holding a video and an audio block.
-    `entries` replaces the two TrackEntry children, `timestamp` the Cluster's Timestamp payload."""
+    `entries` replaces the two TrackEntry children, `timestamp` the Cluster's Timestamp payload and
+    `audio_rel` the audio block's (signed) offset from it."""
     if entries is None:
         entries = track_entry(1, 1) + track_entry(2, 2)
     tracks = m.elem(TRACKS, m.elem(CRC32, crc) + entries)
     padding = m.elem(VOID, b"\xaa" * 20000)
     stamp = uint(0) if timestamp is None else timestamp
-    cluster = m.elem(m.CLUSTER, m.elem(m.TIMESTAMP, stamp) + simple_block(1, 0) + simple_block(2, 5))
+    cluster = m.elem(m.CLUSTER, m.elem(m.TIMESTAMP, stamp) + simple_block(1, 0) + simple_block(2, audio_rel))
     segment = m.SEGMENT.to_bytes(4, "big") + b"\x01\xff\xff\xff\xff\xff\xff\xff" + tracks + padding + cluster
     return m.elem(EBML, b"") + segment
 
@@ -102,6 +105,24 @@ class WideIntegerFields(unittest.TestCase):
 
     def test_a_cluster_timestamp_wider_than_the_four_bytes_it_is_written_back_in_is_refused(self):
         self.assertIn("Cluster Timestamp", self.refused(timestamp=b"\x01" + b"\x00" * 4))
+
+    def test_a_cluster_timestamp_that_fits_four_bytes_alone_but_not_with_a_block_offset_is_refused(self):
+        # 0xFFFFFFFF is four bytes wide, but the audio block sits 5 ms after it and is written into a
+        # cluster of its own: the timestamp that is written back is 2**32 + 4.
+        self.assertIn("does not fit", self.refused(timestamp=b"\xff\xff\xff\xff"))
+
+    def test_a_block_offset_below_a_zero_cluster_timestamp_is_refused(self):
+        # Timestamp 0, the audio block 5 ms BEFORE it (a signed offset): the audio cluster would have
+        # to start at -5, which an unsigned field cannot hold.
+        self.assertIn("does not fit", self.refused(timestamp=uint(0), audio_rel=-5))
+
+    def test_a_zero_padded_cluster_timestamp_of_any_ebml_width_is_still_read(self):
+        # Bounded by value, as the TrackNumber is: padding does not change a zero.
+        for width in (5, 8):
+            with self.subTest(width=width):
+                line, out = run(self.CRC, timestamp=bytes(width))
+                self.assertIn("tracks={1: 1, 2: 2}", line)
+                self.assertTrue(out.startswith(m.elem(EBML, b"")))
 
     def test_an_eight_byte_track_number_is_still_read(self):
         # EBML's maximum, with leading zeros as a padded writer emits it.
