@@ -322,10 +322,11 @@ popup menu is too pixelated" was, 2026-08-20 to 2026-08-21.
 - **The tab track's weight is SOLVED, not chosen** (`widgets::track_alpha_for`). A panel carries a
   page of copy at `TEXT_PRIMARY` and can hold one number; a 76px band whose idle labels are the
   dimmest ink in the app cannot, because the ground it sits on is a different picture every eight
-  seconds. So the ink stands still and the material moves: five pixels are read back from under the
-  bar every thirtieth drawn frame, and the scrim is set to the lightest weight at which those labels
-  still clear 3:1 — floored at the design's `--glass-track-top` and capped at the flat capsule's own
-  `.72`. Measured on the set: a dark hero leaves it at the floor, a bright cyan one takes it to .562.
+  seconds. So the ink stands still and the material moves: five patches of the bar's own backdrop
+  image (the blurred ground the labels sit on, which the frame already holds) are copied at a frame
+  boundary and read back once per `GROUND_SAMPLE_EVERY` drawn frames, and the scrim is set to the
+  lightest weight at which those labels still clear 3:1 — floored at the design's
+  `--glass-track-top` and capped at the flat capsule's own `.72`. Measured on the set: a dark hero leaves it at the floor, a bright cyan one takes it to .562.
   The readback is why the rate is low — it stalls a tiler — and the frame rate is unchanged at it.
   **Do not read the ground from `UltraBlurColors`.** That is Plex's derived palette for an ambient
   wash, not the top of the picture: for the hero that measures (0.00, 0.68, 0.91) on the panel it

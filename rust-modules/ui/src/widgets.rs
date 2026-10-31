@@ -6880,8 +6880,9 @@ fn density_k(drawn: f32, want: f32) -> f32 {
 
 /// The weight being drawn, and the one the ground last asked for.
 ///
-/// `want` is published by the DRAW because the ground is framebuffer 0 and only the draw can read
-/// it; [`TabBand::step`] consumes it on the next frame. That one frame of lag is nothing against a
+/// `want` is published by the DRAW because the ground is the band's retained backdrop image and
+/// only the visible walk can see it (`backdrop::member_image` answers `None` anywhere else);
+/// [`TabBand::step`] consumes it on the next frame. That one frame of lag is nothing against a
 /// value that eases over hundreds of milliseconds, and it is the only ordering that does not put a
 /// readback in the update phase.
 ///
@@ -7752,10 +7753,12 @@ impl StripRender {
         // itself holds still, so those pixels are the app ground fading, not the screen's colour.
         let settled = crate::nav::page_alpha() >= 0.999;
         // **Decided BEFORE the ground is sampled, because it decides whether to sample at all.**
-        // `sample_ground` queues five framebuffer copies and reads them back later — so a track
-        // that is about to draw FLAT because the `flattabs` experiment is armed (the only thing
-        // that turns `glass_on` off) must not pay for a number only the glass path consumes. It
-        // did, on every screen wearing the bar, for as long as the app was open.
+        // `sample_ground` reads its taps from the retained image of the band this track's glass
+        // draws from — so a track that is about to draw FLAT because the `flattabs` experiment is
+        // armed (the only thing that turns `glass_on` off) has no band and no image, and there is
+        // nothing to read: its ground is the flat app ground, and `groundlog` says so (`src=flat`).
+        // It used to pay five framebuffer copies for a number only the glass path consumes, on every
+        // screen wearing the bar, for as long as the app was open.
         let glass_on = tab_glass_on();
         let groundlog = ground_log_armed();
         // …and FASTER while a polarity is being decided: the decision is gated on two independent
@@ -7763,8 +7766,12 @@ impl StripRender {
         // showing the material the bar is about to stop being.
         let (cr, cg, cb) = theme::CLEAR_RGB; // the app ground, as the token that names it
         let flat_ground = [cr, cg, cb];
-        let ground = if glass_on || groundlog {
-            plx_gfx::gfx::sample_ground([track.x, track.y, track.w, track.h], settled)
+        let ground = if glass_on {
+            // The rect the glass below is DRAWN at: the painter's placement (a lifted or zoomed
+            // chrome band) is part of it, and the band the ground is read from is found by that
+            // rect (`gfx::sample_ground`), so the unplaced `track` would match no band.
+            let at = p.place(track);
+            plx_gfx::gfx::sample_ground([at.x, at.y, at.w, at.h], settled)
                 .unwrap_or(flat_ground)
         } else {
             flat_ground
@@ -7773,7 +7780,11 @@ impl StripRender {
         // instrument that says what it read and what it chose is not optional. It is how the first
         // version of this was caught reading Plex's `UltraBlurColors`, which gave (0.30,0.23,0.18)
         // for a hero whose top edge is (0.00,0.68,0.91) and left the bar at its floor.
-        if groundlog {
+        // The VISIBLE walk's draw only: the declaration and source walks draw this bar too, and
+        // `sample_ground` refuses them (`blur_source_pass`), so a count landing on one would print
+        // `src=held` for a draw that was never going to read, and with a whole number of draws per
+        // frame the count lands on the same walk every time.
+        if groundlog && !plx_gfx::gfx::blur_source_pass() {
             // A safe atomic rather than `static mut`: a plain sample counter, same shape as
             // the diagnostic counters.
             static LAST: AtomicU32 = AtomicU32::new(0);
@@ -7788,12 +7799,16 @@ impl StripRender {
                 // thing it was armed to watch.
                 let drawn = track_density(ground, &mut band.density);
                 plx_base::eventlog::log(&format!(
-                    "track_ground rgb={:.3},{:.3},{:.3} L*={:.1} span={:.1} want={:.3} drawn={:.3} rect={:.0},{:.0},{:.0},{:.0}",
+                    "track_ground rgb={:.3},{:.3},{:.3} L*={:.1} span={:.1} want={:.3} drawn={:.3} rect={:.0},{:.0},{:.0},{:.0} src={}",
                     ground[0], ground[1], ground[2],
                     lstar([ground[0], ground[1], ground[2], 1.0]),
                     plx_gfx::gfx::ground_span(),
                     track_alpha_for(ground), drawn,
                     track.x, track.y, track.w, track.h,
+                    // where the ground came from: the band's image, nothing found this frame (the
+                    // last reading, or the flat ground before the first), a call refused before it
+                    // looked (the last reading), or no glass at all
+                    if !glass_on { "flat" } else { plx_gfx::gfx::ground_source().word() },
                 ));
             }
             LAST.store(n.wrapping_add(1), Relaxed);
