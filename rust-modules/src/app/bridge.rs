@@ -1476,7 +1476,8 @@ impl Bridge {
     }
 
     /// TEST ONLY: the Library listing's page reads park in the test runner (it starts them on a
-    /// worker by default, like the Home Hubs read), for a rig that grades the reads an entry started.
+    /// worker by default, like the Home Hubs read), for a rig that grades the reads an entry started
+    /// and for the route Worlds, which land them on the test thread in `World::step`.
     #[cfg(test)]
     pub(crate) fn park_page_reads_for_test(&mut self) {
         self.store_runner.park_page_reads();
