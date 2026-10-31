@@ -171,6 +171,19 @@ impl Client {
         self.get_json(&section_directory_path(section_key, directory, filters))
     }
 
+    /// How many items of a section satisfy `terms`: one count-only read, `GET
+    /// /library/sections/{key}/all?<terms>` with `X-Plex-Container-Start: 0` and `X-Plex-Container-Size:
+    /// 0`, which answers no rows and the number as `totalSize`. `terms` are the wire terms in the
+    /// order `/all` sends them: the listing's own filters ([`section_items_query`](Self::section_items_query),
+    /// `type=`, `unwatched`/`unwatchedLeaves`, `genre`) and, for a band edge, the range term after them
+    /// (`rating>>` and `9.49`). Every key is percent-encoded (`rating%3E%3E=9.49`; a filter's key comes
+    /// out unchanged), so the grid's terms are byte for byte the page request's. `None` when the read
+    /// did not answer; [`SectionTotal::Ignored`] when it answered ROWS (the window was ignored, and
+    /// will be again). Docs: `docs/pms-api.md`, "Count probes at band edges".
+    pub fn section_total(&self, section_key: i64, terms: &[(String, String)]) -> Option<SectionTotal> {
+        total_of_probe(&self.get_json(&section_total_path(section_key, terms))?)
+    }
+
     /// A SHOW's language settings (its Advanced dialog in Plex Web: `audioLanguage`,
     /// `subtitleLanguage`, `subtitleMode`) — see [`crate::plex::ShowLangPrefs`]. None when they
     /// cannot be read.
@@ -432,6 +445,36 @@ fn section_directory_path(section_key: i64, directory: &str, filters: &[(String,
     query.build()
 }
 
+/// The path of [`Client::section_total`]: `/all` with `terms` (every key and value encoded) and the
+/// count-only window, which `paged_path` spells (`Start=0`, `Size=0`: `Size` alone is ignored).
+fn section_total_path(section_key: i64, terms: &[(String, String)]) -> String {
+    let mut query = QueryBuilder::new(format!("/library/sections/{section_key}/all"));
+    for (k, v) in terms {
+        query = query.range(k, v);
+    }
+    paged_path(&query.build(), PageReq::window(0, 0))
+}
+
+/// What a count-only read ([`Client::section_total`]) found, when the server answered at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SectionTotal {
+    /// The number of items that match: `totalSize`.
+    Count(i64),
+    /// The reply carried rows and no count: the server ignored the `Size=0` window. It answers the
+    /// same to every such read, so a caller does not ask again for another answer.
+    Ignored,
+}
+
+/// The count a `Size=0` probe answered: `totalSize`, or [`SectionTotal::Ignored`] for a reply with
+/// rows (read with no `totalSize` as 0 by the lenient parse, which is no count). A negative
+/// `totalSize` is no answer.
+fn total_of_probe(container: &MediaContainer) -> Option<SectionTotal> {
+    if container.total_size < 0 {
+        return None;
+    }
+    Some(if container.metadata.is_empty() { SectionTotal::Count(container.total_size) } else { SectionTotal::Ignored })
+}
+
 /// PMS's numeric `type` for a `plex://<kind>/<id>` guid — the metadata provider's own kind, which is
 /// the one thing about an item a guid states outright.
 ///
@@ -472,6 +515,46 @@ mod tests {
         assert_eq!(
             section_directory_path(2, "firstCharacter", &terms(&[("type", "3"), ("unwatchedLeaves", "1")])),
             "/library/sections/2/firstCharacter?type=3&unwatchedLeaves=1");
+    }
+
+    /// A count probe is `/all` with the listing's terms, then the range term, then the count-only
+    /// window; the operator in the key is encoded and the listing's own terms are not changed.
+    #[test]
+    fn a_total_probe_is_the_listings_terms_then_the_encoded_range_then_the_count_window() {
+        let window = "X-Plex-Container-Start=0&X-Plex-Container-Size=0";
+        assert_eq!(section_total_path(1, &[]), format!("/library/sections/1/all?{window}"));
+        let grid = terms(&[("type", "2"), ("unwatchedLeaves", "1"), ("genre", "7")]);
+        let mut probe = grid.clone();
+        probe.push(("rating>>".into(), "9.49".into()));
+        assert_eq!(section_total_path(4, &probe),
+            format!("/library/sections/4/all?type=2&unwatchedLeaves=1&genre=7&rating%3E%3E=9.49&{window}"));
+        // the filters come out as the page request sends them, byte for byte
+        let page = section_directory_path(4, "all", &grid);
+        assert!(section_total_path(4, &grid).starts_with(&page), "{page}");
+        // a date edge's inclusive operator, a scoped field and a negative value
+        assert_eq!(section_total_path(2, &terms(&[("addedAt>", "1793422800")])),
+            format!("/library/sections/2/all?addedAt%3E=1793422800&{window}"));
+        assert_eq!(section_total_path(2, &terms(&[("episode.addedAt>", "-315619200")])),
+            format!("/library/sections/2/all?episode.addedAt%3E=-315619200&{window}"));
+    }
+
+    fn container(json: &str) -> MediaContainer {
+        serde_json::from_str(json).expect("a container")
+    }
+
+    /// The count is `totalSize`, however the server spells the number; an answer that carries rows
+    /// is a read whose window was ignored, and is no count.
+    #[test]
+    fn a_total_probe_reads_total_size_and_refuses_an_answer_with_rows() {
+        let count = |n| Some(SectionTotal::Count(n));
+        assert_eq!(total_of_probe(&container(r#"{"size":0,"totalSize":38,"offset":0}"#)), count(38));
+        assert_eq!(total_of_probe(&container(r#"{"size":0,"totalSize":"38"}"#)), count(38));
+        assert_eq!(total_of_probe(&container(r#"{"size":0,"totalSize":0}"#)), count(0), "a real zero");
+        assert_eq!(total_of_probe(&container(r#"{"size":2,"Metadata":[{"ratingKey":"1"},{"ratingKey":"2"}]}"#)),
+            Some(SectionTotal::Ignored), "rows and no totalSize: the window was ignored");
+        assert_eq!(total_of_probe(&container(r#"{"size":1,"totalSize":9,"Metadata":[{"ratingKey":"1"}]}"#)),
+            Some(SectionTotal::Ignored), "rows are never a count-only answer");
+        assert_eq!(total_of_probe(&container(r#"{"totalSize":-1}"#)), None);
     }
 
     #[cfg(feature = "devtriggers")]
