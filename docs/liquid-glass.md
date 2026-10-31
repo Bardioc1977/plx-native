@@ -353,6 +353,11 @@ no longer priced by §2.
 `chrome_alpha` exists so it holds still while the pages swap under it — so a material that changes
 when you cross between those three breaks the one illusion that code was written to preserve. Either
 all three or none; "glass on Home only" is not an option, however tempting the frame budget makes it.
+**Nor does the bar's WIDTH decide it (2026-10-30):** the bar gains entries and its labels change
+length with the language, so no strip drops to the flat capsule for being wide (it used to, past a
+~672 px cap that silently took the glass from the Belarusian bar); a strip past `TAB_VIEW_MAX`
+scrolls inside a track that stays glass, and the unfurled profile chip is kept off the track by
+eliding its name to the room the bar leaves (`widgets::chip_name_budget`).
 It ships, and `/tmp/plxnative-flattabs` is the way back to the flat capsule for a comparison.
 Its density is not a constant — see §6.
 
@@ -372,6 +377,7 @@ it never joins the top band's grab — and the 300k px² moving-host ceiling the
 - Never over video.
 - Whole surfaces, not scattered ornaments — area alone does not predict the five-pass cost.
 - In steady state, adjacent glass samples the page rather than refracting adjacent glass.
+- Neighbours in the shared band keep one source unless their drawn rects overlap: sitting inside each other's blur reach (68 px) does not split the band.
 - Keep 68 px clear of the screen edge, 60 px minimum short side.
 - Put it over something with colour in it, or it is an expensive way to draw the flat material.
 - Over still chrome it is free; moving glass targets every changed successful present.
