@@ -269,6 +269,27 @@ fn an_unsized_body_is_not_given_the_silence_deadline() {
     assert_eq!(srv.heads().len(), 1, "a transcode that is slow is not a cut: {:?}", srv.heads());
 }
 
+/// FORCING (fails-first, removed by the next commit): the body of the test above with the test
+/// thread descheduled for 20 ms between starting the releaser and taking `began`, as a loaded
+/// runner does for a few milliseconds. The read is correct; only the measuring is skewed.
+#[test]
+fn forced_the_duration_assertion_fails_when_the_test_thread_lags() {
+    let _serial = plx_base::testlock::serial();
+    let srv = ShortBody::start(UNSIZED_HEAD, true, false);
+    let release = srv.release.clone();
+    let quiet = BODY_SILENCE * 3;
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(quiet);
+        release.store(true, Ordering::Release);
+    });
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let began = std::time::Instant::now();
+    let (got, end) = with_sized_source(srv.port, -1, read_to_end);
+    let _ = releaser.join();
+    assert!(began.elapsed() >= quiet, "the read returned before the server spoke again");
+    assert_eq!((got.as_slice(), end), (&b"ABCDEFGH"[..], AVERROR_EOF));
+}
+
 /// The reopen of a sized body must come back from the byte asked for. A server that ignores the
 /// Range answers 200 from byte 0; splicing that in as the bytes at the cut is corruption that
 /// looks like success.
