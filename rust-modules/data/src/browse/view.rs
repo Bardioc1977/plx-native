@@ -118,6 +118,36 @@ impl ListingSnapshot {
         self
     }
 
+    /// A fixture listing sorted by the server sort `key` (the fixture's one sort is `titleSort`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_sort_key(self, key: &str) -> Self {
+        self.with_sorts(&[(key, key)], 0)
+    }
+
+    /// A fixture listing offering `sorts` (key, title), sorted by the one at `index`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_sorts(mut self, sorts: &[(&str, &str)], index: usize) -> Self {
+        if let Some(data) = &mut self.data {
+            data.sorts = Arc::new(sorts.iter().map(|(key, title)| SortEntry {
+                desc_key: String::new(),
+                key: (*key).into(),
+                title: (*title).into(),
+                default_desc: false,
+            }).collect());
+            data.sort_idx = index;
+        }
+        self
+    }
+
+    /// A fixture listing with the Unwatched filter on or off.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_unwatched(mut self, on: bool) -> Self {
+        if let Some(data) = &mut self.data {
+            data.unwatched = on;
+        }
+        self
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn absent() -> Self {
         Self { data: None }

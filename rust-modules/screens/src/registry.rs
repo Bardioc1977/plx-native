@@ -1319,6 +1319,20 @@ pub trait LibraryLike: AppLike<Memory = PageMemory> + Sized {
     fn collections_count(_cx: &Cx<'_, Self>, _section: usize) -> Option<Result<u32, Forbidden>> {
         None
     }
+
+    /// **Today's calendar date** in the viewer's time zone, `[year, month, day]`: an INPUT the
+    /// Library words its date values by ("Today", "Yesterday", "27 Oct" this year, "Oct 2024" any
+    /// other), `None` when the host has none (every date then reads as month and year). A screen
+    /// reads no clock and fetches no date: the application's loop publishes it once per frame (it
+    /// reads the platform's calendar date at most once a minute, `app::clock::today`) and a screen
+    /// only receives the answer through its views, the way a frame's time arrives on a `Tick` and
+    /// the playback session on the frame's publication. The caption cache keys its labels on it, so
+    /// they rebuild when the day turns.
+    ///
+    /// CONTRACT FREEZE: a provided method so every existing host compiles.
+    fn today(_cx: &Cx<'_, Self>) -> Option<[i32; 3]> {
+        None
+    }
 }
 
 /// The server refused the collections listing (HTTP 401/403): the answer is final for the identity
