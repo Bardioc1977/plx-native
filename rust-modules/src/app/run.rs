@@ -6804,6 +6804,11 @@ mod lifecycle_regression_tests {
     /// stored while the flight is still out is cleared by the reload in the very frame that would
     /// have acted on it, and the page never leaves the player. Wait for the flight to land and the
     /// engine to settle, then store the end.
+    ///
+    /// The store is bare on purpose: `SHARED.ended` is stored `true` in production only by the pump
+    /// (`player/pump.rs:2491`, on the frame it sees the stream end); `request_seek` and the
+    /// session reload store `false`. This stands in for that one store, made once nothing can
+    /// reload the session under it.
     fn end_the_stream(app: &mut App, t: &mut u32) {
         poll_until("the rig engine's failed-open recovery never settled", || {
             step(app, t, vec![]);
@@ -8619,7 +8624,11 @@ mod lifecycle_regression_tests {
         assert!(!plx_media::route::play_pending(), "the credits alone must not request the successor");
         assert_eq!(plx_media::route::up_next(&rig.app.player.session).unwrap().rk, "2");
 
-        // No engine in this rig (the state is forced), so nothing recovers under the end.
+        // No engine in this rig (the state is forced), so nothing recovers under the end. This bare
+        // store is not the forced path of #1111: no pump runs here (the test calls `playback_tick`
+        // directly), so no flight's landing can be drained and reload the session between this store
+        // and the read. `end_the_stream` waits for a failed-open recovery of a rig ENGINE and has
+        // nothing to wait for in this rig; do not "fix" this into a call to it.
         plx_media::player::SHARED.ended.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut fr = Frame::begin(&rig.app.player.session, rig.app.bridge.metadata_view());
         fr.now = t;
