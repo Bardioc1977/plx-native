@@ -25,17 +25,28 @@ use super::{Client, Credential, ServerId};
 /// `instance` is the client OBJECT: immutable, drawn once from the process-wide generation
 /// sequence when the client is built, and every client is leaked and never freed, so two keys
 /// with equal `instance` name the same object. `token` is the credential the client held then
-/// ([`Client::token_gen`]), which moves on a retoken without replacing the object. Equal keys
-/// therefore say "the same client, asking with the same credential".
+/// ([`Client::token_gen`]), which moves on a retoken without replacing the object. `grant` is
+/// WHOSE credential it was ([`Client::grant_epoch`]): it survives a live token replaced by another
+/// live one and moves across a revocation, so a step that keeps what a server served through a
+/// refresh can tell a refresh from a change of identity. Every `grant` move also moves `token`, so
+/// equal keys still say "the same client, asking with the same credential".
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ClientKey {
     pub instance: u32,
     pub token: u32,
+    pub grant: u32,
 }
 
 impl ClientKey {
+    /// The key of `client` now. `token` and `grant` are read as ONE [`Client::credential`], so a
+    /// reading never pairs a moved token with the previous identity; a poisoned token lock falls
+    /// back to the two separate reads.
     pub fn of(client: &Client) -> Self {
-        Self { instance: client.instance_gen(), token: client.token_gen() }
+        let instance = client.instance_gen();
+        match client.credential() {
+            Some(Credential { token_gen, grant_epoch }) => Self { instance, token: token_gen, grant: grant_epoch },
+            None => Self { instance, token: client.token_gen(), grant: client.grant_epoch() },
+        }
     }
 }
 
@@ -63,11 +74,12 @@ impl HeldClient {
     pub fn of(client: &Client) -> Self {
         let instance = client.instance_gen();
         match client.credential() {
-            Some(Credential { token_gen, grant_epoch }) => {
-                Self { key: ClientKey { instance, token: token_gen }, grant: Some(grant_epoch) }
-            }
+            Some(Credential { token_gen, grant_epoch }) => Self {
+                key: ClientKey { instance, token: token_gen, grant: grant_epoch },
+                grant: Some(grant_epoch),
+            },
             // A poisoned token lock: no proof of the identity, so none is claimed.
-            None => Self { key: ClientKey { instance, token: client.token_gen() }, grant: None },
+            None => Self { key: ClientKey::of(client), grant: None },
         }
     }
 
@@ -165,6 +177,11 @@ impl ClientKeys {
         }
         ClientKeys(kept)
     }
+
+    /// Every slot that held a client, with its key, in fill order.
+    pub fn iter(&self) -> impl Iterator<Item = (ServerId, ClientKey)> + '_ {
+        self.0.iter().map(|&(sid, held)| (sid, held.key))
+    }
 }
 
 /// A key-checked way to a server's client, for a WORKER that holds the snapshot its step decided
@@ -223,7 +240,11 @@ mod tests {
         let after = ClientKey::of(&a);
         assert_eq!(after.instance, before.instance, "a token swap does not replace the client");
         assert_ne!(after.token, before.token, "…but it moves the credential");
+        assert_eq!(after.grant, before.grant, "…not whose it is: a live token replaced by a live one");
         assert_ne!(after, before);
+
+        a.set_token("");
+        assert_ne!(ClientKey::of(&a).grant, after.grant, "a revocation changes whose credential it is");
     }
 
     #[test]
@@ -239,14 +260,14 @@ mod tests {
 
     #[test]
     fn a_key_given_for_a_slot_is_answered_as_given_and_the_first_entry_wins() {
-        let (first, second) = (ClientKey { instance: 2, token: 1 }, ClientKey { instance: 3, token: 1 });
+        let (first, second) = (ClientKey { instance: 2, token: 1, grant: 1 }, ClientKey { instance: 3, token: 1, grant: 1 });
         let keys = ClientKeys::from_keys([(ServerId::UNSET, first), (ServerId::UNSET, second)]);
         assert_eq!(keys.key(ServerId::UNSET), Some(first), "from_keys does not special-case any slot");
     }
 
     #[test]
     fn a_refill_replaces_the_contents_in_place() {
-        let (old, new) = (ClientKey { instance: 1, token: 1 }, ClientKey { instance: 2, token: 5 });
+        let (old, new) = (ClientKey { instance: 1, token: 1, grant: 1 }, ClientKey { instance: 2, token: 5, grant: 1 });
         let mut keys = ClientKeys::from_keys((0..8).map(|i| (ServerId::from_raw(i), old)));
         let capacity = keys.0.capacity();
         keys.refill([(ServerId::from_raw(0), new)]);
@@ -312,8 +333,10 @@ mod tests {
 
     // ---- the grant: which identity a credential spoke for --------------------------------------
 
+    /// A key written as a value; `ClientKey::grant` is 0 throughout (the `HeldClient::grant` the
+    /// test gives a slot is the identity these tests judge by).
     fn key(instance: u32, token: u32) -> ClientKey {
-        ClientKey { instance, token }
+        ClientKey { instance, token, grant: 0 }
     }
 
     fn sid(n: u16) -> ServerId {
