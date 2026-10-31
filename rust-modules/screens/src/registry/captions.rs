@@ -318,6 +318,17 @@ fn the_sort_value_switch_reads_the_same_thread_override_as_policy() {
 mod isolation_tests {
     use super::*;
 
+    /// Puts the live Under posters setting back to the default when it drops, on a panic too, so a
+    /// failing assertion cannot leave the non-default value in the process-wide cell for the Settings
+    /// tests that run after it. Declare it AFTER the `serial()` guard: it drops first, under the lock.
+    struct DefaultOnDrop;
+
+    impl Drop for DefaultOnDrop {
+        fn drop(&mut self) {
+            plx_media::route::restore_under_posters(plx_plex::plex::session::UnderPosters::DEFAULT);
+        }
+    }
+
     #[test]
     fn an_unlocked_unpinned_reader_sees_the_default_while_a_locked_one_sees_the_live_setting() {
         use plx_plex::plex::session::{UnderPosters, UnderPostersDetails};
@@ -327,11 +338,12 @@ mod isolation_tests {
         // Another test, as the Settings tests are: holds `serial()` and has the live cell off the default.
         let other = std::thread::spawn(move || {
             let _serial = plx_base::testlock::serial();
+            let _back = DefaultOnDrop;
             plx_media::route::restore_under_posters(held);
             let locked_reader_sees_the_live_setting = policy() == crate::registry::caption_policy_of(held) && !sort_value();
             ready_tx.send(locked_reader_sees_the_live_setting).unwrap();
-            done.recv().unwrap();
-            plx_media::route::restore_under_posters(UnderPosters::DEFAULT);
+            // A closed channel means the test thread panicked: fall through to the guard either way.
+            let _ = done.recv();
         });
         let locked_saw_live = ready.recv().unwrap();
         // This thread holds neither the lock nor a pin, as a screen test that builds a page does not.
