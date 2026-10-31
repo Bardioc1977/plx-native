@@ -282,28 +282,28 @@ pad back to the roster.
 
 Reached from any library pill in the top strip. A poster grid, four-way navigable, with:
 
-- **Sort** and **Filter** pills above the grid (left), each reading its current choice;
-- an **A–Z rail** down the right edge, which jumps the grid to a letter;
+- one **sort** control at the right of the header row, reading its current choice (the sort icon, the criterion and a down chevron; its Sort & Filter menu also holds the filters), beside the **Collections** and **Recommended** places;
+- an **A–Z rail** down the right edge, which jumps the grid to a letter, or on a value sort (Score, Duration, Unplayed, Plays) to a band;
 - watched check marks on the cards.
 
 **CH ▲ / CH ▼ page the grid**, which is the fast way through a large library.
 
-**BACK here climbs one region a press, and from the bar it leaves for Home.** From the A–Z rail BACK
-returns to the grid; from deep in the grid it returns to the top of the page — a deep shelf is as far
-from the head as a deep grid row is; from the top it steps to the Sort/Filter header, from the header
+**BACK here climbs one region a press, and from the bar it leaves for Home.** From the A–Z rail (or a
+value sort's band rail) BACK returns to the grid; from deep in the grid it returns to the top of the page — a deep shelf is as far
+from the head as a deep grid row is; from the top it steps to the header row, from the header
 to the tab bar, and from the bar it hands the screen back. UP is still the one-press route to the
 strip; the header and bar steps exist so that BACK can never loop between them. The Collections and
 Recommended pages pop to the page that opened them from the top of their content, from their header or
 from the bar. (This said "two steps: to the tab row, then Home" until 2026-09-05, and "ONE step to the
 head of the library, and a second leaves for Home" after it.)
 
-Sort and Filter open as **popovers over the live grid**, never as full-screen sheets:
+The Sort & Filter menu opens as a **popover over the live grid**, never as a full-screen sheet:
 
 ![Library sort menu](screenshots/ux-library-sort.jpg)
 
 The options are the ones the **server** reports for that section, not a hardcoded list; the current
 choice carries a check and its direction as a word ("A–Z", "Newest first"), and OK on the current choice reverses the direction.
-BACK closes the popover and returns focus to the pill.
+BACK closes the popover and returns focus to the sort control.
 
 ### 5.5 Search
 
@@ -829,7 +829,7 @@ The needed captures are all reachable on the bench with the boot triggers docume
 
 - Key codes: LG's evdev→scancode table in the television's own `libSDL2-2.0.so.0.4.1`, plus 336
   captured key lines. Settled 2026-08-22.
-- Transport state-mark rule: `rust-modules/src/ui/player_hud.rs::transport_mark`.
+- Transport state-mark rule: `rust-modules/appkit/src/player_hud/state.rs::transport_mark`.
 - Key dispatch: `rust-modules/src/ui/consts.rs::classify` and `rust-modules/src/app.rs`'s ladder.
 - Screen map: the `Route` enum in `rust-modules/src/app.rs` and `ui::trail`.
 - Audio: `Makefile` `LIBS_REAL`, and `SDL_Init(SDL_INIT_VIDEO)` in `rust-modules/src/app.rs`.
