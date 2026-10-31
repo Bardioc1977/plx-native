@@ -38,11 +38,11 @@
 //! * **No `extensions`**: a field a later build adds is not carried by this one.
 use super::{
     Fallback, Parse, ProfileKeyed, ProfileRecords, Preferences, Row, Scope, Setting, SettingsWrite, StampedRecord,
-    InstantDpadSeekingPref, AudioEnhancementsPref, DeckPressPref, DirectPlayModePref, HdrOverlayBrightnessPref, NextEpisodeModePref, QualityPref, SkipIntervalPref,
+    DolbyVisionModePref, InstantDpadSeekingPref, AudioEnhancementsPref, DeckPressPref, DirectPlayModePref, HdrOverlayBrightnessPref, NextEpisodeModePref, QualityPref, SkipIntervalPref,
     SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref, TrailerAutoplayPref, UnderPostersPref,
 };
 use crate::plex::session::{
-    InstantDpadSeeking, DeckPress, DirectPlayMode, HdrOverlayBrightness, NextEpisodeMode, PlaybackQuality, Seat, Session, SkipInterval, SubtitlePosition,
+    DolbyVisionMode, InstantDpadSeeking, DeckPress, DirectPlayMode, HdrOverlayBrightness, NextEpisodeMode, PlaybackQuality, Seat, Session, SkipInterval, SubtitlePosition,
     SubtitleSize, SubtitleTone, UnderPosters,
 };
 use crate::plex::AudioEnhancements;
@@ -70,6 +70,8 @@ pub struct ProfilePrefs {
     pub skip_interval: Option<SkipInterval>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "super::de_soft_opt")]
     pub instant_dpad_seeking: Option<InstantDpadSeeking>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "super::de_soft_opt")]
+    pub dolby_vision_mode: Option<DolbyVisionMode>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "super::de_soft_opt")]
     pub deck_press: Option<DeckPress>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "super::de_soft_opt")]
@@ -107,6 +109,7 @@ impl ProfilePrefs {
             under_posters,
             audio_enhancements,
             trailer_autoplay,
+            dolby_vision_mode,
         } = older;
         macro_rules! fill {
             ($($field:ident),* $(,)?) => {$(
@@ -129,6 +132,7 @@ impl ProfilePrefs {
             under_posters,
             audio_enhancements,
             trailer_autoplay,
+            dolby_vision_mode,
         );
     }
 }
@@ -214,6 +218,7 @@ profile_setting!(
     NextEpisodeModePref = next_episode_mode,
     SkipIntervalPref = skip_interval,
     InstantDpadSeekingPref = instant_dpad_seeking,
+    DolbyVisionModePref = dolby_vision_mode,
     DeckPressPref = deck_press,
     UnderPostersPref = under_posters,
     AudioEnhancementsPref = audio_enhancements,

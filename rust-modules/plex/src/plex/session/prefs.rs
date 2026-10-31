@@ -46,7 +46,7 @@
 //! owner is unknown prunes the foreign records but keeps the owner-stamped ones. Plaintext consent
 //! is the exception and stays bound to the sign-in (`grant::account_key`).
 use super::{
-    InstantDpadSeeking, DeckPress, DirectPlayMode, HdrOverlayBrightness, LastLibrary, LibraryViews, NativeAudioRefusal, NextEpisodeMode, OpaqueExtensions,
+    DolbyVisionMode, InstantDpadSeeking, DeckPress, DirectPlayMode, HdrOverlayBrightness, LastLibrary, LibraryViews, NativeAudioRefusal, NextEpisodeMode, OpaqueExtensions,
     PlaintextConsent, HoldHintTaught, PlaybackQuality, ServerKeyPin, Session, SkipInterval, SubtitleOffsetEntry, SubtitleOffsets, SubtitlePosition,
     SubtitleSize, SubtitleTone, UiResolution, UnderPosters,
 };
@@ -135,6 +135,9 @@ pub struct Preferences {
     /// Hidden-HUD D-pad jumps; off by default.
     #[serde(default, deserialize_with = "de_soft_instant_dpad_seeking", skip_serializing_if = "InstantDpadSeeking::is_default")]
     pub instant_dpad_seeking: InstantDpadSeeking,
+    /// Dolby Vision override (`Auto` or `Off`); `Auto` by default.
+    #[serde(default, deserialize_with = "de_soft_dolby_vision_mode", skip_serializing_if = "DolbyVisionMode::is_default")]
+    pub dolby_vision_mode: DolbyVisionMode,
     /// **What OK does on a Continue Watching card** — see [`DeckPress`]. A frozen fallback like
     /// [`Preferences::playback_quality`]: each profile keeps its own pick in `profile_prefs`, and a
     /// profile that has not picked reads this top-level key. Absence is Details, so a session written
@@ -518,6 +521,8 @@ setting!(NextEpisodeModePref: NextEpisodeMode = next_episode_mode, "next_episode
     account false, live true, settings Some(SettingsWrite::Confirm), parse Soft);
 setting!(InstantDpadSeekingPref: InstantDpadSeeking = instant_dpad_seeking, "instant_dpad_seeking", Profile fallback LegacyInstallKey,
     account false, live true, settings Some(SettingsWrite::Confirm), parse Soft);
+setting!(DolbyVisionModePref: DolbyVisionMode = dolby_vision_mode, "dolby_vision_mode", Profile fallback LegacyInstallKey,
+    account false, live true, settings Some(SettingsWrite::Confirm), parse Soft);
 setting!(SkipIntervalPref: SkipInterval = skip_interval, "skip_interval", Profile fallback LegacyInstallKey,
     account false, live true, settings Some(SettingsWrite::Confirm), parse Soft);
 setting!(DeckPressPref: DeckPress = deck_press, "deck_press", Profile fallback LegacyInstallKey,
@@ -634,6 +639,7 @@ pub const DESCRIPTORS: &[Descriptor] = &[
     Descriptor::of::<NextEpisodeModePref>(),
     Descriptor::of::<SkipIntervalPref>(),
     Descriptor::of::<InstantDpadSeekingPref>(),
+    Descriptor::of::<DolbyVisionModePref>(),
     Descriptor::of::<DeckPressPref>(),
     Descriptor::of::<UnderPostersPref>(),
     Descriptor::of::<AudioEnhancementsPref>(),
@@ -1412,6 +1418,17 @@ where
         return Ok(InstantDpadSeeking::default());
     };
     Ok(serde_json::from_value::<InstantDpadSeeking>(v).unwrap_or_default())
+}
+
+/// Dolby Vision mode is a preference too: a spelling this build does not know degrades to Auto.
+fn de_soft_dolby_vision_mode<'de, D>(d: D) -> Result<DolbyVisionMode, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Ok(v) = serde_json::Value::deserialize(d) else {
+        return Ok(DolbyVisionMode::default());
+    };
+    Ok(serde_json::from_value::<DolbyVisionMode>(v).unwrap_or_default())
 }
 
 /// The deck-press mode is a preference too: a spelling this build does not know degrades to Details.

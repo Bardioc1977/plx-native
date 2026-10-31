@@ -674,3 +674,41 @@ fn a_seat_with_a_stamp_other_than_the_mirror_seed_reads_nothing() {
     restore(&record(stored_prefs(), own), &Seat::Seated { user: "pal".into(), stamp: stamp() }, Overrides::default());
     assert_eq!(subtitle_size(), SubtitleSize::Small, "control: under the seed's own stamp the pick is read");
 }
+
+// ---- Dolby Vision override (Settings > Playback) -----------------------------------------------
+
+struct DolbyVisionBack;
+impl Drop for DolbyVisionBack {
+    fn drop(&mut self) {
+        restore_dolby_vision_mode(DolbyVisionMode::DEFAULT);
+    }
+}
+
+#[test]
+fn dolby_vision_mode_is_picked_into_the_seated_profiles_record_and_follows_the_seat() {
+    let _g = plx_base::testlock::serial();
+    let session = session::TempSession::new("dolby-vision-mode");
+    let _restore = Put::back(cells());
+    let _back = DolbyVisionBack;
+    session.seated("u1", TOKEN);
+    let mut legacy = record(Preferences::default(), vec![]);
+    legacy.client_id = "cid-test".into();
+    session::save(&legacy);
+    seed_profile_prefs_for_test(&session::peek());
+    restore_profile_rows(&session::peek(), &seat("u1"), Overrides::default());
+    assert_eq!(dolby_vision_mode(), DolbyVisionMode::Auto);
+
+    assert!(confirm::<DolbyVisionModePref>(DolbyVisionMode::Off));
+    assert_eq!(dolby_vision_mode(), DolbyVisionMode::Off);
+    let after = session::load();
+    assert_eq!(after.prefs.dolby_vision_mode, DolbyVisionMode::Auto, "the TV's key is untouched");
+    assert_eq!(own_of::<DolbyVisionModePref>(&after.prefs.profile_prefs, "u1"), Some(DolbyVisionMode::Off));
+
+    session.seated("u2", TOKEN);
+    restore_profile_rows(&session::peek(), &seat("u2"), Overrides::default());
+    assert_eq!(dolby_vision_mode(), DolbyVisionMode::Auto, "another profile reads the default");
+
+    session.seated("u1", TOKEN);
+    restore_profile_rows(&session::peek(), &seat("u1"), Overrides::default());
+    assert_eq!(dolby_vision_mode(), DolbyVisionMode::Off, "u1 seated again restores Off");
+}
