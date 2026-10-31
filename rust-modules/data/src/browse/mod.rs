@@ -479,6 +479,28 @@ impl SortEntry {
         crate::sortfacts::SortFact::of_pms_key(&self.key).is_some()
     }
 
+    /// Is this the entry that orders a `listing` by title, the order the `/firstCharacter` counts sum
+    /// in? The A-Z letters rail needs exactly that order, ascending
+    /// ([`view::ListingView::rail_available`] adds the direction).
+    ///
+    /// The section's own listing and the collections list say `titleSort`. Seasons and episodes do
+    /// NOT: the server declares a COMPOSITE (`show.titleSort,index` for seasons,
+    /// `show.titleSort,season.index:nullsLast,...` for episodes) and counts the letters by the SHOW's
+    /// title, which the prefix sums land on only in that declared order (the default order is the same
+    /// one), never in the literal `titleSort`'s (`docs/pms-api.md`, "Count probes for seasons and
+    /// episodes"). Their Title entry is therefore the one whose FIRST comma-separated term is exactly
+    /// `show.titleSort`, read on the key as the server lists it: not through
+    /// [`crate::sortfacts::SortFact::of_pms_key`], which strips the table prefix and so would take a
+    /// literal `titleSort`, a `title` or an `episode.titleSort,...` key for it too (the letters land
+    /// on none of those orders: 41 of 48 seasons and 125 of 525 episodes over the literal one).
+    pub fn is_title_order(&self, listing: LibraryType) -> bool {
+        // Exhaustive on purpose: a fifth listing must decide here.
+        match listing {
+            LibraryType::Primary | LibraryType::Collections => self.key == "titleSort",
+            LibraryType::Seasons | LibraryType::Episodes => self.key.split(',').next() == Some("show.titleSort"),
+        }
+    }
+
     /// The word for the order this entry is in when `desc`: "A–Z", "Newest first". `None` for a
     /// key whose axis is unknown (a random order has no ends).
     pub fn direction_word(&self, desc: bool) -> Option<&'static str> {
@@ -600,9 +622,11 @@ struct SecState {
     /// The same for the saved genre: false only while its existence check could not be read, so
     /// the library opened unfiltered but the record still holds the genre.
     genre_resolved: bool,
-    /// per-letter (label, count) in titleSort order, from `/firstCharacter` — the letter rail. They
-    /// count the listing [`Self::letters_for`] names and are shown only while that is the listing the
-    /// grid shows, or the kept list is ([`SecState::shown_letters`], `letters.rs`).
+    /// per-letter (label, count) in the listing's Title order, from `/firstCharacter` (`titleSort` for
+    /// the section's own listing and collections, the declared composite for seasons and episodes:
+    /// `SortEntry::is_title_order`) — the letter rail. They count the listing [`Self::letters_for`]
+    /// names and are shown only while that is the listing the grid shows, or the kept list is
+    /// ([`SecState::shown_letters`], `letters.rs`).
     letters: Arc<Vec<(String, i64)>>,
     /// What `letters` counted; `None` = no list has landed (or it was forgotten).
     letters_for: Option<LettersKey>,
@@ -626,6 +650,10 @@ struct SecState {
     bands_kept: Option<(LettersKey, Option<Arc<bands::BandRail>>)>,
     /// A failed bands read of this key, and the steps left before it is asked again.
     bands_backoff: Option<(LettersKey, u32)>,
+    /// Today's date as the Library's last ask handed it in (`LibraryWork::Letters`), the same for every
+    /// section ([`BrowseState::note_today`]): an INPUT, never a clock read. A calendar family's key
+    /// carries it, and none has bands without it.
+    today: Option<bands::Day>,
     /// The grid's own view (sort, genre, menus), set aside while the section is on the Collections
     /// listing and put back when it returns to the type it was on ([`LoanedView`]). The letters are
     /// not loaned: every type change forgets them and the listing it lands on asks again.
@@ -844,6 +872,7 @@ impl Default for SecState {
             bands: None,
             bands_kept: None,
             bands_backoff: None,
+            today: None,
             loaned: None,
             hubs: Default::default(),
             fetch: SecFetch::Loading,
@@ -1845,6 +1874,14 @@ impl BrowseState {
             plx_machine::idle::invalidate();
         }
     }
+    /// Take the date the Library's ask carries into every section's state, where a calendar family's key
+    /// reads it. A new day is a new key, so the bands counted on yesterday are no longer shown and the
+    /// next ask counts them again.
+    fn note_today(&mut self, today: Option<bands::Day>) {
+        for state in &mut self.states {
+            state.today = today;
+        }
+    }
     fn kick_genres(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
         jobs: &mut Vec<crate::stores::StoreJob>) {
         self.kick_directory(adapter, keys, jobs, listing_jobs::Directory::Genres);
@@ -1856,7 +1893,8 @@ impl BrowseState {
     /// The rail's data is asked on the one tick the screens send for it: the letters, and the bands
     /// when the sort has them (a title sort owes none, so its tick is the letters' alone).
     fn kick_rail(&mut self, adapter: &Arc<BrowseAdapter>, keys: &ClientKeys,
-        jobs: &mut Vec<crate::stores::StoreJob>) {
+        jobs: &mut Vec<crate::stores::StoreJob>, today: Option<bands::Day>) {
+        self.note_today(today);
         self.kick_letters(adapter, keys, jobs);
         self.kick_directory(adapter, keys, jobs, listing_jobs::Directory::Bands);
     }
@@ -1944,7 +1982,7 @@ impl BrowseState {
                 }
                 match work {
                     LibraryWork::Want { lo, hi, focus } => self.want(lo, hi, focus),
-                    LibraryWork::Letters => self.kick_rail(adapter, keys, jobs),
+                    LibraryWork::Letters { today } => self.kick_rail(adapter, keys, jobs, today),
                     LibraryWork::Genres => self.kick_genres(adapter, keys, jobs),
                     LibraryWork::Retry => self.retry_cur_source(),
                     LibraryWork::Requery => {
@@ -2135,7 +2173,7 @@ impl BrowseState {
             return false;
         };
         let title_asc = match state.sorts.get(state.sort_idx) {
-            Some(sort) => sort.key == "titleSort" && !state.sort_desc,
+            Some(sort) => sort.is_title_order(state.library_type) && !state.sort_desc,
             None => true,
         };
         title_asc && state.shown_letters().is_some_and(|letters| letters.len() > 1)
