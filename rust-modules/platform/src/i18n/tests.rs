@@ -886,3 +886,70 @@ fn dutch_system_locale_resolves_with_regional_formatting() {
     assert_eq!(nl.format_locale(), "nl-NL");
     assert_eq!(nl.decimal(45, 1), "4,5");
 }
+
+#[test]
+fn a_local_midnight_is_refused_for_a_date_that_is_not_on_the_calendar() {
+    for date in [[2026, 0, 1], [2026, 13, 1], [2026, 1, 0], [2026, 1, 32], [2026, 2, 29], [2026, 4, 31], [2026, -1, 5],
+        [2026, 6, -3], [i32::MIN, 1, 1]] {
+        assert_eq!(local_midnight(date), None, "{date:?}");
+    }
+    assert!(local_midnight([2024, 2, 29]).is_some(), "a leap day exists");
+}
+
+/// The first moment of a date in the zone under test, read in a child process: libc's zone state is
+/// process-wide, so each zone gets a fresh process (the Library's sort-date test does the same) and the
+/// other tests of this crate never see `TZ` change. The child is this very test with `TZ` and the
+/// expected stamps in its environment; the parent runs it once per zone and checks that it passed.
+#[test]
+fn local_midnight_follows_the_zone_and_the_clock_change_of_each_date() {
+    // Literals from an independent calendar (Python's `calendar.timegm`), shifted by hand by the zone's
+    // offset on that date: never from this code. Each case is `TZ`, then date and stamp pairs.
+    type Case = (&'static str, &'static [([i32; 3], i64)]);
+    const CASES: [Case; 5] = [
+        ("UTC0", &[([2026, 3, 8], 1_772_928_000), ([2026, 3, 9], 1_773_014_400)]),
+        ("JST-9", &[([2026, 3, 8], 1_772_895_600), ([2026, 3, 9], 1_772_982_000)]),
+        // The US clock change of 2026: forward on 8 March (the 8th starts at -5, the 9th at -4, so the
+        // two midnights are 23 hours apart) and back on 1 November (-4 on the 1st, -5 on the 2nd: 25).
+        ("EST5EDT,M3.2.0,M11.1.0", &[
+            ([2026, 3, 8], 1_772_946_000), ([2026, 3, 9], 1_773_028_800),
+            ([2026, 11, 1], 1_793_505_600), ([2026, 11, 2], 1_793_595_600),
+        ]),
+        // Zones whose clocks change AT MIDNIGHT, where `mktime(00:00, tm_isdst = -1)` has no single right
+        // answer. Chile-shaped (UTC-4, DST -3, both changes at 24:00 on a Saturday): Sunday 6 September
+        // has no 00:00 (04:00Z, std, is 01:00 DST) so its first instant is that 04:00Z, and the Saturday
+        // before it begins at its own 00:00 (04:00Z, unshifted); 23:00 of Saturday 4 April happens twice
+        // and Sunday 5 April begins at 04:00Z once, the Saturday at 00:00 DST (03:00Z).
+        ("<-04>4<-03>,M9.1.6/24,M4.1.6/24", &[
+            ([2026, 9, 5], 1_788_580_800), ([2026, 9, 6], 1_788_667_200),
+            ([2026, 4, 4], 1_775_271_600), ([2026, 4, 5], 1_775_361_600),
+        ]),
+        // US Central with the fall-back at 01:00 DST: 00:00-01:00 of 1 November happens twice, 05:00Z
+        // (CDT) and 06:00Z (CST); the day begins at the first.
+        ("CST6CDT,M3.2.0,M11.1.0/1", &[([2026, 11, 1], 1_793_509_200), ([2026, 11, 2], 1_793_599_200)]),
+    ];
+    const CHILD: &str = "PLX_LOCAL_MIDNIGHT_CASE";
+    if let Ok(case) = std::env::var(CHILD) {
+        let (_, expected) = CASES[case.parse::<usize>().unwrap()];
+        for &(date, stamp) in expected {
+            assert_eq!(local_midnight(date), Some(stamp), "{date:?}");
+            // …and it is the first moment of that date, to the second, in the zone the OS reads
+            assert_eq!(local_calendar_date(stamp), Some(date), "{date:?} at its midnight");
+            assert_eq!(local_calendar_date(stamp - 1).map(|day| day != date), Some(true), "{date:?} a second before");
+        }
+        return;
+    }
+    // libtest names a test without its crate, and exits 0 when the name matches nothing: the child must
+    // say it ran one test and passed it.
+    let name = format!(
+        "{}::local_midnight_follows_the_zone_and_the_clock_change_of_each_date",
+        module_path!().split_once("::").unwrap().1
+    );
+    for (index, (zone, _)) in CASES.iter().enumerate() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--test-threads=1"])
+            .env("TZ", zone).env(CHILD, index.to_string()).output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && stdout.contains("1 passed"),
+            "local midnight failed (or ran nothing) under {zone}:\n{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+    }
+}
