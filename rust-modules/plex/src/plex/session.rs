@@ -53,9 +53,9 @@
 use super::origin::Origin;
 use super::probe::Location;
 mod playback_options;
-pub use playback_options::InstantDpadSeeking;
+pub use playback_options::{DolbyVisionMode, InstantDpadSeeking};
 
-pub use prefs::{InstantDpadSeekingPref, HoldHintTaughtPref, effective, own_prefs, persist_profile_pref, put_own, stored_effective, tenure, AudioEnhancementsPref,
+pub use prefs::{DolbyVisionModePref, InstantDpadSeekingPref, HoldHintTaughtPref, effective, own_prefs, persist_profile_pref, put_own, stored_effective, tenure, AudioEnhancementsPref,
     DeckPressPref, DirectPlayModePref, HdrOverlayBrightnessPref, NextEpisodeModePref, Preferences, ProfilePrefs, ProfilePrefsPref,
     ProfilePrefsRecord, ProfileSetting, ProfileWrite, QualityPref, Row, Setting, SkipIntervalPref,
     SubtitlePositionPref, SubtitleSizePref, SubtitleTonePref, TrailerAutoplayPref, UiResolutionPref, UnderPostersPref};
@@ -1294,7 +1294,7 @@ pub struct UnderPosters {
     #[serde(deserialize_with = "de_soft_under_posters_details")]
     pub details: UnderPostersDetails,
     /// A library grid sorted by something other than Title or Random shows the sort's value under
-    /// every poster (the Movies and TV Shows grids; the Library's `registry::sort_info`). On by default.
+    /// every card (the Movies, TV Shows, Seasons and Episodes grids; the Library's `registry::sort_info`). On by default.
     #[serde(rename = "sort_value_off", with = "sort_value_off", skip_serializing_if = "sort_value_off::is_on")]
     pub sort_value: bool,
 }

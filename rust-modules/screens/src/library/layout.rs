@@ -54,7 +54,7 @@ pub(super) struct Layout {
     /// The focused grid row's band height under the Under posters setting (0 / 80 / 112; the
     /// legacy 114 until [`with_band_h`](Self::with_band_h)). A pref input, not motion: not in the canon.
     band_h: f32,
-    /// The grid shows a sort value under every poster: rows keep [`plx_ui::cards::SORT_VALUE_ROW_GAP`]
+    /// The grid shows a sort value under every card (a poster or an episode still): rows keep [`plx_ui::cards::SORT_VALUE_ROW_GAP`]
     /// instead of 40 px, and the focused row opens [`plx_ui::cards::SORT_VALUE_BAND_H`]'s share. A pref
     /// and sort input, not motion: not in the canon.
     value_line: bool,
@@ -259,6 +259,95 @@ pub(super) fn rail_scroll_target(scroll: f32, drive: usize, n: usize) -> f32 {
     let drive = drive.min(n.saturating_sub(1)) as f32;
     plx_ui::cards::reveal(scroll, (drive + 2.0) * pitch - height,
         (drive - 1.0) * pitch, max)
+}
+
+/// The centre of a rail of BANDS (the sort's value ladder): ten px nearer the posters than the letters'
+/// ([`RAIL_CX`]), the board's `x 1834`.
+pub(super) const BAND_RAIL_CX: f32 = 1834.0;
+/// The distance between two bands' tops: the board's 40. The letters' pitch is [`rail_pitch`]: 32 at
+/// most, squeezed toward 26 for a long alphabet.
+pub(super) const BAND_PITCH: f32 = 40.0;
+/// The air a band row adds where its scale changes (a calendar rail's months give way to years, its
+/// years to decades): the board's one spacing step. [`BandRows::new`] takes the rows it goes before
+/// (`rail_bands::steps` names them from the bands' marks), and the fixed value ladders have none.
+pub(super) const BAND_STEP_GAP: f32 = theme::space::XS;
+/// The height of the focused band's white pill: the board's 38, which is [`BAND_PITCH`] less the two
+/// px the row keeps above and below it.
+pub(super) const BAND_PILL_H: f32 = 38.0;
+/// The air each side of a band's label inside its pill: the board's 12 for every label that leaves
+/// room for it ([`band_pill_pad`] gives some of it back to a wider one).
+pub(super) const BAND_PILL_PAD: f32 = 12.0;
+/// The least air each side of a label in its pill. A label too wide for [`BAND_PILL_PAD`] either side
+/// within the track limit gives air back down to this and no further.
+pub(super) const BAND_PILL_PAD_MIN: f32 = 4.0;
+/// The widest the rail of bands may be, pill and all: its left edge stays clear of the posters,
+/// which end at [`GRID_RIGHT`] (the grid does not move for it).
+pub(super) const BAND_TRACK_LIMIT_W: f32 = 2.0 * (BAND_RAIL_CX - GRID_RIGHT);
+
+/// The air each side of a label `label_w` wide inside its pill: [`BAND_PILL_PAD`], or what the track limit
+/// leaves of it for a label too wide to have that much, never under [`BAND_PILL_PAD_MIN`]. So a label up to
+/// [`BAND_TRACK_LIMIT_W`] less 24 keeps the board's pill, and one up to the limit less 8 (116 px) is the
+/// widest any band's label may be.
+pub(super) fn band_pill_pad(label_w: f32) -> f32 {
+    ((BAND_TRACK_LIMIT_W - label_w) * 0.5).clamp(BAND_PILL_PAD_MIN, BAND_PILL_PAD)
+}
+
+/// The width of a rail of bands whose widest label is `widest` wide: the letters' [`RAIL_TRACK_W`] at
+/// least, and wide enough for the focus pill around the widest label, never past [`BAND_TRACK_LIMIT_W`].
+pub(super) fn band_track_w(widest: f32) -> f32 {
+    (widest + 2.0 * band_pill_pad(widest)).clamp(RAIL_TRACK_W, BAND_TRACK_LIMIT_W.max(RAIL_TRACK_W))
+}
+
+/// Where the rows of a rail of bands stand: [`BAND_PITCH`] apart, with [`BAND_STEP_GAP`] more before
+/// each row a scale change names. The letters' uniform column is the free functions above; the bands'
+/// rows are not uniform, so their tops are an array and every question is asked of it.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct BandRows {
+    tops: Vec<f32>,
+    total: f32,
+    height: f32,
+}
+
+impl BandRows {
+    /// The rows of `n` bands; `steps` are the indices of the rows that start a new scale (each adds
+    /// [`BAND_STEP_GAP`] above it). The window is the grid's top to the bottom margin, in whole rows.
+    pub(super) fn new(n: usize, steps: &[usize]) -> Self {
+        let mut tops = Vec::with_capacity(n);
+        let mut y = 0.0;
+        for index in 0..n {
+            if index > 0 && steps.contains(&index) { y += BAND_STEP_GAP; }
+            tops.push(y);
+            y += BAND_PITCH;
+        }
+        let avail = RAIL_BOTTOM - RAIL_TOP;
+        let height = if y <= avail + 0.01 { y } else {
+            tops.iter().map(|top| top + BAND_PITCH).take_while(|bottom| *bottom <= avail + 0.01).last()
+                .unwrap_or(BAND_PITCH)
+        };
+        Self { tops, total: y, height }
+    }
+
+    /// The top of row `index` inside the column; one past either end continues at the pitch.
+    pub(super) fn top(&self, index: isize) -> f32 {
+        match usize::try_from(index) {
+            Ok(i) if i < self.tops.len() => self.tops[i],
+            Ok(i) => self.total + (i - self.tops.len()) as f32 * BAND_PITCH,
+            Err(_) => index as f32 * BAND_PITCH,
+        }
+    }
+
+    /// `(top, centre x, window height, scroll range)`, as [`rail_geom`] answers for letters: the
+    /// column starts at the grid's top, and the range is 0 when every band fits.
+    pub(super) fn geom(&self) -> (f32, f32, f32, f32) {
+        (RAIL_TOP, BAND_RAIL_CX, self.height, (self.total - self.height).max(0.0))
+    }
+
+    /// [`rail_scroll_target`] for these rows: the driving band stays one row clear of both fades.
+    pub(super) fn scroll_target(&self, scroll: f32, drive: usize) -> f32 {
+        let (_, _, height, max) = self.geom();
+        let drive = drive.min(self.tops.len().saturating_sub(1)) as isize;
+        plx_ui::cards::reveal(scroll, self.top(drive + 1) + BAND_PITCH - height, self.top(drive - 1), max)
+    }
 }
 
 #[cfg(test)]

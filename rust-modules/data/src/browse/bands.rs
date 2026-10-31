@@ -1,6 +1,9 @@
 //! The bands a value sort's rail shows, and how a probe's COUNTS become rail offsets. Pure data and
-//! functions: no read, no clock, no time zone, no global. Nothing calls it yet; the data job that
-//! asks the counts and the screens that draw the rail come after it.
+//! functions: no read, no clock, no time zone, no global. The data job asks the counts of the
+//! families [`BandFamily::rail_ready`] names (`listing_jobs.rs`, `letters.rs`) and hands the screens a
+//! [`BandRail`]. A calendar family's job also gets `today` on the ask, the viewer's [`Zone`] from the
+//! runner and the oldest year from one extent read ([`BandFamily::extent_read`]); the screens draw
+//! all eight families' bands (`screens/src/library/rail_bands.rs` labels every [`Mark`]).
 //!
 //! The A-Z rail jumps to a letter by the running sum of per-letter counts. PMS has no per-band
 //! directory for a VALUE sort (`/year` and `/decade` carry no `size`), so a band's offset comes from
@@ -84,6 +87,64 @@ pub enum Basis {
     Utc,
 }
 
+/// The viewer's time zone as the two reads of the OS a calendar family needs, handed to a bands job
+/// by the application's runner as plain functions (`plx_platform::i18n::local_midnight` and
+/// `local_calendar_date`): the model and the job body read no zone and no clock themselves, and a test
+/// passes a fake. A civil date to its first moment (asked once per [`Basis::Local`] edge, daylight
+/// saving being per date), and an instant to the civil date it falls on; `None` from either where the
+/// OS cannot say.
+#[derive(Clone, Copy, Debug)]
+pub struct Zone {
+    /// The epoch of the viewer's local midnight at the start of a civil day.
+    pub local_midnight: fn(Day) -> Option<i64>,
+    /// The civil date, in the viewer's zone, of an epoch.
+    pub local_date: fn(i64) -> Option<Day>,
+}
+
+/// A viewer on UTC, for the tests that run the production body: local midnight is UTC midnight and a
+/// local date the UTC one (Howard Hinnant's `civil_from_days`).
+#[cfg(test)]
+pub(super) fn utc_zone() -> Zone {
+    fn civil(epoch: i64) -> Option<Day> {
+        let z = epoch.div_euclid(86_400) + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = yoe + era * 400 + i64::from(month <= 2);
+        Some([i32::try_from(year).ok()?, i32::try_from(month).ok()?, i32::try_from(day).ok()?])
+    }
+    Zone { local_midnight: |date| Some(utc_midnight(date)), local_date: civil }
+}
+
+/// The first year a calendar family draws a band for, whatever its extent says. An extent comes off the
+/// server, and a year before this one (an 1895 film, a bogus `0001-01-01`) would mean a probe for every
+/// year since: [`extent_year`] stops at it, so a rail is at most `current year - 1900 + 13` probes.
+/// The items older than it sit below the lowest edge, in the unlabelled region at the low end of the
+/// value order in both directions, never under a wrong label.
+pub const FIRST_PLAUSIBLE_YEAR: i32 = 1900;
+
+/// The year [`plan`] starts a calendar family's bands from, given the year of the oldest item on
+/// `today`: the extent itself, no earlier than [`FIRST_PLAUSIBLE_YEAR`]. `None` for an extent AFTER
+/// this year, which no item can have (nothing is older than the present), so the family has no rail.
+pub fn extent_year(year: i32, today: Day) -> Option<i32> {
+    (year <= today[0]).then(|| year.max(FIRST_PLAUSIBLE_YEAR))
+}
+
+/// How a calendar family finds its oldest value ([`BandFamily::extent_read`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtentRead {
+    /// The date field of a listed item, sorted `:asc:nullsLast` for the first row.
+    pub field: &'static str,
+    /// Read it from the section's EPISODES (`type=4`, unfiltered) instead of the page's own listing: a
+    /// show row carries no `episode.addedAt`, and the oldest episode is not newer than any show's newest
+    /// one, so the year it gives never cuts a band off. It may leave empty years at the old end.
+    pub episodes: bool,
+}
+
 /// The sorts that have bands, one per board table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BandFamily {
@@ -120,27 +181,48 @@ impl BandFamily {
 
     /// The family a sort has bands in, or `None` (the rail stays hidden, or is the letters'): `key` is
     /// the sort entry's key as the server lists it (`SortEntry::key`), `descending` the direction the
-    /// page asks, `listing` the type the grid lists. Only a section's own listing
-    /// ([`LibraryType::Primary`]) has bands: Seasons and Episodes order by a compound show key and
-    /// Collections list one sort, and the band tables are the films' and the shows'. The WHOLE key is
-    /// read, never its table-stripped tail: `episode.addedAt` is another family than `addedAt`. A key
-    /// of the other library kind has no band (`duration` is not a show field, `unviewedLeafCount` and
-    /// `episode.addedAt` are not movie fields: the server would silently ignore the filter).
-    /// `rating` is offered for both kinds, as the server lists it for both (a show with no rating
-    /// has all its items in the unlabelled region).
+    /// page asks, `listing` the type the grid lists. A section's own listing
+    /// ([`LibraryType::Primary`]) has the bands of the films' and the shows' tables, and a show
+    /// library's EPISODES listing has four of them: date added, date viewed, release date and
+    /// rating (`docs/pms-api.md`, "Count probes for seasons and episodes"). Date added and release
+    /// date were VERIFIED at their edges; the critic rating and the date viewed were accepted as
+    /// filters but no episode had a value on the measured server, so neither was ever checked at an
+    /// edge. They stay mapped, since a library that has values may be exact: a field nobody has a
+    /// value in counts nothing (`bands_available` needs two populated bands: no rail), and a filter
+    /// the server ignored or counts that are not monotone are refused by the read (`count_bands`,
+    /// `BandRail::new`). Its audience score is rounded by the server (no family counts it), its Title has the letters, and
+    /// `unviewedLeafCount`, `duration`,
+    /// `episode.addedAt` and the plays are not episode sorts. Seasons declare Title and Random alone,
+    /// and Collections list one sort: no bands. The WHOLE key is read, never its table-stripped
+    /// tail: `episode.addedAt` is another family than `addedAt`. A key of the other library kind has
+    /// no band (`duration` is not a show field, `unviewedLeafCount` and `episode.addedAt` are not
+    /// movie fields: the server would silently ignore the filter). `rating` is offered for both
+    /// kinds, as the server lists it for both (a show with no rating has all its items in the
+    /// unlabelled region).
     pub fn of_sort(key: &str, descending: bool, kind: SecKind, listing: LibraryType) -> Option<BandFamily> {
-        // Exhaustive on purpose, like `kind_offers_plays_sort`: a fourth type must decide here.
-        match listing {
-            LibraryType::Primary => {}
-            LibraryType::Seasons | LibraryType::Episodes | LibraryType::Collections => return None,
-        }
-        // Exhaustive on purpose too: a fourth kind must decide here. An Other Videos library lists
-        // movie rows (`type=1`, subtype `clip`), so its sorts and fields are the films'; a probe the
-        // server ignores is `Reject`ed like any other, and the rail stays hidden.
+        // Exhaustive on purpose, like `kind_offers_plays_sort`: a fourth kind must decide here. An Other
+        // Videos library lists movie rows (`type=1`, subtype `clip`), so its sorts and fields are the
+        // films'; a probe the server ignores is `Reject`ed like any other, and the rail stays hidden.
         let (movie, show) = match kind {
             SecKind::Movie | SecKind::Video => (true, false),
             SecKind::Show => (false, true),
         };
+        // Exhaustive on purpose too: a fifth type must decide here.
+        match listing {
+            LibraryType::Primary => {}
+            // Episodes exist in a show library only (`LibraryType::offered`); the sorts below are the
+            // four of the episode menu that have a family, and nothing else of it does.
+            LibraryType::Episodes => {
+                return match key {
+                    "rating" => show.then_some(Self::Rating),
+                    "addedAt" => show.then_some(Self::DateAdded),
+                    "lastViewedAt" => show.then_some(Self::DateViewed),
+                    "originallyAvailableAt" => show.then_some(Self::Release),
+                    _ => None,
+                };
+            }
+            LibraryType::Seasons | LibraryType::Collections => return None,
+        }
         match key {
             "rating" => Some(Self::Rating),
             "duration" => movie.then_some(Self::Duration),
@@ -166,6 +248,57 @@ impl BandFamily {
             Self::Plays => super::PLAYS_SORT_KEY,
             Self::Release => "originallyAvailableAt",
         }
+    }
+
+    /// Does the A-Z rail draw this family's bands? THE gate, and the only place to narrow or widen.
+    /// Every family is drawn: the four whose edges are fixed numbers (rating, duration, unplayed,
+    /// plays) need nothing from the viewer's clock or the server's extent, and the calendar ones (date
+    /// added, date viewed, last episode added, release year) are counted with `today` on the ask, the
+    /// [`Zone`] and the extent read, so a calendar family shows no rail until the application has
+    /// handed the Library the day (`rail_family` in `letters.rs` asks for both). The match stays
+    /// exhaustive: a ninth family must decide here.
+    pub fn rail_ready(self) -> bool {
+        match self {
+            Self::Rating
+            | Self::Duration
+            | Self::Unplayed
+            | Self::Plays
+            | Self::DateAdded
+            | Self::DateViewed
+            | Self::LastEpisodeAdded
+            | Self::Release => true,
+        }
+    }
+
+    /// The bands of a family whose edges are fixed numbers, highest first, or `None` for a calendar
+    /// family ([`Self::basis`]), whose bands need `today` and the oldest year ([`plan`]). A fixed
+    /// ladder reads neither, so a caller with no clock gets its plan here instead of inventing a date.
+    pub fn fixed_ladder(self) -> Option<Vec<Band>> {
+        self.basis().is_none().then(|| plan(self, [EARLIEST_YEAR, 1, 1], EARLIEST_YEAR))
+    }
+
+    /// Does a watch move this family's counts? A play count and an unplayed count change with every
+    /// title watched, as a date viewed does; a rating, a duration and a date added do not, and
+    /// neither does the newest episode of a show.
+    pub fn moves_with_viewing(self) -> bool {
+        // Exhaustive on purpose, like `rail_ready`.
+        match self {
+            Self::Plays | Self::Unplayed | Self::DateViewed => true,
+            Self::Rating | Self::Duration | Self::DateAdded | Self::LastEpisodeAdded | Self::Release => false,
+        }
+    }
+
+    /// How the family finds the oldest value for [`plan`]'s `oldest_year`, or `None` for a family with
+    /// fixed edges. `Some` exactly when [`Self::basis`] is: the dates are the ones that need an extent.
+    pub fn extent_read(self) -> Option<ExtentRead> {
+        let (field, episodes) = match self {
+            Self::DateAdded => ("addedAt", false),
+            Self::DateViewed => ("lastViewedAt", false),
+            Self::LastEpisodeAdded => ("addedAt", true),
+            Self::Release => ("originallyAvailableAt", false),
+            Self::Rating | Self::Duration | Self::Unplayed | Self::Plays => return None,
+        };
+        Some(ExtentRead { field, episodes })
     }
 
     /// What the family's civil-date edges are measured against, or `None` for a family whose edges
@@ -543,6 +676,32 @@ pub fn offsets(bands: &[Band], at_or_above: &[u32], total: u32, descending: bool
     Ok(Offsets { lead, bands: starts, tail })
 }
 
+/// The counts of one listing's probes, turned into the rail's layout in BOTH directions once, when
+/// they land. A value sort's counts are in value order and the direction is not part of what was
+/// counted, so a flip of the sort's direction picks the other layout ([`Self::listed`]) and asks
+/// the server nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BandRail {
+    ascending: Offsets,
+    descending: Offsets,
+}
+
+impl BandRail {
+    /// The layouts for `at_or_above` counts of `bands` over a listing of `total` items, or why the
+    /// counts are not trusted ([`offsets`]; a [`Reject`] does not depend on the direction).
+    pub fn new(bands: &[Band], at_or_above: &[u32], total: u32) -> Result<BandRail, Reject> {
+        Ok(BandRail {
+            ascending: offsets(bands, at_or_above, total, false)?,
+            descending: offsets(bands, at_or_above, total, true)?,
+        })
+    }
+
+    /// The layout in the listing's own order, for the direction the page asks.
+    pub fn listed(&self, descending: bool) -> &Offsets {
+        if descending { &self.descending } else { &self.ascending }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,29 +827,55 @@ mod tests {
         assert_eq!(BandFamily::Plays.field(), super::super::PLAYS_SORT_KEY);
     }
 
+    /// **Which listing has which bands** (`docs/pms-api.md`, "Count probes for seasons and episodes"). The
+    /// section's own listing has its tables'; the Episodes listing of a show library has the four sorts
+    /// of its menu that have a family (date added and release date verified at their edges; date viewed
+    /// and rating accepted as filters with no values observed, so no rail where nobody has one) and no other (its audience score is rounded, `unviewedLeafCount`, `duration`, `episode.addedAt` and the
+    /// plays are not its sorts, its Title has the letters); Seasons (Title and Random alone) and
+    /// Collections have none. Both directions, and the other library kind: Episodes exist for a show
+    /// library alone.
     #[test]
-    fn only_a_sections_own_listing_has_bands() {
-        // Seasons, Episodes and Collections list under the same section, with the same sort keys
-        // (`addedAt`, `rating`, ...): the key alone would give them bands they were never designed for.
-        let keyed = [
-            ("rating", true, SecKind::Show),
-            ("rating", false, SecKind::Movie),
-            ("rating", true, SecKind::Video),
-            ("duration", true, SecKind::Movie),
-            ("duration", false, SecKind::Video),
-            ("addedAt", true, SecKind::Show),
-            ("addedAt", false, SecKind::Movie),
-            ("lastViewedAt", true, SecKind::Show),
-            ("viewCount", true, SecKind::Show),
-            ("originallyAvailableAt", false, SecKind::Show),
-            ("unviewedLeafCount", true, SecKind::Show),
-            ("episode.addedAt", true, SecKind::Show),
+    fn which_listing_has_which_bands() {
+        use BandFamily::{DateAdded, DateViewed, Duration, LastEpisodeAdded, Plays, Rating, Release, Unplayed};
+        use LibraryType::{Collections, Episodes, Primary, Seasons};
+        use SecKind::{Movie, Show, Video};
+        let table: [(&str, SecKind, [Option<BandFamily>; 4]); 17] = [
+            // key,                  kind,  [Primary,          Seasons, Episodes,          Collections]
+            ("rating", Show, [Some(Rating), None, Some(Rating), None]),
+            ("rating", Movie, [Some(Rating), None, None, None]),
+            ("addedAt", Show, [Some(DateAdded), None, Some(DateAdded), None]),
+            ("addedAt", Movie, [Some(DateAdded), None, None, None]),
+            ("lastViewedAt", Show, [Some(DateViewed), None, Some(DateViewed), None]),
+            ("originallyAvailableAt", Show, [Some(Release), None, Some(Release), None]),
+            ("originallyAvailableAt", Movie, [Some(Release), None, None, None]),
+            ("duration", Movie, [Some(Duration), None, None, None]),
+            ("duration", Show, [None, None, None, None]),
+            ("unviewedLeafCount", Show, [Some(Unplayed), None, None, None]),
+            ("episode.addedAt", Show, [Some(LastEpisodeAdded), None, None, None]),
+            ("viewCount", Show, [Some(Plays), None, None, None]),
+            ("audienceRating", Show, [None, None, None, None]),
+            ("titleSort", Show, [None, None, None, None]),
+            // An Other Videos library lists movie rows: the films' families on its own listing, and no
+            // other listing (`LibraryType::offered`).
+            ("rating", Video, [Some(Rating), None, None, None]),
+            ("duration", Video, [Some(Duration), None, None, None]),
+            ("unviewedLeafCount", Video, [None, None, None, None]),
         ];
-        for (key, desc, kind) in keyed {
-            assert!(BandFamily::of_sort(key, desc, kind, LibraryType::Primary).is_some(), "{key}: the control");
-            for listing in [LibraryType::Seasons, LibraryType::Episodes, LibraryType::Collections] {
-                assert_eq!(BandFamily::of_sort(key, desc, kind, listing), None, "{key} {desc} {kind:?} {listing:?}");
+        for (key, kind, want) in table {
+            for desc in [false, true] {
+                for (listing, family) in [Primary, Seasons, Episodes, Collections].into_iter().zip(want) {
+                    // the last-episode sort is descending only, in the one listing that has it
+                    let family = if key == "episode.addedAt" && !desc { None } else { family };
+                    assert_eq!(BandFamily::of_sort(key, desc, kind, listing), family, "{key} desc={desc} {kind:?} {listing:?}");
+                }
             }
+        }
+        // the Episodes menu's Title entry (a composite) and Random: the letters' sort, and none
+        for key in [
+            "show.titleSort,season.index:nullsLast,episode.index:nullsLast,episode.originallyAvailableAt:nullsLast,episode.titleSort,episode.id",
+            "random",
+        ] {
+            assert_eq!(BandFamily::of_sort(key, false, Show, Episodes), None, "{key}");
         }
     }
 
@@ -1475,5 +1660,40 @@ mod tests {
         // honest (every item is unlabelled); the caller reads `populated()` to hide the rail.
         let layout = offsets(&rating(), &[0; 6], 12, false).unwrap();
         assert_eq!((layout.lead, layout.tail, layout.populated()), (12, 0, 0));
+    }
+
+    /// The rail draws every family, the calendar ones included; only the families whose edges are
+    /// plain numbers have a ladder that needs no clock, and that ladder is the plan the model makes.
+    #[test]
+    fn the_rail_is_ready_for_every_family_and_only_the_fixed_ones_have_a_ladder_without_a_day() {
+        assert_eq!(BandFamily::ALL.into_iter().filter(|f| f.rail_ready()).count(), BandFamily::ALL.len());
+        for family in BandFamily::ALL {
+            assert!(family.rail_ready(), "{family:?}");
+            assert_eq!(family.fixed_ladder().is_some(), family.basis().is_none(), "{family:?}: a ladder without a day is `no calendar edge`");
+        }
+        for family in [BandFamily::DateAdded, BandFamily::DateViewed, BandFamily::LastEpisodeAdded, BandFamily::Release] {
+            assert_eq!(family.fixed_ladder(), None, "{family:?} needs today and the oldest year, never year 1000");
+        }
+        assert_eq!(BandFamily::Rating.fixed_ladder(), Some(rating()));
+        assert_eq!(BandFamily::Plays.fixed_ladder().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn a_watch_moves_the_play_and_unplayed_counts_and_not_the_rating() {
+        let moving: Vec<BandFamily> = BandFamily::ALL.into_iter().filter(|f| f.moves_with_viewing()).collect();
+        assert_eq!(moving, [BandFamily::DateViewed, BandFamily::Unplayed, BandFamily::Plays]);
+    }
+
+    /// Both directions are laid out at once, each as `offsets` lays it out alone, and a Reject is
+    /// the same whichever the page asks.
+    #[test]
+    fn a_band_rail_holds_both_directions_and_rejects_alike() {
+        let counts = [1, 3, 4, 6, 8, 9];
+        let rail = BandRail::new(&rating(), &counts, 12).unwrap();
+        assert_eq!(rail.listed(true), &offsets(&rating(), &counts, 12, true).unwrap());
+        assert_eq!(rail.listed(false), &offsets(&rating(), &counts, 12, false).unwrap());
+        assert_ne!(rail.listed(true), rail.listed(false));
+        assert_eq!(BandRail::new(&rating(), &[12; 6], 12), Err(Reject::AllEqualTotal));
+        assert_eq!(BandRail::new(&rating(), &[1, 3, 2, 6, 8, 9], 12), Err(Reject::NotMonotone { index: 2 }));
     }
 }
