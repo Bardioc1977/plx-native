@@ -1,4 +1,4 @@
-//! **The sort value of a movie or TV show library grid** (Settings > Libraries > Under posters > Sort
+//! **The sort value of a movie, TV show or Other Videos library grid** (Settings > Libraries > Under posters > Sort
 //! value): while the primary grid is sorted by something other than Title or Random, every poster shows
 //! the one fact it is sorted by on one line under it ([`label`], drawn by `plx_ui::card_row::draw_sort_value`).
 //! The facts come from the listing the grid already holds (`PmsMovie` and its `SortInfo`, which a show
@@ -54,7 +54,7 @@ pub(crate) fn shows_value(key: &str) -> bool {
         | "unviewedLeafCount")
 }
 
-/// The label a movie or show grid draws under `item` while it is sorted by `key` and `today` is the
+/// The label a movie, show or Other Videos grid draws under `item` while it is sorted by `key` and `today` is the
 /// calendar date the application last read (`None`: it has none, and a date reads as month and year).
 /// A show with nothing left to play has a label with no value line (the grid keeps its slot).
 pub(crate) fn label(item: &PmsMovie, key: &str, today: Option<[i32; 3]>) -> TileLabel {

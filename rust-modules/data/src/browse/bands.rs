@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn of_sort_maps_the_applications_sort_keys() {
         use BandFamily::*;
-        use SecKind::{Movie, Show};
+        use SecKind::{Movie, Show, Video};
         let row = |key: &str, desc: bool, kind: SecKind| BandFamily::of_sort(key, desc, kind, LibraryType::Primary);
         for desc in [false, true] {
             assert_eq!(row("rating", desc, Movie), Some(Rating));
@@ -626,11 +626,20 @@ mod tests {
         assert_eq!(row("duration", true, Show), None);
         assert_eq!(row("unviewedLeafCount", true, Movie), None);
         assert_eq!(row("episode.addedAt", true, Movie), None);
+        // An Other Videos library lists movie rows, so it has the films' families and not the shows'.
+        for desc in [false, true] {
+            for key in ["rating", "duration", "addedAt", "lastViewedAt", "viewCount", "originallyAvailableAt"] {
+                assert_eq!(row(key, desc, Video), row(key, desc, Movie), "{key} {desc}: Video is a film");
+                assert!(row(key, desc, Video).is_some(), "{key} {desc}");
+            }
+            assert_eq!(row("unviewedLeafCount", desc, Video), None);
+            assert_eq!(row("episode.addedAt", desc, Video), None);
+        }
     }
 
     #[test]
     fn of_sort_leaves_every_other_sort_without_bands() {
-        for kind in [SecKind::Movie, SecKind::Show] {
+        for kind in [SecKind::Movie, SecKind::Show, SecKind::Video] {
             for desc in [false, true] {
                 for key in [
                     "titleSort",
@@ -666,7 +675,9 @@ mod tests {
         let keyed = [
             ("rating", true, SecKind::Show),
             ("rating", false, SecKind::Movie),
+            ("rating", true, SecKind::Video),
             ("duration", true, SecKind::Movie),
+            ("duration", false, SecKind::Video),
             ("addedAt", true, SecKind::Show),
             ("addedAt", false, SecKind::Movie),
             ("lastViewedAt", true, SecKind::Show),

@@ -180,8 +180,8 @@ pub struct LibraryScreen {
     /// `sync` like the layout's episode geometry, so not logical state of its own. The toolbar
     /// reads it: collections take no filters, so FILTER leaves the row while they are listed.
     listed: plx_data::browse::LibraryType,
-    /// The grid shows the sort value under every poster (`registry::sort_info`): a movie or TV show
-    /// library's primary grid with Sort value On, sorted by something that has a value. Read in `sync`, where
+    /// The grid shows the sort value under every poster (`registry::sort_info`): a movie, TV show or Other
+    /// Videos library's primary grid with Sort value On, sorted by something that has a value. Read in `sync`, where
     /// the listing is, and handed to the layout by `relayout`.
     values: bool,
     keys: KeyRegistry,

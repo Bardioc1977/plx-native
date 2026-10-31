@@ -200,7 +200,10 @@ with `X-Plex-Container-Start: 0` and `X-Plex-Container-Size: 0` returns no rows 
 items that satisfy the term as `totalSize`. Measured read-only (GET only, 100 ms apart) by
 `tools/pms-band-probe.py`. **The evidence is one small library of each kind: every verdict below is
 "exact there, not proven at scale"** (edges were data-driven quantiles of the distinct values: four
-per family, two where a family had only three distinct values). VERIFIED means each edge's count
+per family, two where a family had only three distinct values). **No Other Videos (clip) library was
+ever probed:** the app gives one the films' families because its clips are movie rows, and a server
+that ignores a filter there answers every count with the total, which `offsets` rejects
+(`Reject::AllEqualTotal`) and leaves the rail hidden. VERIFIED means each edge's count
 equalled the count derived from the full listing's own values, and the real paged listing was read
 at the first and last edge (`Start=count-1, Size=2`) and straddled the edge there.
 
