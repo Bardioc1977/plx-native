@@ -1,5 +1,7 @@
 //! **The one place a focused poster's caption is read and built** from the Under posters setting
-//! (Settings > Libraries > Under posters), for EVERY poster tile: the Library grid, the Collections
+//! (Settings > Libraries > Under posters), except a movie or TV show library grid showing its sort value (Sort
+//! value On and a sort that is not Title or Random: one value line under every poster,
+//! `registry::sort_info`): the Library grid, the Collections
 //! page, the Watchlist, Home's shelves, the Library's Recommended poster shelves, Search's poster rows,
 //! the person page's filmography, Detail's Related and collection shelves and the Collection screen's
 //! members. (A landscape still or a headshot is not a poster and is not on the policy: the Library's
@@ -34,7 +36,18 @@
 use plx_ui::caption_policy::{caption_lines, CaptionFacts, CaptionPolicy, DetailsKind};
 use plx_ui::cards::TileLabel;
 
-/// The Under posters setting as the caption policy the screens listed in the module doc follow.
+/// Whether library grids sorted by something other than Title or Random show the sort value under
+/// every poster (the Under posters page's Sort value switch), with the same test override as policy().
+pub fn sort_value() -> bool {
+    #[cfg(test)]
+    if let Some(setting) = TEST_UNDER_POSTERS.with(|cell| cell.get()) {
+        return setting.sort_value;
+    }
+    plx_media::route::under_posters().sort_value
+}
+
+/// The standard focused-poster policy; a movie or TV show library grid showing its sort value (Sort value On, sorted
+/// by something other than Title or Random) draws that one line under every poster instead.
 pub fn policy() -> CaptionPolicy {
     #[cfg(test)]
     if let Some(setting) = TEST_UNDER_POSTERS.with(|cell| cell.get()) {
@@ -236,4 +249,49 @@ mod tests {
         assert_eq!(at(true), [Some("The Office".into()), None]);
         assert_eq!(at(false), [None, None]);
     }
+}
+
+pub fn rating_mark(art: plx_data::metadata::RatingArt) -> &'static [plx_ui::widgets::MarkLayer] {
+    use plx_data::metadata::RatingArt as A;
+    use plx_ui::icons::Icon;
+    use plx_ui::widgets::MarkLayer;
+    static FRESH: &[MarkLayer] = &[
+        (Icon::Tomato, plx_ui::theme::RATING_FRESH),
+        (Icon::TomatoCalyx, plx_ui::theme::RATING_LEAF),
+    ];
+    static CERTIFIED: &[MarkLayer] = &[
+        (Icon::Tomato, plx_ui::theme::RATING_CERTIFIED),
+        (Icon::TomatoCalyx, plx_ui::theme::RATING_LEAF),
+    ];
+    static ROTTEN: &[MarkLayer] = &[
+        (Icon::TomatoHollow, plx_ui::theme::RATING_MUTED),
+        (Icon::TomatoCalyx, plx_ui::theme::RATING_MUTED),
+    ];
+    static POPCORN_UP: &[MarkLayer] = &[(Icon::Crowd, plx_ui::theme::RATING_AUDIENCE)];
+    static POPCORN_DOWN: &[MarkLayer] = &[(Icon::Crowd, plx_ui::theme::RATING_MUTED)];
+    match art {
+        A::TomatoFresh => FRESH,
+        A::TomatoCertified => CERTIFIED,
+        A::TomatoRotten => ROTTEN,
+        A::PopcornUpright => POPCORN_UP,
+        A::PopcornSpilled => POPCORN_DOWN,
+        A::Imdb | A::Tmdb => &[],
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn the_sort_value_switch_reads_the_same_thread_override_as_policy() {
+    use plx_plex::plex::session::UnderPosters;
+    for enabled in [false, true] {
+        let setting = UnderPosters { sort_value: enabled, ..UnderPosters::DEFAULT };
+        TEST_UNDER_POSTERS.with(|cell| cell.set(Some(setting)));
+        assert_eq!(sort_value(), enabled);
+        assert_eq!(policy(), crate::registry::caption_policy_of(setting));
+        // The Sort value switch reaches the Library grid only: every other poster surface reads the
+        // Title/Details policy, which is the same value with the switch On or Off.
+        assert_eq!(crate::registry::caption_policy_of(setting),
+            crate::registry::caption_policy_of(UnderPosters { sort_value: !enabled, ..setting }));
+    }
+    TEST_UNDER_POSTERS.with(|cell| cell.set(None));
 }

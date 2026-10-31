@@ -59,7 +59,7 @@ fn the_record_has_one_field_for_each_setting_with_a_legacy_fallback() {
         skip_interval: Some(SkipInterval::Seconds30),
         instant_dpad_seeking: Some(InstantDpadSeeking::On),
         deck_press: Some(DeckPress::Play),
-        under_posters: Some(UnderPosters { title: true, details: UnderPostersDetails::Video }),
+        under_posters: Some(UnderPosters { title: true, details: UnderPostersDetails::Video, sort_value: false }),
         audio_enhancements: Some(AudioEnhancements { boost_dialog: true, normalize_loudness: true }),
         trailer_autoplay: Some(false),
     };
@@ -552,7 +552,7 @@ fn picked_everything() -> ProfilePrefs {
         skip_interval: Some(SkipInterval::Seconds30),
         instant_dpad_seeking: Some(InstantDpadSeeking::On),
         deck_press: Some(DeckPress::Play),
-        under_posters: Some(UnderPosters { title: true, details: UnderPostersDetails::Video }),
+        under_posters: Some(UnderPosters { title: true, details: UnderPostersDetails::Video, sort_value: false }),
         audio_enhancements: Some(AudioEnhancements { boost_dialog: true, normalize_loudness: true }),
         trailer_autoplay: Some(false),
     }
