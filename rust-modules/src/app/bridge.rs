@@ -1482,6 +1482,14 @@ impl Bridge {
         self.store_runner.park_page_reads();
     }
 
+    /// TEST ONLY: run the Library listing's parked page reads on this thread, as the worker that
+    /// [`Bridge::park_page_reads_for_test`] replaced would have (their landings are queued for the
+    /// next pump); returns how many ran.
+    #[cfg(test)]
+    pub(crate) fn run_held_page_reads_for_test(&mut self) -> usize {
+        self.store_runner.run_held_pages()
+    }
+
     /// TEST ONLY: take the jobs the test runner is holding without running them, in the order they
     /// were parked: the kinds an entry's drain started, for a rig that grades the entry and not the
     /// read. The claims their steps raised stay up, as for a worker that has not answered.
