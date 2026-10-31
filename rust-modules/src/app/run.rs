@@ -8463,6 +8463,55 @@ mod lifecycle_regression_tests {
         assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(origin));
     }
 
+    /// **An end stored after a recovery's landing is posted** (#1111). The rig's engine never opens
+    /// its media URL, so the pump flies a recovery; once the worker has posted its landing, the next
+    /// frame's pump drains it and its reload (`reset_session_for_reload`) erases a `SHARED.ended`
+    /// stored in between, in the very frame that would have acted on it. The fixture holds the
+    /// recovery's `/decision` (the second one, the ABR session) until the test lets it go, and the
+    /// test waits for the posted-and-undrained window itself, so the interleaving is forced and not
+    /// left to the scheduler. `end_the_stream` waits for the flight and the Error state, so the end
+    /// it stores belongs to the settled session and the page leaves.
+    #[test]
+    fn end_the_stream_survives_a_posted_recovery_landing() {
+        let _serial = plx_base::testlock::serial();
+        let (gate, held) = mpsc::channel::<()>();
+        let reached = Arc::new(AtomicBool::new(false));
+        let gate_reached = reached.clone();
+        let respond = move |request: &str| {
+            if request.contains("/decision?") && request.contains("-abr-1") {
+                gate_reached.store(true, Ordering::SeqCst);
+                let _ = held.recv_timeout(Duration::from_secs(8));
+            }
+            queue_body(request, false).to_owned()
+        };
+        let Some(mut rig) = Rig::serving_with(respond) else {
+            eprintln!("SKIPPED end_the_stream_survives_a_posted_recovery_landing: \
+                lifecycle fixture worker thread could not be spawned");
+            return;
+        };
+        let mut t = product_transition(&mut rig.app);
+        settle(&mut rig.app, &mut t);
+        super::super::bridge::open_detail(&mut rig.app.pages, &mut rig.app.bridge, rig.sid, "1", None, None);
+        settle(&mut rig.app, &mut t);
+        let _origin = play_with_a_landing_inside_the_dip(&mut rig, &mut t);
+        // A renamed ABR session id would leave the gate unreached and the forcing a no-op: fail loudly.
+        poll_until("the recovery's /decision never reached the gate (is the ABR session id still `-abr-1`?)", || {
+            reached.load(Ordering::SeqCst)
+        });
+        assert!(plx_media::route::recovery_flight_outstanding(), "premise: the flight is held at the server");
+        gate.send(()).unwrap();
+        poll_until("the recovery's worker never posted its landing", plx_media::route::claim_landing_posted_for_test);
+        // The window: the landing is posted and undrained. The next frame's pump drains it BEFORE the
+        // app reads `ended`.
+        plx_media::player::SHARED.ended.store(true, Ordering::Relaxed);
+        settle(&mut rig.app, &mut t);
+        assert!(
+            rig.app.route().same_instance(&detail_arg(rig.sid)),
+            "end of stream landed on {:?}, not the detail page",
+            rig.app.route().id(),
+        );
+    }
+
     /// A session started straight from Home (the hero's Play, or a deck tile in Play mode) has no
     /// detail page in between, so the page the session returns to is Home itself — the same entry,
     /// with its memory.
