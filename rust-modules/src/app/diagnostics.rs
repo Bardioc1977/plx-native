@@ -3395,22 +3395,18 @@ mod tests {
         assert_eq!(mb(3 * 1024 * 1024 * 1024), "3.00 GB");
     }
 
-    /// An unreadable `os_info.json` must say so rather than print a plausible version — the panel
-    /// exists to identify firmware, so a confident wrong answer is worse than none. (The parse
-    /// itself is pinned in `webos.rs`; this pins the SENTENCE the panel prints.)
-    #[test]
-    fn an_unknown_firmware_is_named_as_unknown() {
+    /// The diagnostics header for a player with NO session, built under the state that precondition
+    /// means: `player::state()` derives from the pump's `pb_state` and the route's refusal flags,
+    /// and the hostsim engine tests drive the real pump, which stores `Error` on a refused
+    /// Load/Play, without restoring it. Establishes that state and hands back whatever was there
+    /// (see `[[test-suite-global-pollution]]`). The caller holds `serial()`.
+    ///
+    /// `state()` ranks four more inputs above `pb_state` (a seek in flight, the claim hold, a
+    /// pending resolve, an Engine-less flight); the first two are plain globals a bystander can
+    /// leave set, so they are established here too and handed back.
+    fn header_with_no_session() -> [String; 2] {
+        plx_base::testlock::assert_held("the diagnostics header's no-session state");
         let mut ps = plx_media::route::PlaybackSession::IDLE;
-        let _g = plx_base::testlock::serial();
-        // "No session" is a PRECONDITION on three crate globals, not a property of a default
-        // `Diag`: `player::state()` derives from the pump's `pb_state` and the route's refusal
-        // flags, and the hostsim engine tests drive the real pump — which stores `Error` on a
-        // refused Load/Play — without restoring it. Establish the state this test asserts about,
-        // and hand back whatever was there (see `[[test-suite-global-pollution]]`).
-        //
-        // `state()` ranks four more inputs above `pb_state` (a seek in flight, the claim hold, a
-        // pending resolve, an Engine-less flight); the first two are plain globals a bystander can
-        // leave set, so they are established here too and handed back.
         let prev = plx_media::player::swap_state_for_test(plx_media::player::PlaybackState::Idle);
         let was_seeking = plx_media::player::SHARED.seeking.swap(false, std::sync::atomic::Ordering::Relaxed);
         plx_media::player::claim_hold::clear();
@@ -3418,6 +3414,34 @@ mod tests {
         let head = header(&ps, &plx_media::player::Diag::default(), 1_000);
         plx_media::player::SHARED.seeking.store(was_seeking, std::sync::atomic::Ordering::Relaxed);
         plx_media::player::restore_state_for_test(prev);
+        head
+    }
+
+    /// `SHARED.start_queued` set to a value for the length of a scope; the previous value comes
+    /// back when it drops, on a failing assertion too.
+    struct QueuedStart {
+        was: bool,
+    }
+
+    impl QueuedStart {
+        fn set(value: bool) -> Self {
+            Self { was: plx_media::player::SHARED.start_queued.swap(value, std::sync::atomic::Ordering::Relaxed) }
+        }
+    }
+
+    impl Drop for QueuedStart {
+        fn drop(&mut self) {
+            plx_media::player::SHARED.start_queued.store(self.was, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// An unreadable `os_info.json` must say so rather than print a plausible version — the panel
+    /// exists to identify firmware, so a confident wrong answer is worse than none. (The parse
+    /// itself is pinned in `webos.rs`; this pins the SENTENCE the panel prints.)
+    #[test]
+    fn an_unknown_firmware_is_named_as_unknown() {
+        let _g = plx_base::testlock::serial();
+        let head = header_with_no_session();
         // The firmware rides the IDENTITY line now (head[0]); head[1] is the verdict, and the two
         // being one array is what stops the firmware taking the verdict's slot again.
         let line = &head[0];
@@ -3438,6 +3462,18 @@ mod tests {
             head[1]
         );
         assert_eq!(head[1], "Idle", "a default Diag with no session is Idle");
+    }
+
+    /// `SHARED.start_queued` is a process-global mirror that every `PlayerAdapter` writes from its
+    /// own release machine, so a start another test left queued shows through `player::state()` as
+    /// `Resolving` (the pending-resolve rank sits above `pb_state`). A header for "no session" must
+    /// not depend on it.
+    #[test]
+    fn a_leftover_queued_start_does_not_change_the_firmware_line() {
+        let _g = plx_base::testlock::serial();
+        let _queued = QueuedStart::set(true);
+        let head = header_with_no_session();
+        assert_eq!(head[1], "Idle", "a start queued by another test must not read as a resolve");
     }
 }
 
