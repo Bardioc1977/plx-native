@@ -6813,6 +6813,22 @@ mod lifecycle_regression_tests {
         plx_media::player::SHARED.ended.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// What an end-of-stream assertion prints beside its own message: the inputs the frame's
+    /// end-of-stream branch and the page that should have left depend on, read when the assertion
+    /// fails (the end the app saw, the playback state, whether an engine stands, whether a recovery
+    /// flight is still out, and the navigation still pending). A failure that this identifies is a
+    /// reading of the state, not a guess.
+    fn eos_state(app: &App) -> String {
+        format!(
+            "ended={}, state={:?}, engine started={}, recovery flight outstanding={}, pending navigation={:?}",
+            plx_media::player::ended(),
+            plx_media::player::state(&app.player.session),
+            plx_media::player::is_started(),
+            plx_media::route::recovery_flight_outstanding(),
+            app.pages.nav.tabs.stack.pending_dest().map(|arg| arg.id()),
+        )
+    }
+
     /// `settle` for the frames after BACK from the player to Home: the page dip may wait dark at its
     /// floor for the hubs refetch for up to `CW_RETURN_HOLD_MS` (300 ms of frame time, 19 frames),
     /// and a stop that is still in flight keeps the refetch from being issued, so the whole bound
@@ -7185,7 +7201,7 @@ mod lifecycle_regression_tests {
         assert!(played.load(Ordering::SeqCst), "premise: the server saw the play");
         end_the_stream(&mut rig.app, &mut t);
         settle(&mut rig.app, &mut t);
-        assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(origin), "EOS returned to the page");
+        assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(origin), "EOS returned to the page ({})", eos_state(&rig.app));
         // The rig's engine decodes no frame, so its own teardown has no final position to report:
         // post the stop it would have (the production path past that point, mail and read-back).
         plx_media::route::scrobble_stop(&mut rig.app.player.session, Some(("1".into(), 60_000, 60_000)), None);
@@ -8083,7 +8099,7 @@ mod lifecycle_regression_tests {
         play_from_here(&mut rig, &mut t);
         end_the_stream(&mut rig.app, &mut t);
         settle(&mut rig.app, &mut t);
-        assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(origin), "the end returned to the Library");
+        assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(origin), "the end returned to the Library ({})", eos_state(&rig.app));
         // the rig has no engine, so teardown posts no `stopped`: the engine's own call, at the end
         plx_media::route::scrobble_stop(&mut rig.app.player.session, Some(("1".into(), 600_000, 600_000)), None);
         plx_media::route::drain_scrobble();
@@ -8457,8 +8473,9 @@ mod lifecycle_regression_tests {
         settle(&mut rig.app, &mut t);
         assert!(
             rig.app.route().same_instance(&detail_arg(rig.sid)),
-            "end of stream landed on {:?}, not the detail page",
+            "end of stream landed on {:?}, not the detail page ({})",
             rig.app.route().id(),
+            eos_state(&rig.app),
         );
         assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(origin));
     }
@@ -8502,13 +8519,16 @@ mod lifecycle_regression_tests {
         gate.send(()).unwrap();
         poll_until("the recovery's worker never posted its landing", plx_media::route::claim_landing_posted_for_test);
         // The window: the landing is posted and undrained. The next frame's pump drains it BEFORE the
-        // app reads `ended`.
-        plx_media::player::SHARED.ended.store(true, Ordering::Relaxed);
+        // app reads `ended`; a bare `SHARED.ended.store(true)` here is erased by that reload (the
+        // pre-#1116 test body). `end_the_stream` steps until the flight is over and the engine is in
+        // Error, and stores the end then.
+        end_the_stream(&mut rig.app, &mut t);
         settle(&mut rig.app, &mut t);
         assert!(
             rig.app.route().same_instance(&detail_arg(rig.sid)),
-            "end of stream landed on {:?}, not the detail page",
+            "end of stream landed on {:?}, not the detail page ({})",
             rig.app.route().id(),
+            eos_state(&rig.app),
         );
     }
 
@@ -8653,8 +8673,9 @@ mod lifecycle_regression_tests {
         assert!(!plx_media::route::play_pending(), "Off must not request the successor");
         assert!(
             rig.app.route().same_instance(&detail_arg(rig.sid)),
-            "end of stream landed on {:?}, not the detail page",
+            "end of stream landed on {:?}, not the detail page ({})",
             rig.app.route().id(),
+            eos_state(&rig.app),
         );
         assert_eq!(rig.app.pages.nav.top_page().map(|e| e.id), Some(origin));
     }
