@@ -107,6 +107,38 @@ impl<H: LibraryLike> plx_ui::master_detail::KeyRegion<H> for Regions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Readout { Loading, Empty, Failed, Grid }
 
+/// **Whether the grid shows the sort value under its posters**: the Sort value switch is On and the
+/// listing is a movie, TV show or Other Videos library's PRIMARY grid (not its Seasons, Episodes or
+/// Collections; an Other Videos clip is a movie row and carries the same fields),
+/// sorted by a criterion the value table words (`sort_key`: the current sort's key, `None` before the
+/// listing declares one). Title, Random and a sort a later server declares keep the captions. An
+/// exhaustive match on the kind, not a wildcard: a library kind added later must decide for itself.
+fn shows_sort_values(kind: SecKind, listed: plx_data::browse::LibraryType, switch_on: bool, sort_key: Option<&str>) -> bool {
+    let kind_has_values = match kind { SecKind::Movie | SecKind::Video | SecKind::Show => true };
+    kind_has_values && listed == plx_data::browse::LibraryType::Primary && switch_on
+        && sort_key.is_some_and(crate::registry::sort_info::shows_value)
+}
+
+#[cfg(test)]
+#[test]
+fn sort_values_show_on_a_movie_show_or_video_primary_grid_with_the_switch_on_and_a_worded_sort() {
+    use plx_data::browse::LibraryType;
+    for kind in [SecKind::Movie, SecKind::Video, SecKind::Show] {
+        assert!(shows_sort_values(kind, LibraryType::Primary, true, Some("addedAt")), "{kind:?}");
+        assert!(shows_sort_values(kind, LibraryType::Primary, true, Some("movie.addedAt:desc")), "{kind:?} scoped");
+        for listed in [LibraryType::Seasons, LibraryType::Episodes, LibraryType::Collections] {
+            assert!(!shows_sort_values(kind, listed, true, Some("addedAt")), "{kind:?} {listed:?} keeps its captions");
+        }
+        assert!(!shows_sort_values(kind, LibraryType::Primary, false, Some("addedAt")), "{kind:?}: the switch is Off");
+        for key in ["titleSort", "random", "futureServerSort", "episode.addedAt", "episode.addedAt:desc"] {
+            assert!(!shows_sort_values(kind, LibraryType::Primary, true, Some(key)), "{kind:?} {key}");
+        }
+        assert!(!shows_sort_values(kind, LibraryType::Primary, true, None), "{kind:?}: no sort declared yet");
+    }
+    // The show-only criterion reads on a show library and is what the server declares for it.
+    assert!(shows_sort_values(SecKind::Show, LibraryType::Primary, true, Some("unviewedLeafCount")));
+}
+
 fn readout(table: SecFetch, sections: usize, fetch: SecFetch, total: i64) -> Readout {
     if total < 0 {
         match table {
@@ -148,6 +180,10 @@ pub struct LibraryScreen {
     /// `sync` like the layout's episode geometry, so not logical state of its own. The toolbar
     /// reads it: collections take no filters, so FILTER leaves the row while they are listed.
     listed: plx_data::browse::LibraryType,
+    /// The grid shows the sort value under every poster (`registry::sort_info`): a movie or TV show
+    /// library's primary grid with Sort value On, sorted by something that has a value. Read in `sync`, where
+    /// the listing is, and handed to the layout by `relayout`.
+    values: bool,
     keys: KeyRegistry,
     pair: MasterDetail<RailPart, GridPart, Regions>,
     /// The names on the header row (the library on view among them) and, last, `MORE` when some
@@ -192,6 +228,10 @@ pub struct LibraryScreen {
     /// The total of the library's unfiltered listing the page last saw, keyed by the listing it
     /// belongs to: the "312 of 1,284" read-out's denominator. A projection, not canon.
     unfiltered: Option<((LibrarySectionIdentity, u32, plx_data::browse::LibraryType), i64)>,
+    /// The total the filter in force matched when its listing last landed, with the library and
+    /// terms it was counted under: the read-out's numerator, held while a sort pick reloads the
+    /// listing under the same terms (`header::note_totals`). A projection, not canon.
+    filtered: Option<(header::FilterKey, i64)>,
     /// A library was just chosen with OK: the page seats the name the reader pressed and shows the
     /// top of the page, where the header is, instead of restoring the new library's scroll.
     switched: bool,
@@ -215,6 +255,9 @@ pub struct LibraryScreen {
     /// The top chrome and the capsule, as drawn: decided from `scroll_target` and run on the swap
     /// clock, in sequence (`plx_ui::scroll_chrome`). Stepped beside the scroll spring.
     handoff: plx_ui::scroll_chrome::Handoff,
+    /// The capsule's three C strings, rebuilt when the library's name, its count or the sort
+    /// differs and not on every frame the capsule is up. A render resource, not canon.
+    capsule_text: plx_ui::scroll_chrome::CapsuleText,
     restore_scroll: Option<f32>,
     viewports: Vec<LibraryViewport>,
     /// The grid key an `Enter::Fresh` names to seat, kept projected until the engine has seated it.
@@ -270,7 +313,7 @@ impl LibraryScreen {
         let layout = Layout::new(false, 0);
         Self {
             listing: Listing::All,
-            entry, instance, kind, wanted_kind: Some(kind), listed: Default::default(), keys: KeyRegistry::default(),
+            entry, instance, kind, wanted_kind: Some(kind), listed: Default::default(), values: false, keys: KeyRegistry::default(),
             pair: MasterDetail::new(
                 RailPart::new(entry, RAIL_GROUP), GridPart::new(entry, GRID_GROUP),
                 MasterDetailLayout { master: Rect::FULL, detail: Rect::FULL },
@@ -278,10 +321,10 @@ impl LibraryScreen {
                 MasterDetailPolicy::new(MasterSide::Right, Follow::Live), Regions,
             ),
             libraries: Vec::new(), folded: Vec::new(), header: plx_ui::page_header::RowCache::new(), header_capsules: plx_ui::widgets::TabStrip::new(), header_pop: plx_ui::widgets::CtlPop::new(), header_swap: plx_ui::page_header::HeaderSwap::new(), header_of: None, collections: CollectionsControl::Unknown, collections_sort: false, collections_asked: None,
-            type_before_collections: None, unfiltered: None,
+            type_before_collections: None, unfiltered: None, filtered: None,
             switched: false, enter_remembered: false, section: None, epoch: None, query: None, grid_reset_pending: false,
             layout, target_layout: layout,
-            scroll: Spring::at(0.0), scroll_target: 0.0, handoff: plx_ui::scroll_chrome::Handoff::new(), restore_scroll: None,
+            scroll: Spring::at(0.0), scroll_target: 0.0, handoff: plx_ui::scroll_chrome::Handoff::new(), capsule_text: plx_ui::scroll_chrome::CapsuleText::default(), restore_scroll: None,
             viewports: Vec::new(), seat_wanted: None,
             pending: PendingTransactions::default(), page_fade: Xfade::new(), grid_fade: Xfade::new(),
             readout: Readout::Loading, live: true, buried: false, initial: true, provisional: None, placed: Vec::new(), sweep_down: true,
@@ -528,6 +571,14 @@ impl LibraryScreen {
                 self.wanted_kind = None;
             }
         }
+        let values = shows_sort_values(self.kind, self.listed, crate::registry::captions::sort_value(),
+            listing.sorts().get(listing.sort_index()).map(|sort| sort.key.as_str()));
+        // The rows' pitch changes with the value lines (60 <-> 40 px) under a grid that is already
+        // laid out and held at a scroll of its own: not a first layout, a restore still to be
+        // applied, or a grid the page is about to send back to its top.
+        let repitched = values != self.values && self.layout.rows > 0
+            && !self.grid_reset_pending && self.restore_scroll.is_none();
+        self.values = values;
         self.refresh_header(cx);
         if let Some(kind) = self.wanted_kind.filter(|kind|
             directory.current().map(|i| directory.sections()[i].kind) != Some(*kind)) {
@@ -552,6 +603,7 @@ impl LibraryScreen {
         }
         self.project_grid(cx);
         self.relayout(cx.focus.current);
+        if repitched { self.reseat_after_repitch(cx.focus.current, cx); }
         // The relayout hands the grid this frame's scroll, and with it the window it will paint:
         // a cell it can paint or step to must hold a key in the frame, so project again (a
         // no-op when the window did not move).
@@ -613,14 +665,14 @@ impl LibraryScreen {
             self.layout.rows
         } else { rows };
         let episodes = self.layout.is_episodes();
-        let persistent = self.kind == SecKind::Movie && self.listed == plx_data::browse::LibraryType::Primary
-            && crate::registry::captions::show_sort_info();
-        let band_h = self.grid_policy().as_ref().map_or(plx_ui::cards::LEGACY_BAND_H, plx_ui::caption_policy::band_h);
+        let values = self.values;
+        let band_h = if values { plx_ui::cards::SORT_VALUE_BAND_H }
+            else { self.grid_policy().as_ref().map_or(plx_ui::cards::LEGACY_BAND_H, plx_ui::caption_policy::band_h) };
         self.layout = if self.readout == Readout::Failed {
             Layout::failed(true)
-        } else { Layout::new(true, rows) }.with_episodes(episodes).with_band_h(band_h).with_sort_info(persistent)
+        } else { Layout::new(true, rows) }.with_episodes(episodes).with_band_h(band_h).with_value_line(values)
             .with_grid_bands(self.pair.detail.band_geometry());
-        self.target_layout = Layout::new(true, rows).with_episodes(episodes).with_band_h(band_h).with_sort_info(persistent)
+        self.target_layout = Layout::new(true, rows).with_episodes(episodes).with_band_h(band_h).with_value_line(values)
             .with_grid_focus(grid_focus.map(|index| index / self.layout.cols()));
         if self.grid_reset_pending {
             self.scroll_target = self.target_layout.row_reveal(0);
@@ -756,6 +808,22 @@ impl LibraryScreen {
         }
         self.relayout(Some(key));
         self.pair.master.refresh(cx, &mut self.keys);
+    }
+
+    /// The Sort value switch changed the rows' pitch under a held scroll, so the scroll is
+    /// in the old pitch's coordinates and the focused row stands elsewhere than it did: 20 px per
+    /// row away, which at a deep row is under the header. Seat that row again the way a focus move
+    /// does ([`reveal`](Self::reveal)'s `row_reveal`), jumping, because the rows themselves changed
+    /// pitch in the same frame; with no focus in the grid, keep the scroll inside the new document.
+    fn reseat_after_repitch<H: LibraryLike>(&mut self, focus: Option<FocusKey<u32>>, cx: &Cx<'_, H>) {
+        let row = focus.filter(|key| key.entry == self.entry)
+            .and_then(|key| self.pair.detail.index_of(key.elem)).map(|index| index / self.layout.cols());
+        if let Some(row) = row {
+            self.scroll_target = self.target_layout.row_reveal(row) - self.pair.detail.pending_shift(cx);
+        }
+        self.scroll_target = self.scroll_target.clamp(0.0, self.target_layout.max_scroll());
+        self.scroll.jump(self.scroll_target);
+        self.relayout(focus);
     }
 
     fn follow<H: LibraryLike>(&mut self, elem: u32, cx: &Cx<'_, H>, fx: &mut Effects<'_, H>) {

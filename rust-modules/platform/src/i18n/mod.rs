@@ -172,9 +172,28 @@ impl LocaleContext {
         let d = icu_calendar::Date::try_new_gregorian(year, month, day).ok()?;
         Some(self.date_medium.format(&d).to_string())
     }
+    /// Month and year, the yMMM skeleton in the interface language with its abbreviated month and
+    /// never a numeric one: "Oct 2024", "out. de 2024", "2024. okt.", "окт. 2024 г." (the unit
+    /// "г." after a no-break space). Hand-written over the same abbreviated month tables as
+    /// [`month_day`](Self::month_day) (ICU's compiled yMMM data answers numerically, "10/2024",
+    /// for the shipped German, Portuguese and Belarusian once the month names are ours), except
+    /// where CLDR spells the skeleton with the STAND-ALONE month (`LLL`) and that differs from the
+    /// form after a day: Russian and Belarusian write "май 2024 г." where a day makes it "9 мая"
+    /// ([`standalone_abbreviated`]). Every other shipped language's yMMM is `MMM y`, or `LLL y`
+    /// over stand-alone names identical to its format ones (Polish).
+    pub fn month_year(&self, year: i32, month: u8) -> Option<String> {
+        icu_calendar::Date::try_new_gregorian(year, month, 1).ok()?;
+        let name = standalone_abbreviated(self.language)[usize::from(month - 1)];
+        Some(match self.language {
+            Language::Hu => format!("{year}. {name}"),
+            Language::Pt => format!("{name} de {year}"),
+            Language::Ru | Language::Be => format!("{name} {year}\u{a0}г."),
+            _ => format!("{name} {year}"),
+        })
+    }
     /// Day and month with no year, for release captions: "12 Mar" / "12 March" in English,
     /// "12 de marzo" in Spanish, "12 mars" / "12 janv." in French, "12 marzo" in Italian,
-    /// "12 de março" in European Portuguese, "12. März" in German, "március 12." in Hungarian, and in Polish, Belarusian and Russian the genitive
+    /// "12 de março" in European Portuguese, "12. März" in German, "március 12." in Hungarian, "12 mrt" / "12 maart" in Dutch, and in Polish, Belarusian and Russian the genitive
     /// after the day ("12 marca", "12 сакавіка", "12 марта") with the abbreviated form for medium. Hand-written tables, not
     /// ICU month data, so no name data is compiled in for the shipped languages. The year is
     /// unknown, so 29 February is a valid day; a day the calendar lacks returns `None`.
@@ -195,8 +214,21 @@ impl LocaleContext {
     }
 }
 
+/// The abbreviated month a language writes with NO day before it (CLDR's stand-alone `LLL`, what
+/// its yMMM skeleton spells), which is [`month_names`]' `Medium` table, the format form that
+/// follows a day, wherever the two agree. Russian and Belarusian are the languages in which they
+/// do not: the format form of May is the genitive "мая" ("9 мая") and the stand-alone one the
+/// nominative "май" ("май 2024 г."), and Russian also writes "март", "июнь" and "июль" in full.
+fn standalone_abbreviated(language: Language) -> &'static [&'static str; 12] {
+    match language {
+        Language::Ru => &RU_STANDALONE,
+        Language::Be => &BE_STANDALONE,
+        other => month_names(other, MonthWidth::Medium).0,
+    }
+}
+
 /// Month data shared by yearless captions and full sort dates. Keep the ICU pattern/number
-/// formatter, but do not link its all-locale Gregorian month-name database for these ten tables.
+/// formatter, but do not link its all-locale Gregorian month-name database for these eleven tables.
 fn month_names(language: Language, width: MonthWidth) -> (&'static [&'static str; 12], &'static str) {
     match (language, width) {
         (Language::En | Language::Pseudo, MonthWidth::Medium) => (&EN_MEDIUM, " "),
@@ -219,6 +251,8 @@ fn month_names(language: Language, width: MonthWidth) -> (&'static [&'static str
         (Language::De, MonthWidth::Long) => (&DE_LONG, ". "),
         (Language::Hu, MonthWidth::Medium) => (&HU_MEDIUM, " "),
         (Language::Hu, MonthWidth::Long) => (&HU_LONG, " "),
+        (Language::Nl, MonthWidth::Medium) => (&NL_MEDIUM, " "),
+        (Language::Nl, MonthWidth::Long) => (&NL_LONG, " "),
     }
 }
 
@@ -355,6 +389,11 @@ const RU_GENITIVE: [&str; 12] = [
     "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября",
     "ноября", "декабря",
 ];
+/// CLDR 47 `ru` stand-alone abbreviated months (the `LLL` of yMMM, `LLL y 'г'.`): it inherits the
+/// format form except "март", "май", "июнь" and "июль", which it spells out.
+const RU_STANDALONE: [&str; 12] = [
+    "янв.", "февр.", "март", "апр.", "май", "июнь", "июль", "авг.", "сент.", "окт.", "нояб.", "дек.",
+];
 
 /// CLDR `hu` abbreviated format months, with their dots.
 const HU_MEDIUM: [&str; 12] =
@@ -378,6 +417,10 @@ const ES_LONG: [&str; 12] = [
 /// CLDR `be` abbreviated format months: three letters, no dot, and "мая" (the genitive) for May.
 const BE_MEDIUM: [&str; 12] =
     ["сту", "лют", "сак", "кра", "мая", "чэр", "ліп", "жні", "вер", "кас", "ліс", "сне"];
+/// CLDR 47 `be` stand-alone abbreviated months (yMMM is `LLL y`): the format form except May, the
+/// nominative "май" (skarnik.by: "май, род. мая"; verbum.by: nominative "май", genitive "мая").
+const BE_STANDALONE: [&str; 12] =
+    ["сту", "лют", "сак", "кра", "май", "чэр", "ліп", "жні", "вер", "кас", "ліс", "сне"];
 /// Genitive, because a day number governs the month in Belarusian ("12 сакавіка").
 const BE_GENITIVE: [&str; 12] = [
     "студзеня", "лютага", "сакавіка", "красавіка", "траўня", "чэрвеня", "ліпеня", "жніўня",
@@ -407,6 +450,13 @@ const DE_MEDIUM: [&str; 12] =
 const DE_LONG: [&str; 12] = [
     "Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober",
     "November", "Dezember",
+];
+/// CLDR `nl` format months: lower case, abbreviated without dots.
+const NL_MEDIUM: [&str; 12] =
+    ["jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
+const NL_LONG: [&str; 12] = [
+    "januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september",
+    "oktober", "november", "december",
 ];
 /// Reject control bytes and invalid tags before they can become HTTP headers. POSIX suffixes
 /// are only used at this input boundary; callers retain canonical BCP-47 tags.
@@ -640,6 +690,19 @@ pub mod msg {
 mod catalog_tests;
 #[cfg(test)]
 mod tests;
+
+/// **Today's calendar date in the operating system's timezone** — the ONE wall-clock read for
+/// calendar display, here in the platform layer and never in a machine (`screens/`, `ui/`,
+/// `data/src/stores`). It reads `SystemTime::now`, so a machine that called it would be reading the
+/// clock, and the `wall` gate does not cover it: that pattern (`Instant::now`, `SystemTime::now`,
+/// `.elapsed()`) names the raw reads and is not run over this crate, so a call to THIS function from
+/// a machine passes it. Its one caller is the application's clock door (`app::clock::today`), which
+/// the loop calls once per frame (the door reads this at most once a minute) and publishes the
+/// date to the screens as an input, the way a frame's time arrives on a `Tick`.
+pub fn local_calendar_today() -> Option<[i32; 3]> {
+    let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    local_calendar_date(i64::try_from(seconds).ok()?)
+}
 
 /// A Unix timestamp as a calendar date in the operating system's timezone. Called while building
 /// cached presentation labels, never by data parsers or once per card per frame. Checked time_t conversion

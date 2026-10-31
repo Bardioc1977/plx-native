@@ -1,140 +1,122 @@
-//! The top bar's glass blur-region budget (track + unfurled chip as one priced pair) and the dynamic glass refresh cadence.
+//! The top bar's glass at any strip width (the chip's name budget keeps the unfurled capsule off the track) and the dynamic glass refresh cadence.
 
 use super::*;
 #[allow(unused_imports)]
 use super::test_support::*;
 
-/// **[`GLASS_TRACK_MAX`] is the budget, solved for width** — asserted rather than asserted-in-a-
-/// comment, because the two numbers live in different files and the one that moves is the
-/// budget. A glass surface is charged for the blurred RECTANGLE: itself grown
-/// [`plx_gfx::gfx::BLUR_MARGIN`] on every side. At the limit width that must still fit
-/// [`plx_gfx::gfx::GLASS_REGION_BUDGET`], which is what a MOVING host carries at 60 fps — and this
-/// bar's host is always moving, since the page under it is what the user is scrolling.
-///
-/// **It is priced as the PAIR now**, and that is the change worth reading twice. This asserted
-/// the track alone against the budget, which was the whole story while the track was the only
-/// glass in the band; [`profile_chip_with`]'s capsule is a second surface of the same material, and
-/// two glass surfaces in one frame converge on ONE grab (`gfx::blur_region_union`) that has to
-/// span both. A track that passes on its own and fails as a pair is exactly the regression this
-/// exists to catch, so the counterexample moved with it: the old one was a 1050-wide track,
-/// which is far outside either limit, where 940 — the width the TRACK alone could afford — is
-/// inside its own budget and outside the band's. That is the boundary the second surface moved.
-/// [`BAND_REGION_BUDGET`] is a restatement of a `cfg(test)` constant, so it can only be kept
-/// honest by an equality. Both halves of [`GLASS_TRACK_MAX`] are also re-derived here through
-/// `gfx::blur_region` itself, which is the check that `BAND_REGION_H`'s clamp assumption still
-/// holds — the constant would silently over-state the region if the bar ever dropped past
-/// `BLUR_MARGIN`.
-#[test]
-fn the_band_budget_restated_here_is_the_measured_one() {
-    assert_eq!(BAND_REGION_BUDGET, plx_gfx::gfx::GLASS_REGION_BUDGET);
-    let (h, y) = (TAB_PILL_H + 2.0 * TAB_TRACK_PAD, TOP_BAR_Y - TAB_TRACK_PAD);
-    let reg = plx_gfx::gfx::blur_region(0.0, y, crate::consts::SCR_W, h);
-    assert_eq!(reg[3], BAND_REGION_H, "the band's real region height");
-}
-
-#[test]
-fn the_whole_bands_glass_fits_one_region_budget() {
-    assert!(
-        band_region(GLASS_TRACK_MAX) <= plx_gfx::gfx::GLASS_REGION_BUDGET,
-        "the band at the limit costs {:.0} px^2, past the {:.0} a moving host carries",
-        band_region(GLASS_TRACK_MAX),
-        plx_gfx::gfx::GLASS_REGION_BUDGET,
-    );
-    assert!(
-        band_region(940.0) > plx_gfx::gfx::GLASS_REGION_BUDGET,
-        "940 was the TRACK's own limit and must be outside the BAND's: {:.0} px^2",
-        band_region(940.0),
-    );
-}
-
-/// **The unfurled chip and the glass track can never touch** — the one thing about this band
-/// that no shader can fix, so it is arithmetic and it is asserted.
+/// **The unfurled chip and the glass track can never touch, at ANY strip width** — the one thing
+/// about this band that no shader can fix, so it is arithmetic and it is asserted.
 ///
 /// There is ONE blur cache. A second glass surface drawn over the first samples that same
 /// snapshot, so an overlap gets no second blur — only a second scrim and a second rim
 /// composited over material that already carries both, which is the doubling `draw_tab_row`'s
 /// source-pass note measures from the other side (a face reading (52,60,38) came out at
-/// (33,38,26) once it contained itself). The capsule is bounded by [`CHIP_NAME_MAX`] and the
-/// track is centred, so the clearance is two constants and needs no font.
+/// (33,38,26) once it contained itself).
 ///
-/// **Be clear about what each half can catch, because as long as [`GLASS_TRACK_MAX`] is SOLVED
-/// for this both are identities.** That is the design working — the constant is the clearance,
-/// so nothing is left to check — and it means the assertions only bite under an EDIT. The first
-/// fires the moment the limit goes back to being a literal (it was `940.0` until 2026-08-21,
-/// which leaves the widest capsule 42px inside the widest track). The second is the opposite
-/// guard, and it is NOT "a wider track would be overlapped" — a track past the limit wears no
-/// glass at all, so it can never be overlapped as glass. It pins the clearance TIGHT: within a
-/// pixel of [`BAND_AIR`] and not an arbitrary gulf, so nobody buys safety here by quietly
-/// spending the strip.
-///
-/// The capsule side is the rect [`profile_chip_with`] actually draws ([`chip_cap`]), which is the
-/// half that could have gone wrong on its own: [`CHIP_CAP_MAX_R`] hand-restated those seven
-/// terms until it was made to ask for them.
+/// The track is centred and its width is the strip's, which is data (libraries, languages), so the
+/// clearance cannot be bought by capping the track, as it was until 2026-10-30 (the retired
+/// `GLASS_TRACK_MAX` dropped the owner's 679 px Belarusian strip to the flat capsule). It is the
+/// chip's to keep: [`chip_name_budget`] is the name width the bar leaves room for, the owner elides
+/// to it (`profile_chip_text`), and the capsule drawn is [`chip_cap`] of the elided name. So this
+/// sweeps the TRACK from a lone pill to the widest the strip draws and asks the three questions
+/// that chain can get wrong, through the same expressions the product draws with and a font-free
+/// measure: the capsule's right edge plus [`BAND_AIR`] stays left of the track's left edge; a bar
+/// that leaves no room draws the closed circle (no name, nothing unfurled); and the clearance is
+/// TIGHT, within one glyph of the room, so nobody buys it by quietly spending the name.
 #[test]
-fn the_unfurled_chip_never_reaches_the_glass_track() {
-    let track_x = |w: f32| (crate::consts::SCR_W - w) * 0.5;
-    let cap = chip_cap(1.0, CHIP_NAME_MAX);
-    assert_eq!(
-        cap.x + cap.w,
-        CHIP_CAP_MAX_R,
-        "priced and drawn are one expression"
-    );
-    assert!(
-        cap.x + cap.w + BAND_AIR <= track_x(GLASS_TRACK_MAX) + 0.01,
-        "the widest capsule ends at {} and the widest glass track starts at {} — they must \
-         clear each other by {}",
-        cap.x + cap.w,
-        track_x(GLASS_TRACK_MAX),
-        BAND_AIR,
-    );
-    // **The cap is TIGHT against whichever constraint binds** — a limit that gives away more
-    // strip than either rule needs is a cost nobody decided to pay. This used to be pinned
-    // within a pixel of `BAND_AIR`, which said the same thing while the touch rule was the one
-    // that bound; since the bar dropped to clear the overscan frame the BUDGET binds instead,
-    // so the clearance above is legitimately wider and the tightness claim has to be made
-    // against the widest track the budget admits.
-    //
-    // Both bounds are RE-DERIVED here rather than read back: the touch one off the rect
-    // `chip_cap` draws, the budget one by searching `band_region` — which asks
-    // `gfx::blur_region_union` itself. Comparing `GLASS_TRACK_MAX` against the two module
-    // constants it is literally the `min` of would be an identity that only NaN could fail, and
-    // it would have missed exactly the error this catches: `GLASS_TRACK_BUDGET_MAX`'s closed
-    // form assumed a union left edge of 0, which stopped being true when the chip moved to
-    // `MARGIN_X`.
-    let touch = crate::consts::SCR_W - 2.0 * (cap.x + cap.w + BAND_AIR);
-    let budget = {
-        let (mut lo, mut hi) = (0.0f32, crate::consts::SCR_W);
-        for _ in 0..40 {
-            let mid = 0.5 * (lo + hi);
-            if band_region(mid) <= plx_gfx::gfx::GLASS_REGION_BUDGET {
-                lo = mid;
-            } else {
-                hi = mid;
+fn the_unfurled_chip_never_reaches_the_glass_track_at_any_strip_width() {
+    let measure = crate::fixture::FixtureMeasure;
+    // one ASCII glyph of `FixtureMeasure` at the chip's rung: the finest the elision can land
+    let glyph = theme::size::BODY as f32 * 0.5;
+    // no spaces: `elide_by` trims a cut that lands on one, which would cost the tightness check
+    // a second glyph for a reason that is not the budget's
+    let long = "Abcdefghij".repeat(8);
+    let long = long.as_str();
+    let circle = chip_cap(0.0, 0.0);
+    let widest = TAB_VIEW_MAX + 2.0 * TAB_TRACK_PAD;
+    let (mut no_name, mut named, mut clipped) = (0, 0, 0);
+    let mut w = TAB_ICON_PILL_W + 2.0 * TAB_TRACK_PAD;
+    while w <= widest + 0.01 {
+        let track_left = (crate::consts::SCR_W - w) * 0.5;
+        let budget = chip_name_budget(w);
+        assert!(
+            budget == 0.0 || (CHIP_NAME_MIN..=CHIP_NAME_MAX).contains(&budget),
+            "track {w}: a budget of {budget} is neither no name nor a usable one"
+        );
+        for label in [long, "Guest", ""] {
+            let (_, name, name_w) = profile_chip_text(label, "G", budget, &measure);
+            let cap = chip_cap(1.0, name_w);
+            assert!(
+                name_w <= budget + 0.01,
+                "track {w}: \"{label}\" came out {name_w} wide against a budget of {budget}"
+            );
+            assert!(
+                cap.x + cap.w + BAND_AIR <= track_left + 0.01,
+                "track {w}: the unfurled capsule ends at {} and the track starts at {track_left} \
+                 — they must clear each other by {BAND_AIR}",
+                cap.x + cap.w,
+            );
+            if budget == 0.0 || label.is_empty() {
+                assert!(name.as_bytes().is_empty(), "track {w}: no room, no name (\"{label}\")");
+                assert_eq!((name_w, cap), (0.0, circle), "track {w}: a nameless chip is the closed circle");
             }
         }
-        lo
-    };
-    let want = touch.min(budget);
-    assert!(
-        (GLASS_TRACK_MAX - want).abs() <= 1.0,
-        "the cap is {GLASS_TRACK_MAX} where the binding constraint allows {want} \
-         (touch {touch}, budget {budget})",
-    );
-    assert!(
-        budget < touch,
-        "the BUDGET is what binds today — if that flips, so does the note above"
-    );
-    // the capsule only ever grows RIGHTWARD off a fixed edge, which is what lets one number
-    // stand for the band at every point of the unfurl (see `band_region`).
-    for e in [0.0, 0.25, 0.5, 0.75, 1.0] {
-        let c = chip_cap(e, CHIP_NAME_MAX);
-        assert_eq!(
-            (c.x, c.y, c.h),
-            (cap.x, cap.y, cap.h),
-            "only the width moves"
-        );
-        assert!(c.w <= cap.w + 0.01, "the rest capsule is the widest");
+        // the capsule only ever grows RIGHTWARD off a fixed edge and only to the name's width
+        let (_, _, long_w) = profile_chip_text(long, "G", budget, &measure);
+        for e in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let c = chip_cap(e, long_w);
+            assert_eq!((c.x, c.y, c.h), (circle.x, circle.y, circle.h), "only the width moves");
+            assert!(c.w >= circle.w - 0.01 && c.w <= chip_cap(1.0, long_w).w + 0.01);
+        }
+        if budget == 0.0 {
+            no_name += 1;
+        } else {
+            named += 1;
+            // TIGHT: while the bar is what limits the name (not the ceiling), the slack left
+            // between the capsule and the AIR is under one glyph
+            let cap = chip_cap(1.0, long_w);
+            if budget < CHIP_NAME_MAX {
+                clipped += 1;
+                let slack = track_left - BAND_AIR - (cap.x + cap.w);
+                assert!(
+                    slack < glyph + 0.01,
+                    "track {w}: {slack} px of room unspent (a glyph is {glyph})"
+                );
+            }
+        }
+        w += 1.0;
     }
+    assert!(no_name > 0, "the widest strip must leave the chip no name, or the sweep never met that case");
+    assert!(clipped > 0, "some strips must be what limits the name, or the sweep never met that case");
+    assert!(named > 0, "some strips must leave the chip a name");
+}
+
+/// The ceiling is the shipped bar's budget: the Belarusian strip (679 px, the widest of the shipped
+/// locales: Russian, the next, is 666 px, 13 px narrower, by the shipped font's advances) and every
+/// narrower one keep the whole [`CHIP_NAME_MAX`], so the room arithmetic only ever bites on a strip
+/// far past anything shipped. Pinned so a change to the chip's gap, tail or frame that quietly
+/// shrinks every profile name on the TV is a test failure and not a surprise.
+#[test]
+fn the_shipped_strips_leave_the_chip_its_whole_name_budget() {
+    let belarusian = [168.0, 144.0, 167.0, TAB_ICON_PILL_W, TAB_ICON_PILL_W];
+    let english = [126.0, 146.0, 176.0, TAB_ICON_PILL_W, TAB_ICON_PILL_W];
+    for widths in [&belarusian[..], &english[..]] {
+        assert_eq!(chip_name_budget(tab_track_w(widths)), CHIP_NAME_MAX);
+    }
+    assert_eq!(chip_name_budget(0.0), CHIP_NAME_MAX, "no strip at all constrains nothing");
+}
+
+/// A nameless chip has nothing to unfurl for, so every unfurl of [`chip_cap`] is the closed circle,
+/// and a named chip still grows rightward.
+#[test]
+fn a_chip_with_no_name_stays_the_closed_circle_and_a_named_one_unfurls() {
+    let circle = chip_cap(0.0, 0.0);
+    assert_eq!(circle.w, circle.h, "the resting surround is circular");
+    for e in [0.0, 0.5, 1.0] {
+        assert_eq!(chip_cap(e, 0.0), circle, "no name, no unfurl (e = {e})");
+    }
+    assert!(chip_cap(1.0, 40.0).w > circle.w, "a name unfurls the capsule");
+    assert_eq!(chip_cap(1.0, CHIP_NAME_MAX), CHIP_CAP_MAX);
 }
 
 /// The unfurl fades the whole FACE, and the two rim weights are the half that matters.
@@ -197,33 +179,104 @@ fn the_profile_chip_has_a_round_surround_at_rest_and_only_widens_on_focus() {
     );
 }
 
-/// The width rule is the only refusal a SECTION TABLE can trip on its own, so it has to hold
-/// for the strip the product actually draws and give way for one the server could produce.
+/// What [`drawn_strip`] read off one draw of the shared strip.
+struct DrawnStrip {
+    /// the band published the glass material (the flat capsule publishes none)
+    glass: bool,
+    /// the pills plus the air between them
+    content: f32,
+    /// the track the draw stood on ([`tab_track_w`])
+    track: f32,
+}
+
+/// **DRAW the shared strip for `faces`** (a recording painter, the ground read answered by the
+/// last reading) and report the material the draw published on the band, with the widths it stood
+/// on. [`tab_glass_on`] takes no width, so asking it says nothing about any strip: the band's
+/// published material is what the chip, the account menu's lift and the planner read, and it is
+/// the answer that changes if the draw ever decides the material by width again.
+fn drawn_strip(generation: u32, faces: &[TabFace]) -> DrawnStrip {
+    let _g = serial_for_motion();
+    // the draw calls `gfx::sample_ground`, which reads a band image and so needs a walk; with none
+    // it answers the last reading and copies nothing
+    let labels = TabLabels { generation, faces };
+    let mut strip = StripRender::new();
+    let mut band = TabBand::new();
+    strip.update(labels, 0, TopFocus::Away, DT);
+    strip.draw(labels, Painter::recording(), &mut band);
+    let (content, track) = with_tab_metrics_for(labels, |_, _, w| (tab_content_w(w), tab_track_w(w)));
+    DrawnStrip { glass: band.face().is_some(), content, track }
+}
+
+/// **The Belarusian strip keeps the material** (the regression this file exists for since
+/// 2026-10-30). "Галоўная", "Фільмы", "Серыялы" and the Watchlist and Search marks measure
+/// 132 / 108 / 131 px of bold BODY label on the television, i.e. pills of 168 / 144 / 167 plus two
+/// 60 px marks: a 679 px track, 7 px past the 672 the retired `GLASS_TRACK_MAX` allowed, so the
+/// whole bar fell to the flat capsule on the owner's television the moment the Watchlist pill was
+/// added. (The app's own layout rect for the track reads `620,54,679,76` there; the 676 px a
+/// capture shows is the scrim INSIDE the capsule's 1 px rims, not the track.)
+///
+/// The test DRAWS a strip past that cap ([`drawn_strip`]). The host has no font and measures half
+/// an em a byte, so those television widths cannot be reproduced word for word, and the television's
+/// width cannot be reproduced at all: a host pill is 14 px a byte plus 36, a mark is 60 and the air
+/// is 16, every term even, so no strip the host draws is an odd number of pixels wide and 679 is
+/// odd. The strip drawn has the television's shape (three labels, then the Watchlist and Search
+/// marks) with 27 bytes of label, which is 686 px: 14 px past the retired cap and 7 px past the
+/// television's strip, and the test pins both tracks.
 #[test]
-fn a_normal_strip_keeps_the_material_and_a_long_one_loses_it() {
-    // Home + three libraries + the square Search mark, at the widths `with_tab_metrics`
-    // measures: label + 2 x TAB_PILL_PAD. These are MODEL numbers (hand-picked label widths), not a
-    // measurement; the shipped strip per language is `the_two_type_track_is_measured_per_language_...`.
-    let normal = [126.0, 146.0, 176.0, TAB_ICON_PILL_W];
-    assert!(
-        tab_track_w(&normal) <= GLASS_TRACK_MAX,
-        "the product's own strip is {} wide and must keep the material",
-        tab_track_w(&normal),
-    );
-    let many = [
-        126.0,
-        146.0,
-        176.0,
-        150.0,
-        160.0,
-        140.0,
-        170.0,
-        TAB_ICON_PILL_W,
+fn the_belarusian_five_pill_strip_keeps_the_glass() {
+    /// what the retired `GLASS_TRACK_MAX` was at the end
+    const RETIRED_GLASS_TRACK_MAX: f32 = 672.0;
+    let widths = [168.0, 144.0, 167.0, TAB_ICON_PILL_W, TAB_ICON_PILL_W];
+    assert_eq!(tab_track_w(&widths), 679.0, "the strip the owner's television draws");
+    let faces = [
+        TabFace::Label("Libraries".into()),
+        TabFace::Label("Galleries".into()),
+        TabFace::Label("Playlists".into()),
+        TabFace::Icon(crate::icons::Icon::Bookmark),
+        TabFace::Icon(crate::icons::Icon::Search),
     ];
+    let drawn = drawn_strip(3, &faces);
+    assert_eq!(drawn.track, 686.0, "the host's strip of the television's shape, 27 bytes of label");
     assert!(
-        tab_track_w(&many) > GLASS_TRACK_MAX,
-        "eight pills is {} wide and must drop to flat",
-        tab_track_w(&many),
+        drawn.track > RETIRED_GLASS_TRACK_MAX,
+        "the strip drawn ({} px) must be past the cap that dropped the television's",
+        drawn.track
+    );
+    assert!(drawn.glass, "a {} px track dropped to the flat capsule", drawn.track);
+}
+
+/// **No strip width takes the material away** — a section table can add libraries and a language
+/// can lengthen every label, and the bar must still be glass. This DRAWS the bar ([`drawn_strip`])
+/// for the shipped strip and for one far past [`TAB_VIEW_MAX`], which scrolls inside a track that
+/// stops growing ([`tab_view_w`]), and asks the band what material the draw published: glass for
+/// both. The only refusal left is the `flattabs` experiment.
+#[test]
+fn any_strip_keeps_the_material_including_one_that_scrolls() {
+    let normal = vec![
+        TabFace::Label("Home".into()),
+        TabFace::Label("Movies".into()),
+        TabFace::Label("TV Shows".into()),
+        TabFace::Icon(crate::icons::Icon::Bookmark),
+        TabFace::Icon(crate::icons::Icon::Search),
+    ];
+    // two dozen libraries: far more than the viewport holds, whatever the font's advances
+    let many: Vec<TabFace> = (0..24)
+        .map(|i| TabFace::Label(format!("Library number {i}")))
+        .chain([TabFace::Icon(crate::icons::Icon::Bookmark), TabFace::Icon(crate::icons::Icon::Search)])
+        .collect();
+    let mut widest = 0.0f32;
+    for (generation, faces) in [(1, normal), (2, many)] {
+        let drawn = drawn_strip(generation, &faces);
+        widest = widest.max(drawn.content);
+        assert!(
+            drawn.glass,
+            "a {} px track (content {}) lost the material",
+            drawn.track, drawn.content
+        );
+    }
+    assert!(
+        widest > TAB_VIEW_MAX,
+        "the second strip must outgrow the viewport ({widest} against {TAB_VIEW_MAX}) to mean what it says"
     );
 }
 
@@ -461,104 +514,31 @@ fn full_strip_faces() -> Vec<TabFace> {
     ]
 }
 
-/// The strip of a household with two types in the current UI language: Home, Movies, TV Shows,
-/// the Watchlist mark and Search (`app::chrome::strip_keys`).
-fn two_type_strip_faces() -> Vec<TabFace> {
-    let mut faces = full_strip_faces();
-    faces.remove(3);
-    faces
-}
-
-/// The shipped two-type track and the budget it is charged against, per UI language: MODEL
-/// numbers (the shipped bold face's whole-pixel advances, `ShippedMeasure`), not a television
-/// measurement. 621 px in English, 529-679 across the ten languages, against 672.3: Belarusian is
-/// over the budget today, without any new pill.
-const TWO_TYPE_TRACK: [(&str, f32); 10] = [("en", 621.0), ("de", 529.0), ("es", 582.0), ("fr", 561.0),
-    ("it", 555.0), ("pt", 549.0), ("hu", 659.0), ("ru", 666.0), ("be", 679.0), ("pl", 573.0)];
-
+/// **The strip of all three library types keeps the glass in every language.** The Other Videos
+/// pill widens the bar past what the retired track cap (`GLASS_TRACK_MAX`) allowed in every
+/// language, which is why #599 once recorded a per-language table of who kept the material and who
+/// lost it; the material no longer depends on the strip's width (`tab_glass_on` takes none), so the
+/// test draws the real six-face strip in each shipped language ([`drawn_strip`]) and asks the band
+/// what it published, the same instrument `the_belarusian_five_pill_strip_keeps_the_glass` uses.
 #[test]
-fn the_two_type_track_is_measured_per_language_against_the_budget() {
+fn the_three_type_strip_keeps_the_glass_in_every_language() {
     use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
-    assert!((GLASS_TRACK_MAX - 672.3).abs() < 0.05, "the budget moved: {GLASS_TRACK_MAX}");
-    for language in SHIPPED {
+    for (generation, language) in (100u32..).zip(SHIPPED) {
         let _guard = language_on_this_thread_for_test(language);
-        let tag = language.tag();
-        let track = tab_track_w(&tab_widths(&two_type_strip_faces(), &plx_base::fontcov::advances::ShippedMeasure));
-        let want = TWO_TYPE_TRACK.iter().find(|(t, _)| *t == tag).unwrap_or_else(|| panic!("{tag} is not in the table")).1;
-        assert_eq!(track, want, "{tag}: the two-type track");
-        assert_eq!(tab_glass_on(track), tag != "be", "{tag}: only Belarusian is flat with two types already");
-    }
-    assert_eq!(TWO_TYPE_TRACK.len(), SHIPPED.len());
-}
-
-/// **The translated Other Videos label takes the strip off the glass in every language**: its
-/// 136-197 px of text on top of the two-type track is past the budget everywhere. (Where that
-/// stops being true is a library TITLE short enough, `a_library_title_keeps_the_glass_only_where_the_track_has_room`.)
-/// This pins the consequence so nobody finds it by accident; re-solving the budget is a separate,
-/// measured GPU change. The same arithmetic applies to any other fourth destination (Live TV's
-/// pill, #993): with a short label it keeps the glass in German, French, Italian and Portuguese
-/// and not in English, Hungarian, Russian, Belarusian or Spanish (a narrow miss), on this model; not pinned by a test.
-#[test]
-fn the_translated_other_videos_pill_is_flat_in_every_language() {
-    use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
-    let measure = plx_base::fontcov::advances::ShippedMeasure;
-    for language in SHIPPED {
-        let _guard = language_on_this_thread_for_test(language);
-        let widths = tab_widths(&full_strip_faces(), &measure);
-        assert!(tab_track_w(&widths) > GLASS_TRACK_MAX && !tab_glass_on(tab_track_w(&widths)),
-            "{}: the real strip of three types is {} wide and draws flat", language.tag(), tab_track_w(&widths));
-    }
-    // a bare 60 px mark as a fourth pill does the same where the track is already wide
-    let two_types = [115.0, 134.0, 172.0, TAB_ICON_PILL_W, TAB_ICON_PILL_W];
-    assert_eq!(tab_track_w(&two_types), 621.0, "the English two-type strip");
-    assert!(tab_track_w(&two_types) <= GLASS_TRACK_MAX);
-    let bare_fourth = [115.0, 134.0, 172.0, TAB_ICON_PILL_W, TAB_ICON_PILL_W, TAB_ICON_PILL_W];
-    assert_eq!(tab_track_w(&bare_fourth), 697.0);
-    assert!(tab_track_w(&bare_fourth) > GLASS_TRACK_MAX);
-}
-
-/// **A library title keeps the glass only if it is short enough**, and how short depends on the UI
-/// language because the other pills' words do: at most 91 px of text in German, 71 Portuguese,
-/// 65 Italian, 59 French, 47 Polish, 38 Spanish; never in English, Hungarian, Russian or Belarusian,
-/// whose two-type track leaves no room for a fourth label. `tab_glass_on` is a function of width, so a
-/// rename can flip the material in those six languages; that is a fact of the budget, not a
-/// defect, and it is tested rather than prevented.
-#[test]
-fn a_library_title_keeps_the_glass_only_where_the_track_has_room() {
-    use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
-    let measure = plx_base::fontcov::advances::ShippedMeasure;
-    let thresholds = [("de", Some(91.0)), ("pt", Some(71.0)), ("it", Some(65.0)), ("fr", Some(59.0)),
-        ("es", Some(38.0)), ("en", None), ("hu", None), ("ru", None), ("be", None), ("pl", Some(47.0))];
-    for language in SHIPPED {
-        let _guard = language_on_this_thread_for_test(language);
-        let tag = language.tag();
-        let two = tab_widths(&two_type_strip_faces(), &measure);
-        let want = thresholds.iter().find(|(t, _)| *t == tag).unwrap_or_else(|| panic!("{tag}")).1;
-        let wears_glass = |text: f32| {
-            let mut widths = two.clone();
-            widths.insert(3, text + 2.0 * TAB_PILL_PAD);
-            tab_glass_on(tab_track_w(&widths))
-        };
-        match want {
-            Some(most) => {
-                assert!(wears_glass(most), "{tag}: {most} px of title keeps the glass");
-                assert!(!wears_glass(most + 1.0), "{tag}: {} px does not", most + 1.0);
-            }
-            None => assert!(!wears_glass(0.0), "{tag}: not even an empty label keeps it"),
-        }
+        let drawn = drawn_strip(generation, &full_strip_faces());
+        assert!(drawn.glass, "{}: a {} px track lost the material", language.tag(), drawn.track);
     }
 }
 
-/// **The six-pill strip fits in every shipped language** without scrolling, and the fully unfurled
-/// profile chip clears its left end for an ordinary name. The strip is not one of
-/// `docs/localization.md`'s measured slots, so this is its measurement: the widest label is
-/// Other Videos' (Russian "Другие видео", German "Andere Videos"), measured with the TV's own glyph
-/// advances. The chip's capsule ends at `chip_cap(1.0, name_w)`; the track is centred, so the name
-/// width at which they meet is `track_x - (chip_cap(1.0, 0).right)`. A name wider than that draws
-/// OVER the track's end while the chip holds focus (it is the focused control and draws on top);
-/// the budget for a name is `CHIP_NAME_MAX`, so the overlap is bounded, and this pins how much room
-/// an ordinary name has in the worst language (the issue author's "expanding username overlaps the
-/// wider menu" worry, quantified).
+/// **The six-pill strip fits in every shipped language** without scrolling, and the unfurled
+/// profile chip is left a name's room. The strip is not one of `docs/localization.md`'s measured
+/// slots, so this is its measurement: the widest label is Other Videos' (Russian "Другие видео",
+/// German "Andere Videos"), measured with the TV's own glyph advances. [`chip_name_room`] is the
+/// name width the centred track leaves the capsule (the closed circle, the name's gap and tail and
+/// [`BAND_AIR`] to the track's left end); [`chip_name_budget`] elides the name to it, so a longer
+/// name is cut and never reaches the track. This pins how much room an ordinary name has in the
+/// worst language (the issue author's "expanding username overlaps the wider menu" worry,
+/// quantified).
 #[test]
 fn the_full_strip_fits_every_language_and_leaves_an_ordinary_chip_name_room() {
     use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
@@ -581,18 +561,19 @@ fn the_full_strip_fits_every_language_and_leaves_an_ordinary_chip_name_room() {
             for stop in 0..widths.len() {
                 assert_eq!(tab_scroll_target(&widths, stop, 0.0), 0.0, "{tag}: stop {stop} scrolls the strip");
             }
-            room.push((tag, tab_chip_clearance(&widths)));
+            let track = tab_track_w(&widths);
+            assert_eq!(chip_name_budget(track), chip_name_room(track).min(CHIP_NAME_MAX),
+                "{tag}: the chip's name budget is the room the bar leaves");
+            room.push((tag, chip_name_room(track)));
         }
     }
-    // Measured with the TV's glyph advances: 294 px in Russian (the tightest), 326 in English, so a
-    // name of up to 290 px clears the track in every language and English never overlaps at all
-    // (CHIP_NAME_MAX is 320). The widest names the budget allows overlap by at most 320 - 294 = 26 px
-    // in Russian, which the chip, being the focused control, draws over. Pinned: a wider label that
-    // eats this room fails here instead of on a television.
-    const ORDINARY_NAME_W: f32 = 290.0;
+    // Measured with the TV's glyph advances: about 278 px in Russian (the tightest) with the
+    // translated type word, 310 in English; a library title on the pill spends room only down to
+    // TAB_TITLE_ROOM. So a name of up to TAB_TITLE_ROOM clears the track in every language, and the
+    // widest names the ceiling allows (CHIP_NAME_MAX, 320) are elided by `chip_name_budget` where
+    // the room is less, never drawn over the track.
+    // Pinned: a wider label that eats this room fails here instead of on a television.
     for (tag, clear) in &room {
-        assert!(*clear >= ORDINARY_NAME_W, "{tag}: the chip clears the track up to a {clear:.0} px name");
+        assert!(*clear >= TAB_TITLE_ROOM, "{tag}: the chip clears the track up to a {clear:.0} px name");
     }
-    assert!(room.iter().any(|(tag, clear)| *tag == "en" && *clear >= CHIP_NAME_MAX),
-        "English never overlaps: {room:?}");
 }

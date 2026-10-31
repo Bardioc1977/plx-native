@@ -50,13 +50,15 @@ fn others_w(faces: &[TabFace], index: usize, measure: &dyn plx_machine::machine:
 
 #[test]
 fn the_room_a_title_may_take_is_derived_from_the_chip_room() {
-    assert_eq!(TAB_VIEW_FOR_ROOM, 904.0, "1920 - 2 * (210 + 8 + 290)");
+    assert_eq!(TAB_VIEW_FOR_ROOM, 912.0, "1920 - 2 * (480 + 16 + 8): the capsule of a 270 px name, the air, the pad");
+    // the same width, asked of the chip's own function: a track of this content leaves the room
+    assert_eq!(chip_name_room(TAB_VIEW_FOR_ROOM + 2.0 * TAB_TRACK_PAD), TAB_TITLE_ROOM);
     // raw 247 is capped, then it falls one px per px, then the floor, then nothing
-    assert_eq!(title_budget(541.0, 6), Some(TAB_TITLE_MAX));
-    assert_eq!(title_budget(586.0, 6), Some(202.0));
-    assert_eq!(title_budget(728.0, 6), Some(TAB_TITLE_FLOOR), "exactly the floor is usable");
-    assert_eq!(title_budget(728.5, 6), None, "half a pixel under the floor is not");
-    for hopeless in [760.0, 904.0, 5000.0] {
+    assert_eq!(title_budget(549.0, 6), Some(TAB_TITLE_MAX));
+    assert_eq!(title_budget(586.0, 6), Some(210.0));
+    assert_eq!(title_budget(736.0, 6), Some(TAB_TITLE_FLOOR), "exactly the floor is usable");
+    assert_eq!(title_budget(736.5, 6), None, "half a pixel under the floor is not");
+    for hopeless in [760.0, 912.0, 5000.0] {
         assert_eq!(title_budget(hopeless, 6), None, "{hopeless}: never a non-positive budget");
     }
     assert_eq!(title_budget(0.0, 1), Some(TAB_TITLE_MAX), "a lone pill still has the cap");
@@ -68,7 +70,7 @@ fn the_room_a_title_may_take_is_derived_from_the_chip_room() {
 #[test]
 fn fit_title_face_budget_per_language() {
     let expected = [("en", 240.0), ("de", 240.0), ("es", 240.0), ("fr", 240.0), ("it", 240.0),
-        ("pt", 240.0), ("hu", 209.0), ("ru", 202.0), ("be", 189.0), ("pl", 240.0)];
+        ("pt", 240.0), ("hu", 217.0), ("ru", 210.0), ("be", 197.0), ("pl", 240.0), ("nl", 240.0)];
     for language in SHIPPED {
         let _guard = language_on_this_thread_for_test(language);
         let tag = language.tag();
@@ -83,10 +85,10 @@ fn fit_title_face_budget_per_language() {
     assert_eq!(expected.len(), SHIPPED.len(), "every shipped language is in the table");
 }
 
-/// A 197 px title (German's own "Andere Videos") is whole in every language but Belarusian, where
-/// the room is 189 px: the honest cost of keeping the chip's 290 px.
+/// A 197 px title (German's own "Andere Videos") is whole in every shipped language: Belarusian, the
+/// tightest, leaves exactly 197 px, the cost of keeping the chip's [`TAB_TITLE_ROOM`].
 #[test]
-fn a_197_px_title_fits_every_language_but_belarusian() {
+fn a_197_px_title_fits_every_language() {
     let title = "Andere Videos";
     assert_eq!(text_w(title), 197.0, "the figure the addendum's table is about");
     for language in SHIPPED {
@@ -94,14 +96,7 @@ fn a_197_px_title_fits_every_language_but_belarusian() {
         let tag = language.tag();
         let mut faces = translated_strip();
         assert!(fit_title_face(&mut faces, VIDEO_AT, title, &ShippedMeasure), "{tag}");
-        let face = text_of(&faces[VIDEO_AT]);
-        if tag == "be" {
-            assert!(face.ends_with(ELLIPSIS) && title.starts_with(face.trim_end_matches(ELLIPSIS)),
-                "{tag}: cut to the room, not {face:?}");
-            assert!(text_w(face) <= 189.0, "{tag}: {face:?} is {} px", text_w(face));
-        } else {
-            assert_eq!(face, title, "{tag}: whole");
-        }
+        assert_eq!(text_of(&faces[VIDEO_AT]), title, "{tag}: whole");
     }
 }
 
@@ -138,18 +133,18 @@ fn check_room(title: &str, tag: &str) {
 #[test]
 fn a_title_budget_below_the_floor_uses_the_generic_label() {
     // 14 px a byte: a pill of n bytes is 14n + 36, and the strip below is [other, video], one gap.
-    // raw = 904 - (14a + 36) - 16 - 36 = 816 - 14a: a = 54 is exactly the floor, 55 is 46 px.
+    // raw = 912 - (14a + 36) - 16 - 36 = 824 - 14a: a = 54 leaves 68 px (a usable room), 55 leaves 54.
     let measure = FixtureMeasure;
     let cramped = |a: usize| vec![TabFace::Label("x".repeat(a)), TabFace::Label("Other Videos".into())];
     let mut faces = cramped(55);
-    assert!(!fit_title_face(&mut faces, 1, "Holiday Clips", &measure), "46 px is under the floor");
+    assert!(!fit_title_face(&mut faces, 1, "Holiday Clips", &measure), "54 px is under the floor");
     assert_eq!(faces, cramped(55), "…and the face keeps the type word, whole");
 
     let mut faces = cramped(54);
-    assert!(fit_title_face(&mut faces, 1, "Holiday Clips", &measure), "exactly the floor is used");
+    assert!(fit_title_face(&mut faces, 1, "Holiday Clips", &measure), "a room over the floor is used");
     let face = text_of(&faces[1]);
-    assert!(face.ends_with(ELLIPSIS) && measure.width_str(face, theme::size::BODY, true) <= TAB_TITLE_FLOOR,
-        "the title is cut to the floor: {face:?}");
+    assert!(face.ends_with(ELLIPSIS) && measure.width_str(face, theme::size::BODY, true) <= 68.0,
+        "the title is cut to its 68 px room: {face:?}");
 }
 
 #[test]
@@ -167,7 +162,7 @@ fn a_non_positive_budget_never_returns_the_unelided_title() {
 
 #[test]
 fn elide_keeps_a_base_letter_when_cut_before_a_combining_mark() {
-    // 14 px a byte: "e" + U+0301 is three bytes (42 px). In a 60 px room "e…" (56) fits and
+    // 14 px a byte: "e" + U+0301 is three bytes (42 px). In a 68 px room "e…" (56) fits and
     // "é…" (84) does not, so the cut falls between the letter and its mark.
     let measure = FixtureMeasure;
     let mut faces = vec![TabFace::Label("x".repeat(54)), TabFace::Label("Other Videos".into())];
